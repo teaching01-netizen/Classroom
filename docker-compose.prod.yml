@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: qr-command-center-app-prod
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    restart: unless-stopped
