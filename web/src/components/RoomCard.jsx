@@ -4,16 +4,16 @@ import { useCountdown } from '../hooks/useCountdown';
 const getStatusColor = (status) => {
   switch (status) {
     case 'Running':
-      return '#4ade80';
+      return 'var(--color-success, #4ade80)';
     case 'Fetching':
-      return '#fbbf24';
+      return 'var(--color-warning, #fbbf24)';
     case 'Warning':
-      return '#f97316';
+      return 'var(--color-warning, #f97316)';
     case 'AuthExpired':
     case 'Stopped':
-      return '#ef4444';
+      return 'var(--color-danger, #ef4444)';
     default:
-      return '#94a3b8';
+      return 'var(--text-secondary, #94a3b8)';
   }
 };
 
@@ -68,26 +68,26 @@ export const RoomCard = ({ room }) => {
 
   return (
     <div style={{
-      background: '#16213e',
-      borderRadius: '12px',
-      padding: '24px',
-      border: '1px solid #2d3a5a',
+      background: 'var(--bg-card, #16213e)',
+      borderRadius: 'var(--radius-lg, 12px)',
+      padding: 'var(--space-lg, 24px)',
+      border: '1px solid var(--border-default, #2d3a5a)',
     }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-md, 16px)' }}>
         <div>
-          <h3 style={{ fontSize: '1.25rem', fontWeight: '600', marginBottom: '4px' }}>
+          <h3 style={{ fontSize: '1.25rem', fontWeight: '600', marginBottom: 'var(--space-xs, 4px)' }}>
             {room.name || room.class_id}
           </h3>
-          <p style={{ fontSize: '0.875rem', color: '#94a3b8' }}>
+          <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary, #94a3b8)' }}>
             Class ID: {room.class_id}
           </p>
         </div>
         <div style={{
-          padding: '4px 12px',
-          borderRadius: '9999px',
+          padding: 'var(--space-xs, 4px) 12px',
+          borderRadius: 'var(--radius-full, 9999px)',
           fontSize: '0.75rem',
           fontWeight: '500',
-          background: `${getStatusColor(room.status)}20`,
+          background: `color-mix(in srgb, ${getStatusColor(room.status)} 12%, transparent)`,
           color: getStatusColor(room.status),
         }}>
           {room.status}
@@ -95,10 +95,10 @@ export const RoomCard = ({ room }) => {
       </div>
 
       {room.qr_url && (
-        <div style={{ textAlign: 'center', marginBottom: '16px' }}>
-          <img src={room.qr_url} alt="QR Code" style={{ width: '200px', height: '200px', borderRadius: '8px' }} />
+        <div style={{ textAlign: 'center', marginBottom: 'var(--space-md, 16px)' }}>
+          <img src={room.qr_url} alt={`QR code for ${room.name || room.class_id}`} style={{ width: '200px', height: '200px', borderRadius: 'var(--radius-md, 8px)' }} />
           {timeLeft !== null && (
-            <p style={{ marginTop: '8px', fontSize: '0.875rem', color: timeLeft <= 10 ? '#ef4444' : '#94a3b8' }}>
+            <p style={{ marginTop: 'var(--space-sm, 8px)', fontSize: '0.875rem', color: timeLeft <= 10 ? 'var(--color-danger, #ef4444)' : 'var(--text-secondary, #94a3b8)' }}>
               Expires in: {timeLeft}s
             </p>
           )}
@@ -107,11 +107,11 @@ export const RoomCard = ({ room }) => {
 
       {room.warning_message && (
         <div style={{
-          background: '#f9731620',
-          color: '#f97316',
+          background: 'color-mix(in srgb, var(--color-warning, #f97316) 12%, transparent)',
+          color: 'var(--color-warning, #f97316)',
           padding: '12px',
-          borderRadius: '8px',
-          marginBottom: '16px',
+          borderRadius: 'var(--radius-md, 8px)',
+          marginBottom: 'var(--space-md, 16px)',
           fontSize: '0.875rem',
         }}>
           ⚠️ {room.warning_message}
@@ -120,34 +120,32 @@ export const RoomCard = ({ room }) => {
 
       {room.error_message && (
         <div style={{
-          background: '#ef444420',
-          color: '#ef4444',
+          background: 'color-mix(in srgb, var(--color-danger, #ef4444) 12%, transparent)',
+          color: 'var(--color-danger, #ef4444)',
           padding: '12px',
-          borderRadius: '8px',
-          marginBottom: '16px',
+          borderRadius: 'var(--radius-md, 8px)',
+          marginBottom: 'var(--space-md, 16px)',
           fontSize: '0.875rem',
         }}>
           ❌ {room.error_message}
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: '8px' }}>
+      <div style={{ display: 'flex', gap: 'var(--space-sm, 8px)' }}>
         {room.status !== 'Running' && room.status !== 'Fetching' && (
           <button
             onClick={handleStart}
             style={{
               flex: 1,
-              padding: '10px 16px',
-              borderRadius: '8px',
+              padding: '10px var(--space-md, 16px)',
+              borderRadius: 'var(--radius-md, 8px)',
               border: 'none',
-              background: '#4ade80',
+              background: 'var(--color-success, #4ade80)',
               color: '#000',
               fontWeight: '500',
               cursor: 'pointer',
               transition: 'background 0.2s',
             }}
-            onMouseEnter={(e) => e.target.style.background = '#22c55e'}
-            onMouseLeave={(e) => e.target.style.background = '#4ade80'}
           >
             Start
           </button>
@@ -158,17 +156,15 @@ export const RoomCard = ({ room }) => {
             onClick={handleStop}
             style={{
               flex: 1,
-              padding: '10px 16px',
-              borderRadius: '8px',
+              padding: '10px var(--space-md, 16px)',
+              borderRadius: 'var(--radius-md, 8px)',
               border: 'none',
-              background: '#ef4444',
+              background: 'var(--color-danger, #ef4444)',
               color: '#fff',
               fontWeight: '500',
               cursor: 'pointer',
               transition: 'background 0.2s',
             }}
-            onMouseEnter={(e) => e.target.style.background = '#dc2626'}
-            onMouseLeave={(e) => e.target.style.background = '#ef4444'}
           >
             Stop
           </button>
@@ -177,17 +173,15 @@ export const RoomCard = ({ room }) => {
         <button
           onClick={handleDelete}
           style={{
-            padding: '10px 16px',
-            borderRadius: '8px',
-            border: '1px solid #ef4444',
+            padding: '10px var(--space-md, 16px)',
+            borderRadius: 'var(--radius-md, 8px)',
+            border: '1px solid var(--color-danger, #ef4444)',
             background: 'transparent',
-            color: '#ef4444',
+            color: 'var(--color-danger, #ef4444)',
             fontWeight: '500',
             cursor: 'pointer',
             transition: 'background 0.2s',
           }}
-          onMouseEnter={(e) => e.target.style.background = '#ef444420'}
-          onMouseLeave={(e) => e.target.style.background = 'transparent'}
         >
           Delete
         </button>
