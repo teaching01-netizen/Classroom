@@ -118,7 +118,7 @@ export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, classNa
             borderRadius: 'var(--radius-xl, 12px)',
             gap: 'var(--space-3, 12px)',
           }}>
-            <div style={{
+            <div aria-hidden="true" style={{
               fontSize: '48px',
               lineHeight: '1',
             }}>
@@ -151,6 +151,7 @@ export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, classNa
             )}
             {onRefresh && (
               <button
+                type="button"
                 onClick={onRefresh}
                 style={{
                   marginTop: 'var(--space-2, 8px)',
@@ -214,6 +215,7 @@ export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, classNa
         )}
 
         <button
+          type="button"
           onClick={onClose}
           style={{
             marginTop: 'var(--space-4, 16px)',
