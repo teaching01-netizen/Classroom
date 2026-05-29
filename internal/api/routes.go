@@ -155,8 +155,4 @@ func stopRoomHandler(rm *service.RoomManager) http.HandlerFunc {
 	}
 }
 
-func wsHandler(rm *service.RoomManager) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "WebSocket not implemented", http.StatusNotImplemented)
-	}
-}
+
