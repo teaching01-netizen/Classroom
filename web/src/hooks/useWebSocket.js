@@ -1,67 +1,83 @@
 import { useEffect, useRef } from 'react';
 import { useRoomStore } from '../store/useRoomStore';
+import { useSessionStore } from '../store/useSessionStore';
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:3000/ws';
+const WS_URL = import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:3001/ws';
+
+export const WS_RECONNECT_EVENT = 'ws-reconnect';
 
 export const useWebSocket = () => {
-  const { setRooms, addRoom, updateRoom, removeRoom, setIsWsConnected } = useRoomStore();
   const wsRef = useRef(null);
+  const reconnectAttempts = useRef(0);
+  const MAX_RECONNECT = 10;
 
   useEffect(() => {
     const connect = () => {
-      console.log('🔌 Connecting to WebSocket at:', WS_URL);
       wsRef.current = new WebSocket(WS_URL);
 
       wsRef.current.onopen = () => {
-        console.log('✅ WebSocket connected');
-        setIsWsConnected(true);
+        const wasReconnecting = reconnectAttempts.current > 0;
+        reconnectAttempts.current = 0;
+        useRoomStore.getState().setIsWsConnected(true);
+        if (wasReconnecting) {
+          useRoomStore.getState().signalReconnect();
+          window.dispatchEvent(new CustomEvent(WS_RECONNECT_EVENT));
+        }
       };
 
       wsRef.current.onmessage = (event) => {
-        console.log('📨 Received WebSocket message:', event.data);
         try {
           const data = JSON.parse(event.data);
-          console.log('📦 Parsed data:', data);
-          
+          const roomActions = useRoomStore.getState();
+          const sessionActions = useSessionStore.getState();
+
           if (data.FullStateSync !== undefined) {
-            console.log('🔄 Setting full state sync with', data.FullStateSync.length, 'rooms');
-            setRooms(data.FullStateSync);
+            roomActions.setRooms(data.FullStateSync);
           } else if (data.RoomCreated !== undefined) {
-            console.log('➕ Room created:', data.RoomCreated);
-            addRoom(data.RoomCreated);
+            roomActions.addRoom(data.RoomCreated);
           } else if (data.RoomUpdated !== undefined) {
-            console.log('🔄 Room updated:', data.RoomUpdated);
-            updateRoom(data.RoomUpdated);
+            roomActions.updateRoom(data.RoomUpdated);
           } else if (data.RoomDeleted !== undefined) {
-            console.log('➖ Room deleted:', data.RoomDeleted);
-            removeRoom(data.RoomDeleted);
-          } else {
-            console.log('⚠️ Unrecognized message format:', data);
+            roomActions.removeRoom(data.RoomDeleted);
+          } else if (data.CHECKIN_UPDATED !== undefined) {
+            sessionActions.updateStudentCheckin(data.CHECKIN_UPDATED.student_id, data.CHECKIN_UPDATED.checked_in);
+          } else if (data.SESSION_STATS_UPDATED !== undefined) {
+            sessionActions.updateSessionStats(data.SESSION_STATS_UPDATED);
           }
         } catch (error) {
-          console.error('❌ Failed to parse WebSocket message:', error, 'Raw data:', event.data);
+          console.error('WebSocket message parse error:', error);
         }
       };
 
       wsRef.current.onclose = (event) => {
-        console.log('🔌 WebSocket disconnected, code:', event.code, 'reason:', event.reason);
-        setIsWsConnected(false);
-        console.log('⏳ Reconnecting in 3 seconds...');
-        setTimeout(connect, 3000);
+        useRoomStore.getState().setIsWsConnected(false);
+        reconnectAttempts.current += 1;
+        if (reconnectAttempts.current <= MAX_RECONNECT) {
+          setTimeout(connect, 3000);
+        }
       };
 
-      wsRef.current.onerror = (error) => {
-        console.error('❌ WebSocket error:', error);
-      };
+      wsRef.current.onerror = () => {};
     };
 
     connect();
 
     return () => {
       if (wsRef.current) {
-        console.log('🔌 Closing WebSocket connection');
         wsRef.current.close();
       }
     };
-  }, [setRooms, addRoom, updateRoom, removeRoom, setIsWsConnected]);
+  }, []);
+};
+
+export const useWsReconnect = (callback) => {
+  const callbackRef = useRef(callback);
+  callbackRef.current = callback;
+
+  useEffect(() => {
+    if (!callback) return;
+    const handler = () => callbackRef.current?.();
+    window.addEventListener(WS_RECONNECT_EVENT, handler);
+    return () => window.removeEventListener(WS_RECONNECT_EVENT, handler);
+  }, [callback]);
 };

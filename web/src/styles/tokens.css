@@ -41,7 +41,7 @@
 }
 
 /* Accessibility: focus-visible styles */
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, [role="button"]:focus-visible {
   outline: 2px solid var(--color-accent, #6366f1);
   outline-offset: 2px;
 }

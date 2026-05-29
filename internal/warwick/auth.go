@@ -2,7 +2,9 @@ package warwick
 
 import (
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -12,7 +14,7 @@ import (
 const (
 	sessionCookieName    = "ASP.NET_SessionId"
 	sessionRefreshBuffer = 5 * time.Minute
-	sessionTTL           = 15 * time.Minute
+	sessionTTL           = 60 * time.Minute
 )
 
 type sessionState struct {
@@ -33,6 +35,7 @@ type WarwickAuth struct {
 func NewWarwickAuth(email, password, loginURL string) *WarwickAuth {
 	return &WarwickAuth{
 		client: &http.Client{
+			Timeout: 30 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -92,18 +95,22 @@ func (a *WarwickAuth) ForceRefresh() (string, error) {
 }
 
 func (a *WarwickAuth) performLogin() (*sessionState, error) {
-	form := fmt.Sprintf("email=%s&password=%s", a.email, a.password)
+	form := url.Values{}
+	form.Set("email", a.email)
+	form.Set("password", a.password)
 	resp, err := a.client.Post(a.loginURL, "application/x-www-form-urlencoded",
-		strings.NewReader(form))
+		strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("login request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
-		body := make([]byte, 4096)
-		n, _ := resp.Body.Read(body)
-		if isLoginPage(string(body[:n])) {
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		if err != nil {
+			return nil, fmt.Errorf("reading login response: %w", err)
+		}
+		if isLoginPage(string(body)) {
 			return nil, fmt.Errorf("Warwick login returned 200 OK but with login page HTML. Check WARWICK_EMAIL and WARWICK_PASSWORD")
 		}
 	}

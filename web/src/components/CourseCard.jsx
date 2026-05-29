@@ -25,6 +25,14 @@ export const CourseCard = ({ course }) => {
   return (
     <div
       onClick={handleClick}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          handleClick();
+        }
+      }}
+      role="button"
+      tabIndex={0}
       style={{
         background: 'var(--bg-card, #16213e)',
         border: '1px solid var(--border-default, #2d3a5a)',

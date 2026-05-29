@@ -10,8 +10,8 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: #1a1a2e;
-  color: #eee;
+  background-color: var(--bg-input, #1a1a2e);
+  color: var(--text-primary, #eee);
 }
 
 code {

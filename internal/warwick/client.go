@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"qr-command-center/internal/domain"
 )
@@ -22,6 +24,7 @@ func NewWarwickQrClient(auth *WarwickAuth) *WarwickQrClient {
 	return &WarwickQrClient{
 		auth: auth,
 		client: &http.Client{
+			Timeout: 30 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -34,6 +37,7 @@ func NewWarwickQrClientWithEndpoint(auth *WarwickAuth, endpoint string) *Warwick
 	return &WarwickQrClient{
 		auth: auth,
 		client: &http.Client{
+			Timeout: 30 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -63,7 +67,7 @@ func (c *WarwickQrClient) FetchQRWithFreshAuth(classID string) (domain.QrRespons
 }
 
 func (c *WarwickQrClient) doFetch(classID string, cookie string) (domain.QrResponse, error) {
-	body := fmt.Sprintf("id=%s", classID)
+	body := fmt.Sprintf("id=%s", url.QueryEscape(classID))
 	req, err := http.NewRequest("POST", c.qrEndpoint, strings.NewReader(body))
 	if err != nil {
 		return domain.QrResponse{}, domain.NewNetworkError(err.Error())
@@ -85,7 +89,10 @@ func (c *WarwickQrClient) doFetch(classID string, cookie string) (domain.QrRespo
 
 	contentType := resp.Header.Get("Content-Type")
 	if strings.Contains(contentType, "text/html") {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			return domain.QrResponse{}, domain.NewNetworkError(fmt.Sprintf("failed to read response body: %v", err))
+		}
 		if isLoginPage(string(respBody)) {
 			return domain.QrResponse{}, domain.ErrAuthExpired
 		}

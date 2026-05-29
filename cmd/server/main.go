@@ -41,6 +41,7 @@ func main() {
 	slog.Info("Warwick authentication successful")
 
 	qrClient := warwick.NewWarwickQrClient(auth)
+	classroomClient := warwick.NewClassroomClient(auth)
 
 	// Connect to database
 	databaseURL := os.Getenv("DATABASE_URL")
@@ -70,11 +71,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	router := api.NewRouter(rm)
+	router := api.NewRouter(rm, classroomClient)
 
 	addr := os.Getenv("SERVER_ADDR")
 	if addr == "" {
-		addr = "0.0.0.0:3000"
+		addr = "0.0.0.0:3001"
 	}
 
 	srv := &http.Server{

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { useCheckins } from '../hooks/useCheckins';
 import { StatsBar } from '../components/StatsBar';
@@ -14,6 +14,13 @@ export function CheckinDetail() {
   const [filterStatus, setFilterStatus] = useState('all');
   const [room, setRoom] = useState(null);
   const [isStarting, setIsStarting] = useState(false);
+  const pollRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     fetch('/api/rooms')
@@ -95,10 +102,32 @@ export function CheckinDetail() {
       }
 
       setShowQR(true);
+
+      pollRef.current = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/rooms/${newRoom.room_id}`);
+          const result = await res.json();
+          if (result.success && result.data.qr_url) {
+            setRoom(result.data);
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+          }
+        } catch {
+          // ignore poll errors
+        }
+      }, 2000);
     } catch (err) {
       alert('Failed to start check-in session');
     } finally {
       setIsStarting(false);
+    }
+  };
+
+  const handleCloseQR = () => {
+    setShowQR(false);
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
     }
   };
 
@@ -252,7 +281,7 @@ export function CheckinDetail() {
         <QRModal
           qrUrl={room?.qr_url || currentSession?.qr_url}
           expiresIn={currentSession?.qr_expires_at}
-          onClose={() => setShowQR(false)}
+          onClose={handleCloseQR}
         />
       )}
     </div>
