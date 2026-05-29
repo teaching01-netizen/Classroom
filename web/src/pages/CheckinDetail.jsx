@@ -117,6 +117,9 @@ export function CheckinDetail() {
     ];
   }, [students]);
 
+  const checkedCount = useMemo(() => students.filter((s) => s.checked_in).length, [students]);
+  const totalCount = students.length;
+
   const handleExportCSV = () => {
     const headers = ['Name', 'Nickname', 'School', 'Status', 'Points'];
     const rows = students.map((s) => [
@@ -347,8 +350,13 @@ export function CheckinDetail() {
       {showQR && (
         <QRModal
           qrUrl={room?.qr_url || currentSession?.qr_url}
-          expiresIn={currentSession?.qr_expires_at}
+          expiresIn={currentSession?.qr_expires_at || room?.expires_at}
           onClose={handleCloseQR}
+          courseId={courseId}
+          roomName={room?.name}
+          className={currentSession?.name}
+          checkedCount={checkedCount}
+          totalCount={totalCount}
         />
       )}
     </div>
