@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -99,13 +100,23 @@ func (r *PgRoomRepository) DeleteRoom(roomID uuid.UUID) error {
 }
 
 func roomStatusToString(status domain.RoomStatus) string {
-	return string(status)
+	return strings.ToLower(string(status))
 }
 
 func stringToRoomStatus(s string) (domain.RoomStatus, error) {
-	switch domain.RoomStatus(s) {
-	case domain.Idle, domain.Running, domain.Fetching, domain.Warning, domain.AuthExpired, domain.Stopped:
-		return domain.RoomStatus(s), nil
+	switch strings.ToLower(s) {
+	case "idle":
+		return domain.Idle, nil
+	case "running":
+		return domain.Running, nil
+	case "fetching":
+		return domain.Fetching, nil
+	case "warning":
+		return domain.Warning, nil
+	case "auth_expired":
+		return domain.AuthExpired, nil
+	case "stopped":
+		return domain.Stopped, nil
 	default:
 		return "", fmt.Errorf("unknown room status: %s", s)
 	}

@@ -1,13 +1,17 @@
-CREATE TYPE room_status AS ENUM (
-    'idle',
-    'running',
-    'fetching',
-    'warning',
-    'auth_expired',
-    'stopped'
-);
+DO $$ BEGIN
+    CREATE TYPE room_status AS ENUM (
+        'idle',
+        'running',
+        'fetching',
+        'warning',
+        'auth_expired',
+        'stopped'
+    );
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
-CREATE TABLE rooms (
+CREATE TABLE IF NOT EXISTS rooms (
     room_id UUID PRIMARY KEY,
     class_id TEXT NOT NULL,
     name TEXT,

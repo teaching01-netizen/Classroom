@@ -1,25 +1,33 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	_ "github.com/lib/pq"
 )
 
 //go:embed migrations/*.sql
 var migrations embed.FS
 
 func NewPool(databaseURL string) (*pgxpool.Pool, error) {
-	return pgxpool.New(nil, databaseURL)
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	// Disable prepared statement cache (required for Supabase pooler)
+	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	return pgxpool.NewWithConfig(context.Background(), config)
 }
 
-func RunMigrations(pool *pgxpool.Pool) error {
-	db, err := sql.Open("pgx", pool.Config().ConnString())
+func RunMigrations(databaseURL string) error {
+	db, err := sql.Open("postgres", databaseURL)
 	if err != nil {
 		return err
 	}
@@ -41,6 +49,13 @@ func RunMigrations(pool *pgxpool.Pool) error {
 	}
 
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		if _, ok := err.(migrate.ErrDirty); ok {
+			// Force past the dirty state — schema already exists from Rust
+			if forceErr := m.Force(1); forceErr != nil {
+				return forceErr
+			}
+			return nil
+		}
 		return err
 	}
 	return nil

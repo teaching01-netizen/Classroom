@@ -57,7 +57,7 @@ func main() {
 	defer pool.Close()
 	slog.Info("Connected to database")
 
-	if err := db.RunMigrations(pool); err != nil {
+	if err := db.RunMigrations(databaseURL); err != nil {
 		slog.Error("Failed to run migrations", "error", err)
 		os.Exit(1)
 	}
