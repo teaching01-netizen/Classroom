@@ -33,7 +33,7 @@ export const QRDisplay = ({ room }) => {
       <h1 style={{ fontSize: '2.5rem', fontWeight: '700', marginBottom: 'var(--space-8, 32px)', color: 'var(--color-text-primary, #111113)' }}>
         {room.name || room.class_id}
       </h1>
-      <img src={room.qr_url} alt="QR Code" style={{ width: 'min(80vw, 520px)', height: 'min(80vw, 520px)', maxWidth: '100%', aspectRatio: '1', borderRadius: '16px', marginBottom: 'var(--space-6, 24px)' }} />
+      <img src={room.qr_url} alt="QR Code" style={{ width: 'min(80vw, 520px)', height: 'auto', maxWidth: '100%', aspectRatio: '1', borderRadius: '16px', marginBottom: 'var(--space-6, 24px)' }} />
       {timeLeft !== null && (
         <div style={{ fontSize: '3rem', fontWeight: '700', color: timeLeft <= 10 ? 'var(--color-danger, #9A3D4A)' : 'var(--color-success, #257348)' }}>
           {timeLeft}s

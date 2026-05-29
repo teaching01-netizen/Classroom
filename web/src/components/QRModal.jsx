@@ -46,7 +46,7 @@ export const QRModal = ({ qrUrl, expiresIn, onClose }) => {
           alt="QR Code"
           style={{
             width: 'min(75vw, 420px)',
-            height: 'min(75vw, 420px)',
+            height: 'auto',
             maxWidth: '100%',
             aspectRatio: '1',
             borderRadius: 'var(--radius-xl, 12px)',

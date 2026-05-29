@@ -103,7 +103,7 @@ export const RoomCard = ({ room }) => {
 
       {room.qr_url && (
         <div style={{ textAlign: 'center', marginBottom: 'var(--space-4, 16px)' }}>
-          <img src={room.qr_url} alt={`QR code for ${room.name || room.class_id}`} style={{ width: 'min(60vw, 240px)', height: 'min(60vw, 240px)', maxWidth: '100%', aspectRatio: '1', borderRadius: 'var(--radius-md, 8px)' }} />
+          <img src={room.qr_url} alt={`QR code for ${room.name || room.class_id}`} style={{ width: 'min(100%, 240px)', height: 'auto', maxWidth: '100%', aspectRatio: '1', borderRadius: 'var(--radius-md, 8px)' }} />
           {timeLeft !== null && (
             <p style={{ marginTop: 'var(--space-2, 8px)', fontSize: '0.875rem', color: timeLeft <= 10 ? 'var(--color-danger, #9A3D4A)' : 'var(--color-text-secondary, #4F5056)' }}>
               Expires in: {timeLeft}s
