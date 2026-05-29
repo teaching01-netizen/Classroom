@@ -62,8 +62,20 @@ func TestFetchErrorToRoomStatus(t *testing.T) {
 func TestRoomTransitionTo(t *testing.T) {
 	room := NewRoom("c1", nil)
 	assert.Equal(t, Idle, room.Status)
-	room.TransitionTo(Running)
+	assert.NoError(t, room.TransitionTo(Running))
 	assert.Equal(t, Running, room.Status)
-	room.TransitionTo(Fetching)
+	assert.NoError(t, room.TransitionTo(Fetching))
 	assert.Equal(t, Fetching, room.Status)
+}
+
+func TestRoomTransitionToInvalid(t *testing.T) {
+	room := NewRoom("c1", nil)
+	assert.Equal(t, Idle, room.Status)
+	err := room.TransitionTo(Fetching)
+	assert.Error(t, err)
+	assert.Equal(t, Idle, room.Status)
+}
+
+func TestCalculateNextFetchDelayZero(t *testing.T) {
+	assert.Equal(t, uint64(0), CalculateNextFetchDelay(0))
 }

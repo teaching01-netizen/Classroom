@@ -37,16 +37,17 @@ func (s *RoomStatus) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+var allowedTransitions = map[RoomStatus][]RoomStatus{
+	Idle:        {Running, Stopped},
+	Running:     {Fetching, Stopped},
+	Fetching:    {Running, Warning, AuthExpired, Stopped},
+	Warning:     {Fetching, Stopped},
+	AuthExpired: {Stopped},
+	Stopped:     {Running},
+}
+
 func (s RoomStatus) CanTransitionTo(next RoomStatus) error {
-	allowed := map[RoomStatus][]RoomStatus{
-		Idle:        {Running, Stopped},
-		Running:     {Fetching, Stopped},
-		Fetching:    {Running, Warning, AuthExpired, Stopped},
-		Warning:     {Fetching, Stopped},
-		AuthExpired: {Stopped},
-		Stopped:     {Running},
-	}
-	for _, valid := range allowed[s] {
+	for _, valid := range allowedTransitions[s] {
 		if next == valid {
 			return nil
 		}
@@ -131,8 +132,12 @@ func NewRoom(classID string, name *string) Room {
 	}
 }
 
-func (r *Room) TransitionTo(next RoomStatus) {
+func (r *Room) TransitionTo(next RoomStatus) error {
+	if err := r.Status.CanTransitionTo(next); err != nil {
+		return err
+	}
 	r.Status = next
+	return nil
 }
 
 type QrTime uint64
