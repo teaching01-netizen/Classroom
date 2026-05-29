@@ -357,6 +357,7 @@ export function CheckinDetail() {
           className={currentSession?.name}
           checkedCount={checkedCount}
           totalCount={totalCount}
+          onRefresh={handleStartCheckin}
         />
       )}
     </div>

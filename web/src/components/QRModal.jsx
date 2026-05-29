@@ -1,8 +1,9 @@
 import React, { useEffect } from 'react';
 import { useCountdown } from '../hooks/useCountdown';
 
-export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, className, checkedCount, totalCount }) => {
+export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, className, checkedCount, totalCount, onRefresh }) => {
   const timeLeft = useCountdown(expiresIn);
+  const isExpired = timeLeft !== null && timeLeft <= 0;
 
   useEffect(() => {
     const handleEscape = (e) => {
@@ -103,44 +104,113 @@ export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, classNa
           </div>
         )}
 
-        <img
-          src={qrUrl}
-          alt="QR Code"
-          style={{
+        {isExpired ? (
+          /* ——— EXPIRED STATE ——— */
+          <div style={{
             width: 'min(75vw, 420px)',
-            height: 'auto',
             maxWidth: '100%',
             aspectRatio: '1',
-            borderRadius: 'var(--radius-xl, 12px)',
-          }}
-        />
-
-        {/* Instructional CTA */}
-        <p style={{
-          marginTop: 'var(--space-3, 12px)',
-          marginBottom: 'var(--space-1, 4px)',
-          fontSize: '14px',
-          color: 'var(--color-text-secondary, #4F5056)',
-        }}>
-          Point your camera at the QR code to check in
-        </p>
-
-        {timeLeft !== null && (
-          <div style={{
-            display: 'inline-flex',
+            display: 'flex',
+            flexDirection: 'column',
             alignItems: 'center',
-            gap: '6px',
-            marginTop: 'var(--space-2, 8px)',
-            padding: '4px 12px',
-            borderRadius: 'var(--radius-full, 9999px)',
-            fontSize: '13px',
-            fontWeight: '500',
-            background: timeLeft <= 10 ? 'color-mix(in srgb, var(--color-danger, #9A3D4A) 12%, transparent)' : 'var(--color-bg-subtle, #F5F5F5)',
-            color: timeLeft <= 10 ? 'var(--color-danger, #9A3D4A)' : 'var(--color-text-secondary, #4F5056)',
+            justifyContent: 'center',
+            background: 'var(--color-bg-subtle, #F5F5F5)',
+            borderRadius: 'var(--radius-xl, 12px)',
+            gap: 'var(--space-3, 12px)',
           }}>
-            {timeLeft <= 10 && <span>⚠️</span>}
-            {timeLeft <= 0 ? 'Expired' : `Expires in ${timeLeft}s`}
+            <div style={{
+              fontSize: '48px',
+              lineHeight: '1',
+            }}>
+              ⏰
+            </div>
+            <div style={{
+              fontSize: '18px',
+              fontWeight: '600',
+              color: 'var(--color-text-primary, #111113)',
+            }}>
+              Check-in period ended
+            </div>
+            <div style={{
+              fontSize: '14px',
+              color: 'var(--color-text-secondary, #4F5056)',
+              textAlign: 'center',
+              maxWidth: '260px',
+            }}>
+              This QR code has expired. Start a new one to continue checking in students.
+            </div>
+            {checkedCount !== undefined && totalCount !== undefined && (
+              <div style={{
+                fontSize: '14px',
+                fontWeight: '500',
+                color: 'var(--color-text-primary, #111113)',
+                marginTop: 'var(--space-1, 4px)',
+              }}>
+                Final: {checkedCount}/{totalCount} checked in
+              </div>
+            )}
+            {onRefresh && (
+              <button
+                onClick={onRefresh}
+                style={{
+                  marginTop: 'var(--space-2, 8px)',
+                  padding: '10px var(--space-6, 24px)',
+                  borderRadius: 'var(--radius-md, 8px)',
+                  border: 'none',
+                  background: 'var(--color-primary-600, #276BF0)',
+                  color: '#fff',
+                  fontWeight: '500',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                }}
+              >
+                Get New QR
+              </button>
+            )}
           </div>
+        ) : (
+          /* ——— ACTIVE STATE (existing) ——— */
+          <>
+            <img
+              src={qrUrl}
+              alt="QR Code"
+              style={{
+                width: 'min(75vw, 420px)',
+                height: 'auto',
+                maxWidth: '100%',
+                aspectRatio: '1',
+                borderRadius: 'var(--radius-xl, 12px)',
+              }}
+            />
+
+            {/* Instructional CTA */}
+            <p style={{
+              marginTop: 'var(--space-3, 12px)',
+              marginBottom: 'var(--space-1, 4px)',
+              fontSize: '14px',
+              color: 'var(--color-text-secondary, #4F5056)',
+            }}>
+              Point your camera at the QR code to check in
+            </p>
+
+            {timeLeft !== null && (
+              <div style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                marginTop: 'var(--space-2, 8px)',
+                padding: '4px 12px',
+                borderRadius: 'var(--radius-full, 9999px)',
+                fontSize: '13px',
+                fontWeight: '500',
+                background: timeLeft <= 10 ? 'color-mix(in srgb, var(--color-danger, #9A3D4A) 12%, transparent)' : 'var(--color-bg-subtle, #F5F5F5)',
+                color: timeLeft <= 10 ? 'var(--color-danger, #9A3D4A)' : 'var(--color-text-secondary, #4F5056)',
+              }}>
+                {timeLeft <= 10 && <span>⚠️</span>}
+                {timeLeft <= 0 ? 'Expired' : `Expires in ${timeLeft}s`}
+              </div>
+            )}
+          </>
         )}
 
         <button
