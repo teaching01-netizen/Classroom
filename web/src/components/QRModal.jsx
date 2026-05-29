@@ -87,7 +87,7 @@ export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, classNa
               <div style={{
                 width: `${totalCount > 0 ? (checkedCount / totalCount) * 100 : 0}%`,
                 height: '100%',
-                background: checkedCount === totalCount ? 'var(--color-success, #257348)' : 'var(--color-primary-600, #276BF0)',
+                background: totalCount > 0 && checkedCount === totalCount ? 'var(--color-success, #257348)' : 'var(--color-primary-600, #276BF0)',
                 borderRadius: 'var(--radius-full, 9999px)',
                 transition: 'width 0.3s ease, background 0.3s ease',
               }} />
