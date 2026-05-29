@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { useCountdown } from '../hooks/useCountdown';
 
-export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, className, ...rest }) => {
+export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, className, checkedCount, totalCount }) => {
   const timeLeft = useCountdown(expiresIn);
 
   useEffect(() => {
@@ -56,6 +56,44 @@ export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, classNa
             {[courseId, roomName].filter(Boolean).join(' · ')}
           </div>
         </div>
+
+        {/* Live stats — checked-in counter */}
+        {(checkedCount !== undefined && totalCount !== undefined) && (
+          <div style={{
+            marginBottom: 'var(--space-4, 16px)',
+            paddingBottom: 'var(--space-3, 12px)',
+            borderBottom: '1px solid var(--color-border, #DCDBDD)',
+          }}>
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: 'var(--space-2, 8px)',
+            }}>
+              <span style={{ fontSize: '14px', fontWeight: '500', color: 'var(--color-text-primary, #111113)' }}>
+                Checked in
+              </span>
+              <span style={{ fontSize: '14px', fontWeight: '600', color: 'var(--color-text-primary, #111113)' }}>
+                {checkedCount}/{totalCount}
+              </span>
+            </div>
+            <div style={{
+              width: '100%',
+              height: '6px',
+              background: 'var(--color-bg-subtle, #F5F5F5)',
+              borderRadius: 'var(--radius-full, 9999px)',
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                width: `${totalCount > 0 ? (checkedCount / totalCount) * 100 : 0}%`,
+                height: '100%',
+                background: checkedCount === totalCount ? 'var(--color-success, #257348)' : 'var(--color-primary-600, #276BF0)',
+                borderRadius: 'var(--radius-full, 9999px)',
+                transition: 'width 0.3s ease, background 0.3s ease',
+              }} />
+            </div>
+          </div>
+        )}
 
         <img
           src={qrUrl}
