@@ -2,6 +2,22 @@ import React from 'react';
 import { useCountdown } from '../hooks/useCountdown';
 
 export const QRDisplay = ({ room }) => {
+  if (!room) {
+    return (
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        minHeight: '100vh',
+        background: 'var(--color-bg-app, #FBFBFB)',
+        color: 'var(--color-text-secondary, #4F5056)',
+      }}>
+        <p style={{ fontSize: '1.5rem' }}>No QR Code Available</p>
+      </div>
+    );
+  }
+
   const timeLeft = useCountdown(room.expires_at);
 
   if (!room.qr_url) {

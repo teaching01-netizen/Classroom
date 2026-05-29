@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { useCountdown } from '../hooks/useCountdown';
 
-export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, className, checkedCount, totalCount }) => {
+export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, className, ...rest }) => {
   const timeLeft = useCountdown(expiresIn);
 
   useEffect(() => {
