@@ -84,13 +84,21 @@ export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, classNa
               borderRadius: 'var(--radius-full, 9999px)',
               overflow: 'hidden',
             }}>
-              <div style={{
-                width: `${totalCount > 0 ? (checkedCount / totalCount) * 100 : 0}%`,
-                height: '100%',
-                background: totalCount > 0 && checkedCount === totalCount ? 'var(--color-success, #257348)' : 'var(--color-primary-600, #276BF0)',
-                borderRadius: 'var(--radius-full, 9999px)',
-                transition: 'width 0.3s ease, background 0.3s ease',
-              }} />
+              <div
+                role="progressbar"
+                aria-valuenow={checkedCount}
+                aria-valuemin={0}
+                aria-valuemax={totalCount}
+                aria-label={`${checkedCount} of ${totalCount} students checked in`}
+                style={{
+                  width: `${totalCount > 0 ? (checkedCount / totalCount) * 100 : 0}%`,
+                  maxWidth: '100%',
+                  height: '100%',
+                  background: totalCount > 0 && checkedCount === totalCount ? 'var(--color-success, #257348)' : 'var(--color-primary-600, #276BF0)',
+                  borderRadius: 'var(--radius-full, 9999px)',
+                  transition: 'width 0.3s ease, background 0.3s ease',
+                }}
+              />
             </div>
           </div>
         )}
