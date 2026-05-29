@@ -20,7 +20,7 @@ export const CourseCard = ({ course }) => {
     navigate(`/courses/${course.course_id}/sessions`);
   };
 
-  const attendancePercent = Math.round(course.avg_attendance_rate * 100);
+  const attendancePercent = Math.min(Math.max(Math.round(course.avg_attendance_rate * 100), 0), 100);
 
   return (
     <div
@@ -59,6 +59,8 @@ export const CourseCard = ({ course }) => {
             e.stopPropagation();
             toggleCourse(course.course_id);
           }}
+          aria-label={isPinned ? 'Unpin course' : 'Pin course'}
+          aria-pressed={isPinned}
           style={{
             background: 'none',
             border: 'none',

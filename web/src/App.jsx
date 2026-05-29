@@ -22,6 +22,14 @@ function PinnedCourseCard({ course }) {
   return (
     <div
       onClick={() => navigate(`/courses/${course.course_id}/sessions`)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          navigate(`/courses/${course.course_id}/sessions`);
+        }
+      }}
+      role="button"
+      tabIndex={0}
       style={{
         background: 'var(--bg-card, #16213e)',
         borderRadius: 'var(--radius-lg, 12px)',
@@ -99,29 +107,32 @@ function PinnedCourseCard({ course }) {
         )}
       </div>
 
-      {course.attendance_rate != null && (
-        <div style={{ marginTop: 'var(--space-md, 16px)' }}>
-          <div style={{
-            height: '4px',
-            borderRadius: '2px',
-            background: 'var(--bg-input, #1a1a2e)',
-            overflow: 'hidden',
-          }}>
+      {course.attendance_rate != null && (() => {
+        const attendancePercent = Math.min(Math.max(Math.round(course.attendance_rate * 100), 0), 100);
+        return (
+          <div style={{ marginTop: 'var(--space-md, 16px)' }}>
             <div style={{
-              height: '100%',
-              width: `${Math.round(course.attendance_rate * 100)}%`,
+              height: '4px',
               borderRadius: '2px',
-              background: course.attendance_rate >= 0.7 ? 'var(--color-success, #4ade80)' : course.attendance_rate >= 0.4 ? 'var(--color-warning, #fbbf24)' : 'var(--color-danger, #ef4444)',
-            }} />
+              background: 'var(--bg-input, #1a1a2e)',
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                height: '100%',
+                width: `${attendancePercent}%`,
+                borderRadius: '2px',
+                background: attendancePercent >= 70 ? 'var(--color-success, #4ade80)' : attendancePercent >= 40 ? 'var(--color-warning, #fbbf24)' : 'var(--color-danger, #ef4444)',
+              }} />
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
 
 function HomePage() {
-  const { courses, isLoading } = useCourses();
+  const { courses, isLoading, error } = useCourses();
   const pinnedCourseIds = usePinnedCoursesStore((state) => state.pinnedCourseIds);
   const cleanupStalePins = usePinnedCoursesStore((state) => state.cleanupStalePins);
 
@@ -137,6 +148,24 @@ function HomePage() {
 
   return (
     <main style={{ padding: 'var(--space-xl, 32px)' }}>
+      {error && (
+        <div style={{
+          padding: 'var(--space-lg, 24px)',
+          background: 'color-mix(in srgb, var(--color-danger, #ef4444) 12%, transparent)',
+          color: 'var(--color-danger, #ef4444)',
+          borderRadius: 'var(--radius-md, 8px)',
+          marginBottom: 'var(--space-lg, 24px)',
+        }}>
+          Failed to load courses: {error}
+        </div>
+      )}
+
+      {isLoading && (
+        <div style={{ textAlign: 'center', padding: '64px', color: 'var(--text-secondary, #94a3b8)' }}>
+          Loading courses...
+        </div>
+      )}
+
       <div style={{
         display: 'grid',
         gridTemplateColumns: 'repeat(auto-fill, minmax(min(350px, 100%), 1fr))',
@@ -147,7 +176,7 @@ function HomePage() {
         ))}
       </div>
 
-      {pinnedCourses.length === 0 && !isLoading && (
+      {!isLoading && !error && pinnedCourses.length === 0 && (
         <div style={{ textAlign: 'center', padding: '64px', color: 'var(--text-secondary, #94a3b8)' }}>
           <p style={{ fontSize: '1.25rem', marginBottom: '16px' }}>No pinned courses yet</p>
           <p style={{ marginBottom: '24px' }}>Browse your courses and pin the ones you use regularly</p>
