@@ -236,9 +236,9 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 
 					rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
 
-					if state.room.Status == domain.AuthExpired {
-						return
-					}
+				if roomCopy.Status == domain.AuthExpired {
+					return
+				}
 					continue
 				}
 
