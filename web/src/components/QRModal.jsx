@@ -33,9 +33,9 @@ export const QRModal = ({ qrUrl, expiresIn, onClose }) => {
     >
       <div
         style={{
-          background: 'var(--bg-card, #16213e)',
+          background: 'var(--color-bg, #FFFFFF)',
           borderRadius: '16px',
-          padding: 'var(--space-xl, 32px)',
+          padding: 'var(--space-8, 32px)',
           textAlign: 'center',
           animation: 'scaleIn 0.2s ease',
         }}
@@ -47,16 +47,16 @@ export const QRModal = ({ qrUrl, expiresIn, onClose }) => {
           style={{
             width: '300px',
             height: '300px',
-            borderRadius: 'var(--radius-lg, 12px)',
+            borderRadius: 'var(--radius-xl, 12px)',
           }}
         />
 
         {timeLeft !== null && (
           <p
             style={{
-              marginTop: 'var(--space-md, 16px)',
+              marginTop: 'var(--space-4, 16px)',
               fontSize: '14px',
-              color: timeLeft <= 10 ? 'var(--color-danger, #ef4444)' : 'var(--text-secondary, #94a3b8)',
+              color: timeLeft <= 10 ? 'var(--color-danger, #9A3D4A)' : 'var(--color-text-secondary, #4F5056)',
             }}
           >
             Expires in: {timeLeft}s
@@ -66,11 +66,11 @@ export const QRModal = ({ qrUrl, expiresIn, onClose }) => {
         <button
           onClick={onClose}
           style={{
-            marginTop: 'var(--space-md, 16px)',
-            padding: '10px var(--space-lg, 24px)',
+            marginTop: 'var(--space-4, 16px)',
+            padding: '10px var(--space-6, 24px)',
             borderRadius: 'var(--radius-md, 8px)',
             border: 'none',
-            background: 'var(--color-accent, #6366f1)',
+            background: 'var(--color-primary-600, #276BF0)',
             color: '#fff',
             fontWeight: '500',
             cursor: 'pointer',

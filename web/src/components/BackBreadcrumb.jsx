@@ -8,15 +8,15 @@ export const BackBreadcrumb = ({ to, label }) => {
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        gap: 'var(--space-sm, 8px)',
-        color: 'var(--text-secondary, #94a3b8)',
+        gap: 'var(--space-2, 8px)',
+        color: 'var(--color-text-secondary, #4F5056)',
         textDecoration: 'none',
         fontSize: '14px',
-        marginBottom: 'var(--space-md, 16px)',
+        marginBottom: 'var(--space-4, 16px)',
         transition: 'color 0.2s',
       }}
-      onMouseEnter={(e) => e.currentTarget.style.color = 'var(--text-primary, #fff)'}
-      onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-secondary, #94a3b8)'}
+      onMouseEnter={(e) => e.currentTarget.style.color = 'var(--color-text-primary, #111113)'}
+      onMouseLeave={(e) => e.currentTarget.style.color = 'var(--color-text-secondary, #4F5056)'}
     >
       ← {label}
     </Link>

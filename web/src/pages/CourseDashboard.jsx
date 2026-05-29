@@ -34,7 +34,7 @@ export function CourseDashboard() {
 
   if (isLoading) {
     return (
-      <div style={{ padding: 'var(--space-xl, 32px)', color: 'var(--text-secondary, #94a3b8)' }}>
+      <div style={{ padding: 'var(--space-8, 32px)', color: 'var(--color-text-secondary, #4F5056)' }}>
         Loading courses...
       </div>
     );
@@ -42,32 +42,32 @@ export function CourseDashboard() {
 
   if (error) {
     return (
-      <div style={{ padding: 'var(--space-xl, 32px)', color: 'var(--color-danger, #ef4444)' }}>
+      <div style={{ padding: 'var(--space-8, 32px)', color: 'var(--color-danger, #9A3D4A)' }}>
         Error: {error}
       </div>
     );
   }
 
   return (
-    <div style={{ padding: 'var(--space-xl, 32px)' }}>
+    <div style={{ padding: 'var(--space-8, 32px)' }}>
       {isRefreshing && (
         <div style={{
           position: 'fixed',
           top: '12px',
           right: '12px',
-          background: 'var(--bg-card, #16213e)',
-          border: '1px solid var(--border-default, #2d3a5a)',
+          background: 'var(--color-bg, #FFFFFF)',
+          border: '1px solid var(--color-border, #DCDBDD)',
           borderRadius: 'var(--radius-md, 8px)',
           padding: '6px 12px',
           fontSize: '12px',
-          color: 'var(--text-secondary, #94a3b8)',
+          color: 'var(--color-text-secondary, #4F5056)',
           zIndex: 1000,
           opacity: 0.8,
         }}>
           Syncing...
         </div>
       )}
-      <h2 style={{ fontSize: '1.5rem', fontWeight: '600', color: 'var(--text-primary, #fff)', marginBottom: 'var(--space-lg, 24px)' }}>
+      <h2 style={{ fontSize: '1.5rem', fontWeight: '600', color: 'var(--color-text-primary, #111113)', marginBottom: 'var(--space-6, 24px)' }}>
         My Courses
       </h2>
 
@@ -75,8 +75,8 @@ export function CourseDashboard() {
 
       <div style={{
         display: 'flex',
-        gap: 'var(--space-md, 16px)',
-        marginBottom: 'var(--space-lg, 24px)',
+        gap: 'var(--space-4, 16px)',
+        marginBottom: 'var(--space-6, 24px)',
         flexWrap: 'wrap',
       }}>
         <input
@@ -85,11 +85,11 @@ export function CourseDashboard() {
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           style={{
-            padding: '10px var(--space-md, 16px)',
+            padding: '10px var(--space-4, 16px)',
             borderRadius: 'var(--radius-md, 8px)',
-            border: '1px solid var(--border-default, #2d3a5a)',
-            background: 'var(--bg-input, #1a1a2e)',
-            color: 'var(--text-primary, #eee)',
+            border: '1px solid var(--color-border, #DCDBDD)',
+            background: 'var(--color-bg, #FFFFFF)',
+            color: 'var(--color-text-primary, #111113)',
             fontSize: '14px',
             minWidth: '250px',
           }}
@@ -98,11 +98,11 @@ export function CourseDashboard() {
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
           style={{
-            padding: '10px var(--space-md, 16px)',
+            padding: '10px var(--space-4, 16px)',
             borderRadius: 'var(--radius-md, 8px)',
-            border: '1px solid var(--border-default, #2d3a5a)',
-            background: 'var(--bg-input, #1a1a2e)',
-            color: 'var(--text-primary, #eee)',
+            border: '1px solid var(--color-border, #DCDBDD)',
+            background: 'var(--color-bg, #FFFFFF)',
+            color: 'var(--color-text-primary, #111113)',
             fontSize: '14px',
           }}
         >
@@ -116,7 +116,7 @@ export function CourseDashboard() {
       <div style={{
         display: 'grid',
         gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))',
-        gap: '20px',
+        gap: 'var(--space-5, 20px)',
       }}>
         {filteredCourses.map((course) => (
           <CourseCard key={course.course_id} course={course} />
@@ -124,7 +124,7 @@ export function CourseDashboard() {
       </div>
 
       {filteredCourses.length === 0 && (
-        <div style={{ textAlign: 'center', padding: '64px', color: 'var(--text-secondary, #94a3b8)' }}>
+        <div style={{ textAlign: 'center', padding: '64px', color: 'var(--color-text-secondary, #4F5056)' }}>
           <p style={{ fontSize: '1.25rem' }}>
             {courses.length === 0
               ? 'No courses assigned to you yet'

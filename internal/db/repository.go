@@ -67,6 +67,9 @@ func (r *PgRoomRepository) GetAllRooms() ([]domain.Room, error) {
 		}
 		rooms = append(rooms, room)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get all rooms: rows: %w", err)
+	}
 	return rooms, nil
 }
 

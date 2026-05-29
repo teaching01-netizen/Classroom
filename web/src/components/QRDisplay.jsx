@@ -12,8 +12,8 @@ export const QRDisplay = ({ room }) => {
         alignItems: 'center',
         justifyContent: 'center',
         minHeight: '100vh',
-        background: 'var(--bg-input, #1a1a2e)',
-        color: 'var(--text-secondary, #94a3b8)',
+        background: 'var(--color-bg-app, #FBFBFB)',
+        color: 'var(--color-text-secondary, #4F5056)',
       }}>
         <p style={{ fontSize: '1.5rem' }}>No QR Code Available</p>
       </div>
@@ -27,15 +27,15 @@ export const QRDisplay = ({ room }) => {
       alignItems: 'center',
       justifyContent: 'center',
       minHeight: '100vh',
-      background: 'var(--bg-input, #1a1a2e)',
-      padding: 'var(--space-lg, 24px)',
+      background: 'var(--color-bg-app, #FBFBFB)',
+      padding: 'var(--space-6, 24px)',
     }}>
-      <h1 style={{ fontSize: '2.5rem', fontWeight: '700', marginBottom: 'var(--space-xl, 32px)', color: 'var(--text-primary, #eee)' }}>
+      <h1 style={{ fontSize: '2.5rem', fontWeight: '700', marginBottom: 'var(--space-8, 32px)', color: 'var(--color-text-primary, #111113)' }}>
         {room.name || room.class_id}
       </h1>
-      <img src={room.qr_url} alt="QR Code" style={{ width: '400px', height: '400px', borderRadius: '16px', marginBottom: 'var(--space-lg, 24px)' }} />
+      <img src={room.qr_url} alt="QR Code" style={{ width: '400px', height: '400px', borderRadius: '16px', marginBottom: 'var(--space-6, 24px)' }} />
       {timeLeft !== null && (
-        <div style={{ fontSize: '3rem', fontWeight: '700', color: timeLeft <= 10 ? 'var(--color-danger, #ef4444)' : 'var(--color-success, #4ade80)' }}>
+        <div style={{ fontSize: '3rem', fontWeight: '700', color: timeLeft <= 10 ? 'var(--color-danger, #9A3D4A)' : 'var(--color-success, #257348)' }}>
           {timeLeft}s
         </div>
       )}

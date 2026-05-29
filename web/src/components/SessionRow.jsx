@@ -4,11 +4,11 @@ import { StatusBadge } from './StatusBadge';
 
 const getBarColor = (status) => {
   switch (status) {
-    case 'active': return 'var(--color-success, #4ade80)';
-    case 'done': return 'var(--color-accent, #6366f1)';
-    case 'not_started': return 'var(--border-default, #2d3a5a)';
-    case 'auth_error': return 'var(--color-warning, #f97316)';
-    default: return 'var(--border-default, #2d3a5a)';
+    case 'active': return 'var(--color-success, #257348)';
+    case 'done': return 'var(--color-primary-600, #276BF0)';
+    case 'not_started': return 'var(--color-border, #DCDBDD)';
+    case 'auth_error': return 'var(--color-warning, #7A631C)';
+    default: return 'var(--color-border, #DCDBDD)';
   }
 };
 
@@ -27,10 +27,10 @@ export const SessionRow = ({ session, courseId }) => {
         cursor: 'pointer',
         transition: 'background 0.15s ease',
       }}
-      onMouseEnter={(e) => e.currentTarget.style.background = 'var(--bg-card-hover, #1a1a2e)'}
+      onMouseEnter={(e) => e.currentTarget.style.background = 'var(--color-bg-hover, #F1F2F4)'}
       onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
     >
-      <td style={{ position: 'relative', paddingLeft: 'var(--space-md, 16px)' }}>
+      <td style={{ position: 'relative', paddingLeft: 'var(--space-4, 16px)' }}>
         <div style={{
           position: 'absolute',
           left: 0,
@@ -41,12 +41,12 @@ export const SessionRow = ({ session, courseId }) => {
         }} />
         {session.session_number}
       </td>
-      <td style={{ color: 'var(--text-primary, #fff)', fontWeight: '500' }}>{session.name}</td>
-      <td style={{ color: 'var(--text-secondary, #94a3b8)' }}>{session.date}</td>
+      <td style={{ color: 'var(--color-text-primary, #111113)', fontWeight: '500' }}>{session.name}</td>
+      <td style={{ color: 'var(--color-text-secondary, #4F5056)' }}>{session.date}</td>
       <td><StatusBadge status={session.status} /></td>
       <td style={{
         fontFamily: 'monospace',
-        color: 'var(--text-primary, #fff)',
+        color: 'var(--color-text-primary, #111113)',
         textAlign: 'center',
       }}>
         {session.total_students > 0
@@ -54,7 +54,7 @@ export const SessionRow = ({ session, courseId }) => {
           : '—'
         }
       </td>
-      <td style={{ color: 'var(--text-secondary, #94a3b8)', textAlign: 'right', paddingRight: 'var(--space-md, 16px)' }}>→</td>
+      <td style={{ color: 'var(--color-text-secondary, #4F5056)', textAlign: 'right', paddingRight: 'var(--space-4, 16px)' }}>→</td>
     </tr>
   );
 };

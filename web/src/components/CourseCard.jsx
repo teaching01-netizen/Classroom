@@ -4,10 +4,10 @@ import { usePinnedCoursesStore, selectIsPinned } from '../store/usePinnedCourses
 
 const getStatusColor = (status) => {
   switch (status) {
-    case 'active': return 'var(--color-success, #4ade80)';
-    case 'upcoming': return 'var(--color-info, #60a5fa)';
-    case 'finished': return 'var(--text-secondary, #94a3b8)';
-    default: return 'var(--text-secondary, #94a3b8)';
+    case 'active': return 'var(--color-success, #257348)';
+    case 'upcoming': return 'var(--color-info, #315EBA)';
+    case 'finished': return 'var(--color-text-secondary, #4F5056)';
+    default: return 'var(--color-text-secondary, #4F5056)';
   }
 };
 
@@ -34,9 +34,9 @@ export const CourseCard = ({ course }) => {
       role="button"
       tabIndex={0}
       style={{
-        background: 'var(--bg-card, #16213e)',
-        border: '1px solid var(--border-default, #2d3a5a)',
-        borderRadius: 'var(--radius-lg, 12px)',
+        background: 'var(--color-bg, #FFFFFF)',
+        border: '1px solid var(--color-border, #DCDBDD)',
+        borderRadius: 'var(--radius-xl, 12px)',
         padding: '20px',
         cursor: 'pointer',
         transition: 'transform 0.2s ease, box-shadow 0.2s ease',
@@ -45,21 +45,21 @@ export const CourseCard = ({ course }) => {
       }}
       onMouseEnter={(e) => {
         e.currentTarget.style.transform = 'translateY(-2px)';
-        e.currentTarget.style.boxShadow = 'var(--shadow-card-hover, 0 8px 24px rgba(0,0,0,0.4))';
+        e.currentTarget.style.boxShadow = 'var(--shadow-md, 0 8px 24px rgba(16, 24, 40, 0.10))';
       }}
       onMouseLeave={(e) => {
         e.currentTarget.style.transform = 'translateY(0)';
         e.currentTarget.style.boxShadow = 'none';
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm, 8px)', marginBottom: '12px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2, 8px)', marginBottom: '12px' }}>
         <div style={{
           width: '8px',
           height: '8px',
           borderRadius: '50%',
           background: getStatusColor(course.status),
         }} />
-        <div style={{ fontSize: '16px', fontWeight: '600', color: 'var(--text-primary, #fff)', flex: 1 }}>
+        <div style={{ fontSize: '16px', fontWeight: '600', color: 'var(--color-text-primary, #111113)', flex: 1 }}>
           {course.name}
         </div>
         <button
@@ -75,7 +75,7 @@ export const CourseCard = ({ course }) => {
             cursor: 'pointer',
             fontSize: '18px',
             padding: '4px',
-            color: isPinned ? 'var(--color-warning, #fbbf24)' : 'var(--text-secondary, #94a3b8)',
+            color: isPinned ? 'var(--color-warning, #7A631C)' : 'var(--color-text-secondary, #4F5056)',
             transition: 'color 0.2s',
           }}
           title={isPinned ? 'Unpin course' : 'Pin course'}
@@ -86,7 +86,7 @@ export const CourseCard = ({ course }) => {
 
       <div style={{
         height: '6px',
-        background: 'var(--border-default, #2d3a5a)',
+        background: 'var(--color-border, #DCDBDD)',
         borderRadius: '3px',
         marginBottom: '12px',
         overflow: 'hidden',
@@ -94,26 +94,26 @@ export const CourseCard = ({ course }) => {
         <div style={{
           height: '100%',
           width: `${attendancePercent}%`,
-          background: 'var(--color-success, #4ade80)',
+          background: 'var(--color-success, #257348)',
           borderRadius: '3px',
           transition: 'width 0.6s ease-out',
         }} />
       </div>
 
-      <div style={{ fontSize: '12px', color: 'var(--text-secondary, #94a3b8)', marginBottom: '4px' }}>
+      <div style={{ fontSize: '12px', color: 'var(--color-text-secondary, #4F5056)', marginBottom: '4px' }}>
         📅 {course.start_date} - {course.end_date}
       </div>
-      <div style={{ fontSize: '12px', color: 'var(--text-secondary, #94a3b8)', marginBottom: '4px' }}>
+      <div style={{ fontSize: '12px', color: 'var(--color-text-secondary, #4F5056)', marginBottom: '4px' }}>
         👥 {course.enrolled_count} students
       </div>
-      <div style={{ fontSize: '12px', color: 'var(--text-secondary, #94a3b8)', marginBottom: '8px' }}>
+      <div style={{ fontSize: '12px', color: 'var(--color-text-secondary, #4F5056)', marginBottom: '8px' }}>
         📋 {course.completed_sessions}/{course.total_sessions} sessions
       </div>
 
       <div style={{
         fontSize: '14px',
         fontWeight: '600',
-        color: attendancePercent >= 80 ? 'var(--color-success, #4ade80)' : attendancePercent >= 50 ? 'var(--color-warning, #fbbf24)' : 'var(--color-danger, #ef4444)',
+        color: attendancePercent >= 80 ? 'var(--color-success, #257348)' : attendancePercent >= 50 ? 'var(--color-warning, #7A631C)' : 'var(--color-danger, #9A3D4A)',
       }}>
         {attendancePercent}% attendance
       </div>

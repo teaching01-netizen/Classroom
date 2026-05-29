@@ -87,6 +87,7 @@ export function CheckinDetail() {
 
     autoStart();
     return () => {
+      startedRef.current = false;
       if (pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = null;

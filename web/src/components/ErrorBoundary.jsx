@@ -31,10 +31,10 @@ export class ErrorBoundary extends React.Component {
           justifyContent: 'center',
           gap: '16px',
         }}>
-          <h2 style={{ fontSize: '1.5rem', fontWeight: '600', color: 'var(--color-danger, #ef4444)' }}>
+          <h2 style={{ fontSize: '1.5rem', fontWeight: '600', color: 'var(--color-danger, #9A3D4A)' }}>
             Something went wrong
           </h2>
-          <p style={{ color: 'var(--text-secondary, #94a3b8)', maxWidth: '480px' }}>
+          <p style={{ color: 'var(--color-text-secondary, #4F5056)', maxWidth: '480px' }}>
             {this.state.error?.message || 'An unexpected error occurred.'}
           </p>
           <button
@@ -43,7 +43,7 @@ export class ErrorBoundary extends React.Component {
               padding: '10px 24px',
               borderRadius: 'var(--radius-md, 8px)',
               border: 'none',
-              background: 'var(--color-accent, #6366f1)',
+              background: 'var(--color-primary-600, #276BF0)',
               color: '#fff',
               fontWeight: '500',
               cursor: 'pointer',

@@ -1,10 +1,10 @@
 import React from 'react';
 
 const statusConfig = {
-  active: { bg: 'rgba(74, 222, 128, 0.12)', color: 'var(--color-success, #4ade80)', icon: '●', label: 'Active' },
-  done: { bg: 'rgba(99, 102, 241, 0.12)', color: 'var(--color-accent, #6366f1)', icon: '✓', label: 'Done' },
-  not_started: { bg: 'rgba(45, 58, 90, 0.12)', color: 'var(--text-secondary, #94a3b8)', icon: '○', label: 'Pending' },
-  auth_error: { bg: 'rgba(249, 115, 22, 0.12)', color: 'var(--color-warning, #f97316)', icon: '⚠', label: 'Error' },
+  active: { bg: 'var(--color-success-bg, #DCF3E5)', color: 'var(--color-success, #257348)', icon: '●', label: 'Active' },
+  done: { bg: 'var(--color-primary-soft, #EAF0FE)', color: 'var(--color-primary-600, #276BF0)', icon: '✓', label: 'Done' },
+  not_started: { bg: 'var(--color-bg-subtle, #F5F5F5)', color: 'var(--color-text-secondary, #4F5056)', icon: '○', label: 'Pending' },
+  auth_error: { bg: 'var(--color-warning-bg, #FAF0C4)', color: 'var(--color-warning, #7A631C)', icon: '⚠', label: 'Error' },
 };
 
 export const StatusBadge = ({ status }) => {
@@ -15,7 +15,7 @@ export const StatusBadge = ({ status }) => {
       display: 'inline-flex',
       alignItems: 'center',
       gap: '6px',
-      padding: 'var(--space-xs, 4px) 12px',
+      padding: 'var(--space-1, 4px) 12px',
       borderRadius: 'var(--radius-full, 9999px)',
       fontSize: '12px',
       fontWeight: '500',
