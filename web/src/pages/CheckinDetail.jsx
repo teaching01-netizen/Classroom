@@ -14,7 +14,9 @@ export function CheckinDetail() {
   const [filterStatus, setFilterStatus] = useState('all');
   const [room, setRoom] = useState(null);
   const [isStarting, setIsStarting] = useState(false);
+  const [autoStartError, setAutoStartError] = useState(null);
   const pollRef = useRef(null);
+  const startedRef = useRef(false);
 
   useEffect(() => {
     return () => {
@@ -22,15 +24,74 @@ export function CheckinDetail() {
     };
   }, []);
 
+  // Auto-start QR check-in session on mount
   useEffect(() => {
-    fetch('/api/rooms')
-      .then(r => r.json())
-      .then(result => {
-        if (result.success) {
-          const existingRoom = result.data.find(r => r.room_id === sessionId);
-          if (existingRoom) setRoom(existingRoom);
+    if (!sessionId) return;
+    if (startedRef.current) return;
+    startedRef.current = true;
+
+    const autoStart = async () => {
+      try {
+        // 1. Check if room already exists
+        const roomsRes = await fetch('/api/rooms');
+        if (!roomsRes.ok) throw new Error(`Failed to fetch rooms: ${roomsRes.status}`);
+        const roomsData = await roomsRes.json();
+        if (!roomsData.success) throw new Error(roomsData.error || 'Failed to fetch rooms');
+        const existingRoom = roomsData.data?.find(r => r.room_id === sessionId);
+
+        if (existingRoom) {
+          // Room exists — reuse it
+          setRoom(existingRoom);
+          setShowQR(true);
+
+          // Start worker if not already running
+          if (existingRoom.status !== 'Running' && existingRoom.status !== 'Fetching') {
+            const startRes = await fetch(`/api/rooms/${sessionId}/start`, { method: 'POST' });
+            if (!startRes.ok) throw new Error(`Failed to start room: ${startRes.status}`);
+            const startResult = await startRes.json();
+            if (!startResult.success) throw new Error(startResult.error || 'Failed to start room');
+          }
+
+          // Start polling for QR URL
+          let pollAttempts = 0;
+          const MAX_POLL_ATTEMPTS = 30;
+
+          pollRef.current = setInterval(async () => {
+            pollAttempts++;
+            if (pollAttempts > MAX_POLL_ATTEMPTS) {
+              clearInterval(pollRef.current);
+              pollRef.current = null;
+              return;
+            }
+            try {
+              const res = await fetch(`/api/rooms/${sessionId}`);
+              const result = await res.json();
+              if (result.success && result.data.qr_url) {
+                setRoom(result.data);
+                clearInterval(pollRef.current);
+                pollRef.current = null;
+              }
+            } catch {
+              // ignore poll errors
+            }
+          }, 2000);
+        } else {
+          // No room — create and start (reuse existing handler)
+          await handleStartCheckin();
         }
-      });
+      } catch (err) {
+        console.error('Auto-start failed:', err);
+        setAutoStartError('Failed to start check-in session');
+      }
+    };
+
+    autoStart();
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
   }, [sessionId]);
 
   const filteredStudents = useMemo(() => {
@@ -85,7 +146,7 @@ export function CheckinDetail() {
       });
       const createResult = await createRes.json();
       if (!createResult.success) {
-        alert(`Failed to create room: ${createResult.error}`);
+        setAutoStartError(`Failed to create room: ${createResult.error}`);
         return;
       }
 
@@ -97,13 +158,22 @@ export function CheckinDetail() {
       });
       const startResult = await startRes.json();
       if (!startResult.success) {
-        alert(`Failed to start room: ${startResult.error}`);
+        setAutoStartError(`Failed to start room: ${startResult.error}`);
         return;
       }
 
       setShowQR(true);
 
+      let pollAttempts = 0;
+      const MAX_POLL_ATTEMPTS = 30;
+
       pollRef.current = setInterval(async () => {
+        pollAttempts++;
+        if (pollAttempts > MAX_POLL_ATTEMPTS) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+          return;
+        }
         try {
           const res = await fetch(`/api/rooms/${newRoom.room_id}`);
           const result = await res.json();
@@ -117,7 +187,7 @@ export function CheckinDetail() {
         }
       }, 2000);
     } catch (err) {
-      alert('Failed to start check-in session');
+      setAutoStartError('Failed to start check-in session');
     } finally {
       setIsStarting(false);
     }
@@ -132,26 +202,37 @@ export function CheckinDetail() {
   };
 
   if (isLoading) {
-    return <div style={{ padding: 'var(--space-xl, 32px)', color: 'var(--text-secondary, #94a3b8)' }}>Loading students...</div>;
+    return <div style={{ padding: 'var(--space-8, 32px)', color: 'var(--color-text-secondary, #4F5056)' }}>Loading students...</div>;
   }
 
   if (error) {
-    return <div style={{ padding: 'var(--space-xl, 32px)', color: 'var(--color-danger, #ef4444)' }}>Error: {error}</div>;
+    return <div style={{ padding: 'var(--space-8, 32px)', color: 'var(--color-danger, #9A3D4A)' }}>Error: {error}</div>;
+  }
+
+  if (autoStartError) {
+    return (
+      <div style={{ padding: 'var(--space-8, 32px)', color: 'var(--color-danger, #9A3D4A)' }}>
+        Error: {autoStartError}
+        <button onClick={() => { setAutoStartError(null); handleStartCheckin(); }} disabled={isStarting} style={{ marginLeft: 12 }}>
+          Retry
+        </button>
+      </div>
+    );
   }
 
   return (
-    <div style={{ padding: 'var(--space-xl, 32px)' }}>
+    <div style={{ padding: 'var(--space-8, 32px)' }}>
       {isRefreshing && (
         <div style={{
           position: 'fixed',
           top: '12px',
           right: '12px',
-          background: 'var(--bg-card, #16213e)',
-          border: '1px solid var(--border-default, #2d3a5a)',
+          background: 'var(--color-bg, #FFFFFF)',
+          border: '1px solid var(--color-border, #DCDBDD)',
           borderRadius: 'var(--radius-md, 8px)',
           padding: '6px 12px',
           fontSize: '12px',
-          color: 'var(--text-secondary, #94a3b8)',
+          color: 'var(--color-text-secondary, #4F5056)',
           zIndex: 1000,
           opacity: 0.8,
         }}>
@@ -160,48 +241,33 @@ export function CheckinDetail() {
       )}
       <BackBreadcrumb to={`/courses/${courseId}/sessions`} label="Back to Sessions" />
 
-      <h2 style={{ fontSize: '1.5rem', fontWeight: '600', color: 'var(--text-primary, #fff)', marginBottom: 'var(--space-xs, 4px)' }}>
+      <h2 style={{ fontSize: '1.5rem', fontWeight: '600', color: 'var(--color-text-primary, #111113)', marginBottom: 'var(--space-1, 4px)' }}>
         {currentSession?.name || 'Session'}
       </h2>
-      <p style={{ color: 'var(--text-secondary, #94a3b8)', marginBottom: 'var(--space-lg, 24px)' }}>Course ID: {courseId}</p>
+      <p style={{ color: 'var(--color-text-secondary, #4F5056)', marginBottom: 'var(--space-6, 24px)' }}>Course ID: {courseId}</p>
 
       <StatsBar stats={stats} />
 
       <div
         style={{
           display: 'flex',
-          gap: 'var(--space-md, 12px)',
-          marginBottom: 'var(--space-lg, 24px)',
+          gap: 'var(--space-4, 16px)',
+          marginBottom: 'var(--space-6, 24px)',
           flexWrap: 'wrap',
         }}
       >
-        <button onClick={handleStartCheckin} disabled={isStarting} style={{
-          padding: '10px 20px',
-          borderRadius: 'var(--radius-md, 8px)',
-          border: 'none',
-          background: 'var(--color-success, #4ade80)',
-          color: '#000',
-          fontWeight: '500',
-          cursor: isStarting ? 'wait' : 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 'var(--space-sm, 8px)',
-        }}>
-          {isStarting ? 'Starting...' : '▶ Start Check-in Session'}
-        </button>
-
         {room && (
           <button onClick={() => setShowQR(true)} style={{
             padding: '10px 20px',
             borderRadius: 'var(--radius-md, 8px)',
-            border: '1px solid var(--border-default, #2d3a5a)',
+            border: '1px solid var(--color-border, #DCDBDD)',
             background: 'transparent',
-            color: 'var(--text-secondary, #94a3b8)',
+            color: 'var(--color-text-secondary, #4F5056)',
             fontWeight: '500',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
-            gap: 'var(--space-sm, 8px)',
+            gap: 'var(--space-2, 8px)',
           }}>
             📱 View QR Code
           </button>
@@ -212,14 +278,14 @@ export function CheckinDetail() {
           style={{
             padding: '10px 20px',
             borderRadius: 'var(--radius-md, 8px)',
-            border: '1px solid var(--border-default, #2d3a5a)',
+            border: '1px solid var(--color-border, #DCDBDD)',
             background: 'transparent',
-            color: 'var(--text-secondary, #94a3b8)',
+            color: 'var(--color-text-secondary, #4F5056)',
             fontWeight: '500',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
-            gap: 'var(--space-sm, 8px)',
+            gap: 'var(--space-2, 8px)',
           }}
         >
           📥 Export CSV
@@ -229,8 +295,8 @@ export function CheckinDetail() {
       <div
         style={{
           display: 'flex',
-          gap: 'var(--space-md, 16px)',
-          marginBottom: 'var(--space-lg, 24px)',
+          gap: 'var(--space-4, 16px)',
+          marginBottom: 'var(--space-6, 24px)',
           flexWrap: 'wrap',
         }}
       >
@@ -240,11 +306,11 @@ export function CheckinDetail() {
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           style={{
-            padding: '10px var(--space-md, 16px)',
+            padding: '10px var(--space-4, 16px)',
             borderRadius: 'var(--radius-md, 8px)',
-            border: '1px solid var(--border-default, #2d3a5a)',
-            background: 'var(--bg-input, #1a1a2e)',
-            color: 'var(--text-primary, #eee)',
+            border: '1px solid var(--color-border, #DCDBDD)',
+            background: 'var(--color-bg, #FFFFFF)',
+            color: 'var(--color-text-primary, #111113)',
             fontSize: '14px',
             minWidth: '250px',
           }}
@@ -253,11 +319,11 @@ export function CheckinDetail() {
           value={filterStatus}
           onChange={(e) => setFilterStatus(e.target.value)}
           style={{
-            padding: '10px var(--space-md, 16px)',
+            padding: '10px var(--space-4, 16px)',
             borderRadius: 'var(--radius-md, 8px)',
-            border: '1px solid var(--border-default, #2d3a5a)',
-            background: 'var(--bg-input, #1a1a2e)',
-            color: 'var(--text-primary, #eee)',
+            border: '1px solid var(--color-border, #DCDBDD)',
+            background: 'var(--color-bg, #FFFFFF)',
+            color: 'var(--color-text-primary, #111113)',
             fontSize: '14px',
           }}
         >
@@ -270,7 +336,7 @@ export function CheckinDetail() {
       <StudentTable students={filteredStudents} onToggleCheckin={toggleCheckin} />
 
       {filteredStudents.length === 0 && (
-        <div style={{ textAlign: 'center', padding: '64px', color: 'var(--text-secondary, #94a3b8)' }}>
+        <div style={{ textAlign: 'center', padding: '64px', color: 'var(--color-text-secondary, #4F5056)' }}>
           <p style={{ fontSize: '1.25rem' }}>
             {students.length === 0 ? 'No students enrolled' : 'No students match your search'}
           </p>
