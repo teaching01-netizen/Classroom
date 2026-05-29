@@ -86,6 +86,10 @@ func (rm *RoomManager) CreateRoom(classID string, name *string) (domain.Room, er
 }
 
 func (rm *RoomManager) DeleteRoom(roomID uuid.UUID) error {
+	if err := rm.repository.DeleteRoom(roomID); err != nil {
+		return err
+	}
+
 	rm.mu.Lock()
 	if state, ok := rm.rooms[roomID]; ok {
 		if state.cancel != nil {
@@ -94,10 +98,6 @@ func (rm *RoomManager) DeleteRoom(roomID uuid.UUID) error {
 		delete(rm.rooms, roomID)
 	}
 	rm.mu.Unlock()
-
-	if err := rm.repository.DeleteRoom(roomID); err != nil {
-		return err
-	}
 
 	rm.emit(RoomManagerEvent{Type: "RoomDeleted", Data: roomID.String()})
 	return nil
@@ -138,7 +138,9 @@ func (rm *RoomManager) StartRoom(roomID uuid.UUID) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	state.ctx = ctx
 	state.cancel = cancel
-	state.room.TransitionTo(domain.Running)
+	if err := state.room.TransitionTo(domain.Running); err != nil {
+		slog.Warn("invalid transition", "error", err)
+	}
 
 	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: state.room})
 
@@ -160,7 +162,9 @@ func (rm *RoomManager) StopRoom(roomID uuid.UUID) error {
 		state.cancel = nil
 	}
 
-	state.room.TransitionTo(domain.Stopped)
+	if err := state.room.TransitionTo(domain.Stopped); err != nil {
+		slog.Warn("invalid transition", "error", err)
+	}
 	room := state.room
 
 	go func() {
@@ -194,27 +198,36 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 			return
 		case <-time.After(1 * time.Second):
 			now := time.Now()
-
+			rm.mu.RLock()
+			expiresAt := state.room.ExpiresAt
+			classID := state.room.ClassID
+			rm.mu.RUnlock()
 			defaultTTL := uint64(60)
-			shouldFetch := state.room.ExpiresAt == nil || now.After(state.room.ExpiresAt.Add(-time.Duration(domain.CalculateNextFetchDelay(defaultTTL))*time.Second))
+			shouldFetch := expiresAt == nil || now.After(expiresAt.Add(-time.Duration(domain.CalculateNextFetchDelay(defaultTTL))*time.Second))
 
 			if shouldFetch {
-				rm.mu.Lock()
-				state.room.TransitionTo(domain.Fetching)
-				fetchingRoom := state.room
-				rm.mu.Unlock()
+			rm.mu.Lock()
+			if err := state.room.TransitionTo(domain.Fetching); err != nil {
+				slog.Warn("invalid transition", "error", err)
+			}
+			fetchingRoom := state.room
+			rm.mu.Unlock()
 
 				rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: fetchingRoom})
 
-				resp, err := rm.qrClient.FetchQR(state.room.ClassID)
+				resp, err := rm.qrClient.FetchQR(classID)
 				if err != nil {
-					rm.mu.Lock()
-					fetchErr, ok := err.(*domain.FetchError)
-					if ok {
-						state.room.TransitionTo(fetchErr.ToRoomStatus())
-					} else {
-						state.room.TransitionTo(domain.Warning)
+				rm.mu.Lock()
+				fetchErr, ok := err.(*domain.FetchError)
+				if ok {
+					if err := state.room.TransitionTo(fetchErr.ToRoomStatus()); err != nil {
+						slog.Warn("invalid transition", "error", err)
 					}
+				} else {
+					if err := state.room.TransitionTo(domain.Warning); err != nil {
+						slog.Warn("invalid transition", "error", err)
+					}
+				}
 					if state.room.Status == domain.AuthExpired {
 						msg := "Session expired"
 						state.room.ErrorMessage = &msg
@@ -248,7 +261,9 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 				state.room.ExpiresAt = &expiresAt
 				state.room.LastUpdatedAt = &now
 				state.room.LastFetchAt = &now
-				state.room.TransitionTo(domain.Running)
+				if err := state.room.TransitionTo(domain.Running); err != nil {
+				slog.Warn("invalid transition", "error", err)
+			}
 				state.room.WarningMessage = nil
 				state.room.ErrorMessage = nil
 				roomCopy := state.room
