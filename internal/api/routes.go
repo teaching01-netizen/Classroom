@@ -165,7 +165,6 @@ func stopRoomHandler(rm *service.RoomManager) http.HandlerFunc {
 func createRoomFromSessionHandler(rm *service.RoomManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			CourseID  string `json:"course_id"`
 			SessionID string `json:"session_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -176,7 +175,6 @@ func createRoomFromSessionHandler(rm *service.RoomManager) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, errorResponse("session_id is required"))
 			return
 		}
-		// room_id = session_id, class_id = session_id (for QR fetch)
 		room, err := rm.CreateRoom(req.SessionID, req.SessionID, nil)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
