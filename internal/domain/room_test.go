@@ -60,7 +60,7 @@ func TestFetchErrorToRoomStatus(t *testing.T) {
 }
 
 func TestRoomTransitionTo(t *testing.T) {
-	room := NewRoom("c1", nil)
+	room := NewRoom("r1", "c1", nil)
 	assert.Equal(t, Idle, room.Status)
 	assert.NoError(t, room.TransitionTo(Running))
 	assert.Equal(t, Running, room.Status)
@@ -69,7 +69,7 @@ func TestRoomTransitionTo(t *testing.T) {
 }
 
 func TestRoomTransitionToInvalid(t *testing.T) {
-	room := NewRoom("c1", nil)
+	room := NewRoom("r2", "c1", nil)
 	assert.Equal(t, Idle, room.Status)
 	err := room.TransitionTo(Fetching)
 	assert.Error(t, err)

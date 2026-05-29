@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"qr-command-center/internal/domain"
@@ -13,10 +12,10 @@ import (
 
 type RoomRepository interface {
 	CreateRoom(room domain.Room) (domain.Room, error)
-	GetRoom(roomID uuid.UUID) (domain.Room, error)
+	GetRoom(roomID string) (domain.Room, error)
 	GetAllRooms() ([]domain.Room, error)
 	UpdateRoom(room domain.Room) (domain.Room, error)
-	DeleteRoom(roomID uuid.UUID) error
+	DeleteRoom(roomID string) error
 }
 
 type PgRoomRepository struct {
@@ -42,7 +41,7 @@ func (r *PgRoomRepository) CreateRoom(room domain.Room) (domain.Room, error) {
 	return room, nil
 }
 
-func (r *PgRoomRepository) GetRoom(roomID uuid.UUID) (domain.Room, error) {
+func (r *PgRoomRepository) GetRoom(roomID string) (domain.Room, error) {
 	row := r.pool.QueryRow(context.Background(),
 		`SELECT room_id, class_id, name, status::text, qr_url, expires_at, last_updated_at, warning_message, error_message, last_fetch_at, created_at
 		 FROM rooms WHERE room_id = $1`, roomID)
@@ -87,7 +86,7 @@ func (r *PgRoomRepository) UpdateRoom(room domain.Room) (domain.Room, error) {
 	return room, nil
 }
 
-func (r *PgRoomRepository) DeleteRoom(roomID uuid.UUID) error {
+func (r *PgRoomRepository) DeleteRoom(roomID string) error {
 	result, err := r.pool.Exec(context.Background(),
 		`DELETE FROM rooms WHERE room_id = $1`, roomID)
 	if err != nil {

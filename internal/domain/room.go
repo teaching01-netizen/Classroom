@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 type RoomStatus string
@@ -110,7 +108,7 @@ func NewInvalidPayloadError(msg string) *FetchError {
 }
 
 type Room struct {
-	RoomID         uuid.UUID  `json:"room_id"`
+	RoomID         string     `json:"room_id"`
 	ClassID        string     `json:"class_id"`
 	Name           *string    `json:"name"`
 	Status         RoomStatus `json:"status"`
@@ -123,9 +121,9 @@ type Room struct {
 	CreatedAt      time.Time  `json:"-"`
 }
 
-func NewRoom(classID string, name *string) Room {
+func NewRoom(roomID string, classID string, name *string) Room {
 	return Room{
-		RoomID:  uuid.New(),
+		RoomID:  roomID,
 		ClassID: classID,
 		Name:    name,
 		Status:  Idle,

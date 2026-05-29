@@ -7,8 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
 	"qr-command-center/internal/db"
 	"qr-command-center/internal/domain"
 )
@@ -26,7 +24,7 @@ type RoomState struct {
 
 type RoomManager struct {
 	mu         sync.RWMutex
-	rooms      map[uuid.UUID]*RoomState
+	rooms      map[string]*RoomState
 	eventCh    chan RoomManagerEvent
 	qrClient   domain.QrClient
 	repository db.RoomRepository
@@ -34,7 +32,7 @@ type RoomManager struct {
 
 func NewRoomManager(qrClient domain.QrClient, repository db.RoomRepository) *RoomManager {
 	return &RoomManager{
-		rooms:      make(map[uuid.UUID]*RoomState),
+		rooms:      make(map[string]*RoomState),
 		eventCh:    make(chan RoomManagerEvent, 100),
 		qrClient:   qrClient,
 		repository: repository,
@@ -69,8 +67,14 @@ func (rm *RoomManager) LoadRoomsFromDB() error {
 	return nil
 }
 
-func (rm *RoomManager) CreateRoom(classID string, name *string) (domain.Room, error) {
-	room := domain.NewRoom(classID, name)
+func (rm *RoomManager) CreateRoom(roomID string, classID string, name *string) (domain.Room, error) {
+	// Check for existing room first (dedup)
+	existing, err := rm.repository.GetRoom(roomID)
+	if err == nil && existing.RoomID != "" {
+		return existing, nil // Return existing room
+	}
+
+	room := domain.NewRoom(roomID, classID, name)
 
 	saved, err := rm.repository.CreateRoom(room)
 	if err != nil {
@@ -85,7 +89,7 @@ func (rm *RoomManager) CreateRoom(classID string, name *string) (domain.Room, er
 	return saved, nil
 }
 
-func (rm *RoomManager) DeleteRoom(roomID uuid.UUID) error {
+func (rm *RoomManager) DeleteRoom(roomID string) error {
 	if err := rm.repository.DeleteRoom(roomID); err != nil {
 		return err
 	}
@@ -99,11 +103,11 @@ func (rm *RoomManager) DeleteRoom(roomID uuid.UUID) error {
 	}
 	rm.mu.Unlock()
 
-	rm.emit(RoomManagerEvent{Type: "RoomDeleted", Data: roomID.String()})
+	rm.emit(RoomManagerEvent{Type: "RoomDeleted", Data: roomID})
 	return nil
 }
 
-func (rm *RoomManager) GetRoom(roomID uuid.UUID) *domain.Room {
+func (rm *RoomManager) GetRoom(roomID string) *domain.Room {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
 	if state, ok := rm.rooms[roomID]; ok {
@@ -123,7 +127,7 @@ func (rm *RoomManager) GetAllRooms() []domain.Room {
 	return rooms
 }
 
-func (rm *RoomManager) StartRoom(roomID uuid.UUID) error {
+func (rm *RoomManager) StartRoom(roomID string) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
@@ -133,6 +137,14 @@ func (rm *RoomManager) StartRoom(roomID uuid.UUID) error {
 	}
 	if state.cancel != nil {
 		return fmt.Errorf("room already running")
+	}
+
+	// Reset stale state when transitioning from Stopped
+	if state.room.Status == domain.Stopped {
+		state.room.QRURL = nil
+		state.room.ExpiresAt = nil
+		state.room.WarningMessage = nil
+		state.room.ErrorMessage = nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -148,7 +160,7 @@ func (rm *RoomManager) StartRoom(roomID uuid.UUID) error {
 	return nil
 }
 
-func (rm *RoomManager) StopRoom(roomID uuid.UUID) error {
+func (rm *RoomManager) StopRoom(roomID string) error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
