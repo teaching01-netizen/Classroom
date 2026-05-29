@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { useCountdown } from '../hooks/useCountdown';
 
-export const QRModal = ({ qrUrl, expiresIn, onClose }) => {
+export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, className, checkedCount, totalCount }) => {
   const timeLeft = useCountdown(expiresIn);
 
   useEffect(() => {
@@ -41,6 +41,22 @@ export const QRModal = ({ qrUrl, expiresIn, onClose }) => {
         }}
         onClick={(e) => e.stopPropagation()}
       >
+        {/* Info header — course/session context */}
+        <div style={{
+          marginBottom: 'var(--space-4, 16px)',
+          paddingBottom: 'var(--space-3, 12px)',
+          borderBottom: '1px solid var(--color-border, #DCDBDD)',
+        }}>
+          {className && (
+            <div style={{ fontSize: '16px', fontWeight: '600', color: 'var(--color-text-primary, #111113)', marginBottom: 'var(--space-1, 4px)' }}>
+              {className}
+            </div>
+          )}
+          <div style={{ fontSize: '13px', color: 'var(--color-text-secondary, #4F5056)' }}>
+            {[courseId, roomName].filter(Boolean).join(' · ')}
+          </div>
+        </div>
+
         <img
           src={qrUrl}
           alt="QR Code"
@@ -53,16 +69,32 @@ export const QRModal = ({ qrUrl, expiresIn, onClose }) => {
           }}
         />
 
+        {/* Instructional CTA */}
+        <p style={{
+          marginTop: 'var(--space-3, 12px)',
+          marginBottom: 'var(--space-1, 4px)',
+          fontSize: '14px',
+          color: 'var(--color-text-secondary, #4F5056)',
+        }}>
+          Point your camera at the QR code to check in
+        </p>
+
         {timeLeft !== null && (
-          <p
-            style={{
-              marginTop: 'var(--space-4, 16px)',
-              fontSize: '14px',
-              color: timeLeft <= 10 ? 'var(--color-danger, #9A3D4A)' : 'var(--color-text-secondary, #4F5056)',
-            }}
-          >
-            Expires in: {timeLeft}s
-          </p>
+          <div style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '6px',
+            marginTop: 'var(--space-2, 8px)',
+            padding: '4px 12px',
+            borderRadius: 'var(--radius-full, 9999px)',
+            fontSize: '13px',
+            fontWeight: '500',
+            background: timeLeft <= 10 ? 'color-mix(in srgb, var(--color-danger, #9A3D4A) 12%, transparent)' : 'var(--color-bg-subtle, #F5F5F5)',
+            color: timeLeft <= 10 ? 'var(--color-danger, #9A3D4A)' : 'var(--color-text-secondary, #4F5056)',
+          }}>
+            {timeLeft <= 10 && <span>⚠️</span>}
+            {timeLeft <= 0 ? 'Expired' : `Expires in ${timeLeft}s`}
+          </div>
         )}
 
         <button
