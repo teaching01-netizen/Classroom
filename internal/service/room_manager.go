@@ -136,7 +136,7 @@ func (rm *RoomManager) StartRoom(roomID string) error {
 		return fmt.Errorf("room not found")
 	}
 	if state.cancel != nil {
-		return fmt.Errorf("room already running")
+		return nil
 	}
 
 	// Reset stale state when transitioning from Stopped
