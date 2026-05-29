@@ -1,5 +1,30 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage } from 'zustand/middleware';
+
+const safeStorage = {
+  getItem: (name) => {
+    try {
+      const value = localStorage.getItem(name);
+      return value ? JSON.parse(value) : null;
+    } catch {
+      return null;
+    }
+  },
+  setItem: (name, value) => {
+    try {
+      localStorage.setItem(name, JSON.stringify(value));
+    } catch (e) {
+      console.warn('Failed to persist pinned courses:', e);
+    }
+  },
+  removeItem: (name) => {
+    try {
+      localStorage.removeItem(name);
+    } catch {
+      // ignore
+    }
+  },
+};
 
 export const usePinnedCoursesStore = create(
   persist(
@@ -18,21 +43,12 @@ export const usePinnedCoursesStore = create(
           pinnedCourseIds: state.pinnedCourseIds.filter((id) => id !== courseId),
         })),
 
-      toggleCourse: (courseId) => {
-        const { pinnedCourseIds } = get();
-        if (pinnedCourseIds.includes(courseId)) {
-          set({ pinnedCourseIds: pinnedCourseIds.filter((id) => id !== courseId) });
-        } else {
-          set({ pinnedCourseIds: [...pinnedCourseIds, courseId] });
-        }
-      },
-
-      isPinned: (courseId) => get().pinnedCourseIds.includes(courseId),
-
-      getPinnedCourses: (courses) => {
-        const { pinnedCourseIds } = get();
-        return courses.filter((course) => pinnedCourseIds.includes(course.course_id));
-      },
+      toggleCourse: (courseId) =>
+        set((state) => ({
+          pinnedCourseIds: state.pinnedCourseIds.includes(courseId)
+            ? state.pinnedCourseIds.filter((id) => id !== courseId)
+            : [...state.pinnedCourseIds, courseId],
+        })),
 
       cleanupStalePins: (validCourseIds) =>
         set((state) => ({
@@ -44,9 +60,16 @@ export const usePinnedCoursesStore = create(
     {
       name: 'warwick-pinned-courses',
       version: 1,
+      storage: createJSONStorage(() => safeStorage),
     }
   )
 );
+
+export const selectIsPinned = (courseId) => (state) =>
+  state.pinnedCourseIds.includes(courseId);
+
+export const selectPinnedCourses = (courses) => (state) =>
+  courses.filter((c) => state.pinnedCourseIds.includes(c.course_id));
 
 // Cross-tab sync: listen for storage changes from other tabs
 if (typeof window !== 'undefined') {
