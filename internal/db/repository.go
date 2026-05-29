@@ -30,7 +30,8 @@ func (r *PgRoomRepository) CreateRoom(room domain.Room) (domain.Room, error) {
 	statusStr := roomStatusToString(room.Status)
 	_, err := r.pool.Exec(context.Background(),
 		`INSERT INTO rooms (room_id, class_id, name, status, qr_url, expires_at, last_updated_at, warning_message, error_message, last_fetch_at)
-		 VALUES ($1, $2, $3, $4::room_status, $5, $6, $7, $8, $9, $10)`,
+		 VALUES ($1, $2, $3, $4::room_status, $5, $6, $7, $8, $9, $10)
+		 ON CONFLICT (room_id) DO NOTHING`,
 		room.RoomID, room.ClassID, room.Name, statusStr,
 		room.QRURL, room.ExpiresAt, room.LastUpdatedAt,
 		room.WarningMessage, room.ErrorMessage, room.LastFetchAt,
@@ -38,7 +39,8 @@ func (r *PgRoomRepository) CreateRoom(room domain.Room) (domain.Room, error) {
 	if err != nil {
 		return domain.Room{}, fmt.Errorf("create room: %w", err)
 	}
-	return room, nil
+	// Always return the room (newly inserted or already existing)
+	return r.GetRoom(room.RoomID)
 }
 
 func (r *PgRoomRepository) GetRoom(roomID string) (domain.Room, error) {
