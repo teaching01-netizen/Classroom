@@ -1,22 +1,11 @@
 #!/bin/bash
+set -e
 
-echo "🔨 Building Check-in QR Command Center..."
+echo "Building frontend..."
+cd web && npm install && npm run build && cd ..
 
-# Build frontend
-echo "📦 Building frontend..."
-cd web || exit 1
-npm install
-npm run build
-cd ..
+echo "Building Go backend..."
+mkdir -p target/release
+go build -o target/release/qr-command-center-server ./cmd/server
 
-# Build backend
-echo "🦀 Building backend..."
-cargo build --release
-
-echo "✅ Build complete!"
-echo "Backend binary: target/release/qr-command-center-server"
-echo "Frontend static files: web/dist/"
-echo ""
-echo "To run:"
-echo "  ./target/release/qr-command-center-server"
-echo "  (it will automatically load DATABASE_URL from .env)"
+echo "Build complete!"

@@ -7,19 +7,20 @@ COPY web/ ./
 RUN npm run build
 
 # Stage 2: Build backend
-FROM rust:1.75-alpine AS backend-builder
+FROM golang:1.22-alpine AS go-builder
 WORKDIR /app
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev
-COPY Cargo.toml Cargo.lock ./
-COPY crates/ ./crates/
-RUN cargo build --release
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o qr-command-center-server ./cmd/server
 
 # Stage 3: Final image
 FROM alpine:3.19
+RUN adduser -D -u 1001 appuser
 WORKDIR /app
-RUN apk add --no-cache ca-certificates libssl3
-COPY --from=backend-builder /app/target/release/qr-command-center-server ./
+RUN apk add --no-cache ca-certificates
+COPY --from=go-builder /app/qr-command-center-server ./
 COPY --from=frontend-builder /app/web/dist ./web/dist/
-
+USER appuser
 EXPOSE 3000
 CMD ["./qr-command-center-server"]
