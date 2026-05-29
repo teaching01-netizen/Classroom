@@ -81,6 +81,13 @@ export const RoomCard = ({ room }) => {
           <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary, #94a3b8)' }}>
             Class ID: {room.class_id}
           </p>
+          <a href="/courses" onClick={(e) => e.stopPropagation()} style={{
+            fontSize: '0.875rem',
+            color: 'var(--color-accent, #6366f1)',
+            textDecoration: 'none',
+          }}>
+            View Sessions →
+          </a>
         </div>
         <div style={{
           padding: 'var(--space-xs, 4px) 12px',
