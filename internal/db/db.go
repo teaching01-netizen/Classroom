@@ -4,6 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"fmt"
+	"log/slog"
+	"os"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -23,6 +27,10 @@ func NewPool(databaseURL string) (*pgxpool.Pool, error) {
 	}
 	// Disable prepared statement cache (required for Supabase pooler)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	config.MaxConns = 25
+	config.MinConns = 5
+	config.MaxConnLifetime = 30 * time.Minute
+	config.MaxConnIdleTime = 5 * time.Minute
 	return pgxpool.NewWithConfig(context.Background(), config)
 }
 
@@ -50,13 +58,16 @@ func RunMigrations(databaseURL string) error {
 
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		if _, ok := err.(migrate.ErrDirty); ok {
-			// Force past the dirty state — schema already exists from Rust
-			if forceErr := m.Force(1); forceErr != nil {
-				return forceErr
-			}
-			return nil
+			slog.Error("migration dirty — manual investigation required")
+			return fmt.Errorf("migration dirty: %w", err)
 		}
 		return err
+	}
+
+	var version int
+	if err := db.QueryRow("SELECT version FROM schema_migrations").Scan(&version); err != nil || version < 4 {
+		slog.Error("schema version below required minimum", "have", version, "need", 4)
+		os.Exit(1)
 	}
 	return nil
 }
