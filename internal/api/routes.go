@@ -37,13 +37,13 @@ func init() {
 	allowedOrigin = os.Getenv("CORS_ORIGIN")
 }
 
-func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.FavouriteRepository, c *cache.Cache) *chi.Mux {
+func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.FavouriteRepository, c *cache.Cache, refresher *service.DataRefresher) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(chimiddleware.Logger)
 	r.Use(corsMiddleware)
 
-	r.Get("/api", healthHandler(c))
-	r.Get("/api/", healthHandler(c))
+	r.Get("/api", healthHandler(c, refresher))
+	r.Get("/api/", healthHandler(c, refresher))
 
 	r.Route("/api/rooms", func(r chi.Router) {
 		r.Use(roomLimiter.Middleware)
@@ -106,16 +106,21 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func healthHandler(c *cache.Cache) http.HandlerFunc {
+func healthHandler(c *cache.Cache, refresher *service.DataRefresher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cacheSize := 0
+		cacheWarm := false
 		if c != nil {
 			cacheSize = c.Size()
+		}
+		if refresher != nil {
+			cacheWarm = refresher.IsWarm()
 		}
 		writeJSON(w, http.StatusOK, successResponse(map[string]interface{}{
 			"message": "QR Command Center API is running!",
 			"cache": map[string]interface{}{
 				"size": cacheSize,
+				"warm": cacheWarm,
 			},
 		}))
 	}

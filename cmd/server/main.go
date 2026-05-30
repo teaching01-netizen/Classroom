@@ -42,11 +42,22 @@ func main() {
 
 	sharedCache := cache.New()
 
+	cacheInterval := getEnvDuration("WARWICK_CACHE_INTERVAL", 30*time.Second)
+
 	var qrClient *warwick.WarwickQrClient
 	var classroomClient *warwick.ClassroomClient
+	var refresher *service.DataRefresher
 	if sessionPool != nil {
 		qrClient = warwick.NewWarwickQrClientFromPool(sessionPool, warwick.TierQR)
 		classroomClient = warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher, sharedCache)
+		refresher = service.NewDataRefresher(classroomClient, cacheInterval)
+
+		// Sync warmup at startup — pre-fetches course list + active course details.
+		warmupCtx, warmupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := refresher.WarmOnce(warmupCtx); err != nil {
+			slog.Warn("initial cache warmup failed, will retry in background", "error", err)
+		}
+		warmupCancel()
 	}
 
 	// Connect to database
@@ -79,7 +90,7 @@ func main() {
 
 	favRepo := db.NewPgFavouriteRepository(pool)
 
-	router := api.NewRouter(rm, classroomClient, favRepo, sharedCache)
+	router := api.NewRouter(rm, classroomClient, favRepo, sharedCache, refresher)
 
 	addr := os.Getenv("PORT")
 	if addr == "" {
@@ -103,6 +114,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if refresher != nil {
+		go refresher.Run(ctx)
+	}
+
 	go func() {
 		slog.Info("Server running", "addr", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -123,4 +138,18 @@ func main() {
 
 	api.StopRateLimiters()
 	slog.Info("Server stopped")
+}
+
+// getEnvDuration parses a duration from an env var, falling back to defaultVal on error or empty.
+func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal
+	}
+	d, err := time.ParseDuration(val)
+	if err != nil {
+		slog.Warn("invalid duration for env var", "key", key, "value", val, "error", err)
+		return defaultVal
+	}
+	return d
 }
