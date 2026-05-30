@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -56,7 +57,8 @@ func RunMigrations(databaseURL string) error {
 	}
 
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		if _, ok := err.(migrate.ErrDirty); ok {
+		var dirtyErr migrate.ErrDirty
+		if errors.As(err, &dirtyErr) {
 			slog.Error("migration dirty — manual investigation required")
 			return fmt.Errorf("migration dirty: %w", err)
 		}
@@ -65,8 +67,10 @@ func RunMigrations(databaseURL string) error {
 
 	// After successful migration (or ErrNoChange), verify schema version >= 4
 	var version int
-	rowErr := db.QueryRowContext(context.Background(), "SELECT version FROM schema_migrations").Scan(&version)
-	if rowErr != nil || version < 4 {
+	if err := db.QueryRowContext(context.Background(), "SELECT version FROM schema_migrations").Scan(&version); err != nil {
+		return fmt.Errorf("check schema version: %w", err)
+	}
+	if version < 4 {
 		slog.Error("schema version below required minimum", "have", version, "need", 4)
 		return fmt.Errorf("schema version %d below required minimum 4", version)
 	}
