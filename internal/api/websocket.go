@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -19,6 +20,9 @@ func wsHandler(rm *service.RoomManager) http.HandlerFunc {
 			slog.Error("ws accept failed", "error", err)
 			return
 		}
+		defer func() {
+			_ = conn.Close(websocket.StatusNormalClosure, "done")
+		}()
 		defer conn.CloseNow()
 
 		ctx := conn.CloseRead(r.Context())
@@ -31,7 +35,7 @@ func wsHandler(rm *service.RoomManager) http.HandlerFunc {
 		err = conn.Write(writeCtx, websocket.MessageText, syncData)
 		cancel()
 		if err != nil {
-			if websocket.CloseStatus(err) == -1 {
+			if !errors.Is(err, context.Canceled) && websocket.CloseStatus(err) == -1 {
 				slog.Error("ws write failed", "error", err)
 			}
 			return
@@ -51,7 +55,7 @@ func wsHandler(rm *service.RoomManager) http.HandlerFunc {
 				err := conn.Write(writeCtx, websocket.MessageText, data)
 				cancel()
 				if err != nil {
-					if websocket.CloseStatus(err) == -1 {
+					if !errors.Is(err, context.Canceled) && websocket.CloseStatus(err) == -1 {
 						slog.Error("ws write failed", "error", err)
 					}
 					return
