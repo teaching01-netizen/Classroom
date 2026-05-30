@@ -76,6 +76,13 @@ type pooledSession struct {
 // Caller must hold s.mu write lock.
 func (s *pooledSession) applyBackoff() {
 	s.backoffCount++
+
+	// If session was obtained ≤2 min ago, this is a guaranteed human admin kick.
+	// Skip straight to max backoff (15 min) to avoid ping-pong on re-login.
+	if s.backoffCount == 1 && time.Since(s.obtainedAt) <= sessionMinValidAge {
+		s.backoffCount = sessionBackoffMaxAttempts
+	}
+
 	if s.backoffCount > sessionBackoffMaxAttempts {
 		s.backoffCount = sessionBackoffMaxAttempts
 	}

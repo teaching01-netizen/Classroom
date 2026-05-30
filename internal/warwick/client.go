@@ -2,6 +2,7 @@ package warwick
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -74,6 +75,9 @@ func (c *WarwickQrClient) FetchQR(classID string) (domain.QrResponse, error) {
 	if c.pool != nil {
 		ref, err := c.pool.Acquire(c.tier)
 		if err != nil {
+			if errors.Is(err, ErrAuthConflict) {
+				return domain.QrResponse{}, domain.ErrAuthConflict
+			}
 			return domain.QrResponse{}, domain.ErrAuthExpired
 		}
 		defer c.pool.Release(ref)
@@ -98,6 +102,9 @@ func (c *WarwickQrClient) FetchQRWithFreshAuth(classID string) (domain.QrRespons
 		defer c.pool.Release(ref)
 
 		if _, _, err := c.pool.ForceRefreshOnSession(ref); err != nil {
+			if errors.Is(err, ErrAuthConflict) {
+				return domain.QrResponse{}, domain.ErrAuthConflict
+			}
 			return domain.QrResponse{}, domain.ErrAuthExpired
 		}
 		return c.doFetch(classID, ref.Cookie)

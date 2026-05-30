@@ -2,6 +2,7 @@ package warwick
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -95,6 +96,9 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
 	ref, err := c.pool.Acquire(c.tier)
 	if err != nil {
+		if errors.Is(err, ErrAuthConflict) {
+			return nil, domain.ErrAuthConflict
+		}
 		return nil, domain.ErrAuthExpired
 	}
 	defer c.pool.Release(ref)
@@ -109,6 +113,9 @@ func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
 			lastErr = err
 			if attempt == 0 {
 				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
+					if errors.Is(rerr, ErrAuthConflict) {
+						return nil, domain.ErrAuthConflict
+					}
 					return nil, domain.ErrAuthExpired
 				}
 				continue
@@ -209,6 +216,9 @@ func (c *ClassroomClient) GetCourseDetail(courseID string) (*domain.CourseDetail
 func (c *ClassroomClient) getCourseDetailWithPool(courseID string) (*domain.CourseDetail, error) {
 	ref, err := c.pool.Acquire(c.tier)
 	if err != nil {
+		if errors.Is(err, ErrAuthConflict) {
+			return nil, domain.ErrAuthConflict
+		}
 		return nil, domain.ErrAuthExpired
 	}
 	defer c.pool.Release(ref)
@@ -223,6 +233,9 @@ func (c *ClassroomClient) getCourseDetailWithPool(courseID string) (*domain.Cour
 			lastErr = err
 			if attempt == 0 {
 				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
+					if errors.Is(rerr, ErrAuthConflict) {
+						return nil, domain.ErrAuthConflict
+					}
 					return nil, domain.ErrAuthExpired
 				}
 				continue
@@ -311,6 +324,9 @@ func (c *ClassroomClient) GetSessionDetail(courseID, sessionID string) (*domain.
 func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.SessionDetail, error) {
 	ref, err := c.pool.Acquire(c.tier)
 	if err != nil {
+		if errors.Is(err, ErrAuthConflict) {
+			return nil, domain.ErrAuthConflict
+		}
 		return nil, domain.ErrAuthExpired
 	}
 	defer c.pool.Release(ref)
@@ -325,6 +341,9 @@ func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.Se
 			lastErr = err
 			if attempt == 0 {
 				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
+					if errors.Is(rerr, ErrAuthConflict) {
+						return nil, domain.ErrAuthConflict
+					}
 					return nil, domain.ErrAuthExpired
 				}
 				continue
@@ -408,6 +427,9 @@ func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, c
 func (c *ClassroomClient) toggleCheckinWithPool(sessionID, studentID string, checked bool) error {
 	ref, err := c.pool.Acquire(c.tier)
 	if err != nil {
+		if errors.Is(err, ErrAuthConflict) {
+			return domain.ErrAuthConflict
+		}
 		return domain.ErrAuthExpired
 	}
 	defer c.pool.Release(ref)
@@ -423,6 +445,9 @@ func (c *ClassroomClient) toggleCheckinWithPool(sessionID, studentID string, che
 			break
 		}
 		if _, _, err := c.pool.ForceRefreshOnSession(ref); err != nil {
+			if errors.Is(err, ErrAuthConflict) {
+				return domain.ErrAuthConflict
+			}
 			return domain.ErrAuthExpired
 		}
 	}

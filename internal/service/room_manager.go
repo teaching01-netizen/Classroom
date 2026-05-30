@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -210,6 +211,7 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 		}
 	}()
 
+roomLoop:
 	for {
 		select {
 		case <-state.ctx.Done():
@@ -304,6 +306,25 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 									recovered = true
 									break
 								}
+
+								// Auth conflict — pool handles backoff, skip retry loop
+								if errors.Is(err, domain.ErrAuthConflict) {
+									slog.Info("Session kicked by admin, backing off", "room_id", state.room.RoomID)
+									rm.mu.Lock()
+									state.room.WarningMessage = strPtr("Admin logged in, retrying...")
+									state.room.ErrorMessage = nil
+									state.room.TransitionTo(domain.Warning)
+									roomCopy = state.room
+									rm.mu.Unlock()
+									go func() {
+										if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
+											slog.Error("failed to persist warning state", "error", err)
+										}
+									}()
+									rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+									continue roomLoop
+								}
+
 								// Check for invalid payload — will never succeed on retry
 								if fetchErr, ok := err.(*domain.FetchError); ok && fetchErr.Kind == domain.ErrKindInvalidPayload {
 									rm.mu.Lock()

@@ -69,10 +69,12 @@ const (
 	ErrKindNetwork
 	ErrKindInvalidPayload
 	ErrKindRateLimited
+	ErrKindAuthConflict
 )
 
 var ErrAuthExpired = &FetchError{Kind: ErrKindAuthExpired}
 var ErrRateLimited = &FetchError{Kind: ErrKindRateLimited}
+var ErrAuthConflict = &FetchError{Kind: ErrKindAuthConflict}
 
 type FetchError struct {
 	Kind    FetchErrorKind
@@ -89,6 +91,8 @@ func (e *FetchError) Error() string {
 		return fmt.Sprintf("invalid response payload: %s", e.Message)
 	case ErrKindRateLimited:
 		return "warwick rate limit exceeded"
+	case ErrKindAuthConflict:
+		return "warwick auth conflict — human admin likely logged in"
 	default:
 		return "unknown fetch error"
 	}
@@ -99,6 +103,8 @@ func (e *FetchError) ToRoomStatus() RoomStatus {
 	case ErrKindAuthExpired:
 		return AuthExpired
 	case ErrKindRateLimited:
+		return Warning
+	case ErrKindAuthConflict:
 		return Warning
 	default:
 		return Warning
