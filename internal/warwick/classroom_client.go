@@ -9,16 +9,26 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"context"
 	"sync"
 	"time"
 
 	"qr-command-center/internal/cache"
+	"qr-command-center/internal/db"
 	"qr-command-center/internal/domain"
 )
 
 const (
 	maxBodySize = 1 << 20 // 1MB
 )
+
+// CachedSession wraps a SessionDetail with its last-known MaxToggledAt for
+// cross-instance cache coherence via the DB-backed checkin repository.
+type CachedSession struct {
+	Detail       *domain.SessionDetail
+	MaxToggledAt *time.Time
+	CachedAt     time.Time
+}
 
 // ClassroomClient proxies requests to the Warwick admin panel's DataTables API endpoints.
 type ClassroomClient struct {
@@ -28,6 +38,8 @@ type ClassroomClient struct {
 	client  *http.Client
 	baseURL string
 	cache   *cache.Cache // in-memory TTL cache for course/session data
+
+	checkinRepo db.SessionCheckinRepository // optional — nil = DB-backed path disabled
 
 	// refreshing tracks in-flight async cache refreshes keyed by cache key.
 	// Prevents thundering-herd goroutine creation on stale cache hits.
@@ -52,8 +64,8 @@ func NewClassroomClient(auth *WarwickAuth, sharedCache *cache.Cache) *ClassroomC
 // NewClassroomClientFromPool creates a ClassroomClient that acquires sessions from a pool.
 // This is the new preferred constructor — it enables session isolation.
 // sharedCache is a shared in-memory cache for Warwick responses. Must not be nil.
-func NewClassroomClientFromPool(pool *SessionPool, tier SessionTier, sharedCache *cache.Cache) *ClassroomClient {
-	return &ClassroomClient{
+func NewClassroomClientFromPool(pool *SessionPool, tier SessionTier, sharedCache *cache.Cache, checkinRepo ...db.SessionCheckinRepository) *ClassroomClient {
+	c := &ClassroomClient{
 		pool: pool,
 		tier: tier,
 		client: &http.Client{
@@ -65,6 +77,10 @@ func NewClassroomClientFromPool(pool *SessionPool, tier SessionTier, sharedCache
 		baseURL: "https://warwick.humantix.cloud",
 		cache:   sharedCache,
 	}
+	if len(checkinRepo) > 0 {
+		c.checkinRepo = checkinRepo[0]
+	}
+	return c
 }
 
 // Auth returns the underlying WarwickAuth instance (may be nil when pool is used).
@@ -495,33 +511,129 @@ func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.Se
 	key := "session:" + sessionID
 
 	if c.cache != nil {
-		// 1) Fresh cache hit
+		// Step 1: Fresh cache hit
 		if cached, ok := c.cache.Get(key); ok {
-			return cached.(*domain.SessionDetail), nil
+			if detail, ok := cached.(*domain.SessionDetail); ok {
+				return detail, nil
+			}
+			if cachedSession, ok := cached.(*CachedSession); ok {
+				return cachedSession.Detail, nil
+			}
 		}
 
-		// 2) Stale cache hit — serve stale, refresh async in background (deduplicated via tryRefresh)
+		// Step 2a: Stale cache hit — check DB for freshness
 		if stale, ok := c.cache.GetStale(key); ok {
+			if cachedSession, ok := stale.(*CachedSession); ok && c.checkinRepo != nil {
+				dbCtx, dbCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				dbMaxToggledAt, err := c.checkinRepo.GetMaxToggledAtForSession(dbCtx, sessionID)
+				dbCancel()
+
+				if err == nil {
+					// Step 2b: Compare DB max_toggled_at against cached
+					if !equalTimePtr(dbMaxToggledAt, cachedSession.MaxToggledAt) {
+						// DB has fresher data — populate cache from DB
+						dbCtx2, dbCancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+						students, dbErr := c.checkinRepo.GetStudentsBySession(dbCtx2, sessionID)
+						dbCancel2()
+
+						if dbErr == nil && len(students) > 0 {
+							detail := &domain.SessionDetail{
+								SessionSummary: domain.SessionSummary{
+									SessionID:     sessionID,
+									TotalStudents: len(students),
+								},
+								Students: students,
+							}
+							// Count checked-in students for CheckedInCount
+							for _, s := range students {
+								if s.CheckedIn {
+									detail.CheckedInCount++
+								}
+							}
+							cached := &CachedSession{
+								Detail:       detail,
+								MaxToggledAt: dbMaxToggledAt,
+								CachedAt:     time.Now(),
+							}
+							c.cache.Set(key, cached, 10*time.Second)
+							return detail, nil
+						}
+					}
+				}
+				// Step 2b cont: if same or error, serve stale + async refresh
+				c.tryRefresh(key, func() { c.refreshSessionDetailCache(sessionID) })
+				return cachedSession.Detail, nil
+			}
+
+			// No checkinRepo or stale isn't CachedSession — serve stale as before
 			c.tryRefresh(key, func() { c.refreshSessionDetailCache(sessionID) })
 			return stale.(*domain.SessionDetail), nil
 		}
 	}
 
-	// 3) Cold cache — need to fetch from Warwick
+	// Step 3: Cold cache — check DB
+	if c.checkinRepo != nil {
+		dbCtx, dbCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		students, err := c.checkinRepo.GetStudentsBySession(dbCtx, sessionID)
+		dbCancel()
+		if err == nil && len(students) > 0 {
+			toggledCtx, toggledCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			maxToggledAt, _ := c.checkinRepo.GetMaxToggledAtForSession(toggledCtx, sessionID)
+			toggledCancel()
+
+			detail := &domain.SessionDetail{
+				SessionSummary: domain.SessionSummary{
+					SessionID:     sessionID,
+					TotalStudents: len(students),
+				},
+				Students: students,
+			}
+			for _, s := range students {
+				if s.CheckedIn {
+					detail.CheckedInCount++
+				}
+			}
+			cached := &CachedSession{
+				Detail:       detail,
+				MaxToggledAt: maxToggledAt,
+				CachedAt:     time.Now(),
+			}
+			if c.cache != nil {
+				c.cache.Set(key, cached, 10*time.Second)
+			}
+			return detail, nil
+		}
+	}
+
+	// Step 4: DB miss — fall through to Warwick
 	return c.fetchSessionDetailWithPool(key, sessionID)
 }
 
-// refreshSessionDetailCache is called async when stale data was served.
-// It delegates to fetchSessionDetailWithPool which handles the retry loop,
-// pool acquisition, and cache population on success.
+// refreshSessionDetailCache is called async when stale data was served or
+// during the background refresh path. It fetches fresh data from Warwick
+// and, if the DB-backed cache is enabled, persists the checkin data asynchronously.
 func (c *ClassroomClient) refreshSessionDetailCache(sessionID string) {
-	_, err := c.fetchSessionDetailWithPool("session:"+sessionID, sessionID)
+	detail, err := c.fetchSessionDetailWithPool("session:"+sessionID, sessionID)
 	if err != nil {
 		if errors.Is(err, domain.ErrAuthConflict) || errors.Is(err, domain.ErrPoolExhausted) || errors.Is(err, domain.ErrAuthExpired) {
 			slog.Warn("cache_refresh_session_detail_failed", "session_id", sessionID, "error", err)
 		} else {
 			slog.Debug("cache_refresh_session_detail_failed", "session_id", sessionID, "error", err)
 		}
+		return
+	}
+	if c.checkinRepo != nil && detail != nil && len(detail.Students) > 0 {
+		// Extract session_date from CourseSummary data or use today as fallback.
+		// The spec notes this is an open question — for now use time.Now()
+		sessionDate := time.Now()
+		// Wrap in goroutine to avoid blocking the refresh path
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := c.checkinRepo.UpsertFromWarwick(ctx, sessionID, sessionDate, detail.Students); err != nil {
+				slog.Warn("failed to persist session checkins to DB", "session_id", sessionID, "error", err)
+			}
+		}()
 	}
 }
 
@@ -544,7 +656,16 @@ func (c *ClassroomClient) fetchSessionDetailWithPool(key, sessionID string) (*do
 		detail, err := c.fetchSessionDetail(ref.Cookie, sessionID)
 		if err == nil {
 			if c.cache != nil {
-				c.cache.Set(key, detail, 10*time.Second) // TTL 10s now
+				var cached interface{} = detail
+				if c.checkinRepo != nil {
+					// When DB is enabled, wrap in CachedSession for cross-instance coherence
+					cached = &CachedSession{
+						Detail:       detail,
+						MaxToggledAt: nil, // First fetch — no prior toggle known
+						CachedAt:     time.Now(),
+					}
+				}
+				c.cache.Set(key, cached, 10*time.Second) // TTL 10s now
 			}
 			return detail, nil
 		}
@@ -668,6 +789,18 @@ func (c *ClassroomClient) toggleCheckinWithPool(courseID, sessionID, studentID s
 	for attempt := 0; attempt < 2; attempt++ {
 		err = c.doToggleCheckin(ref.Cookie, sessionID, studentID, checked)
 		if err == nil {
+			// On success: persist toggle to DB if DB-backed cache is enabled
+			if c.checkinRepo != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				// Name intentionally empty — UpsertStudent subquery/COALESCE preserves existing student_name
+				if dbErr := c.checkinRepo.UpsertStudent(ctx, sessionID, domain.StudentCheckin{
+					StudentID: studentID, CheckedIn: checked,
+				}); dbErr != nil {
+					slog.Error("failed to persist toggle to DB", "student_id", studentID, "error", dbErr)
+				}
+				cancel()
+			}
+
 			if c.cache != nil {
 				c.cache.Invalidate("course:" + courseID)
 				c.cache.Invalidate("courses")
@@ -758,4 +891,16 @@ func (c *ClassroomClient) checkAuth(resp *http.Response) error {
 	}
 
 	return nil
+}
+
+// equalTimePtr compares two *time.Time pointers for equality.
+// Both nil is considered equal; one nil is not.
+func equalTimePtr(a, b *time.Time) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Equal(*b)
 }
