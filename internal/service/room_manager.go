@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -339,6 +340,17 @@ roomLoop:
 									}()
 									rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
 									continue roomLoop
+								}
+
+								// Pool exhaustion — all sessions in use, retry with short jitter
+								if errors.Is(err, domain.ErrPoolExhausted) {
+									slog.Debug("pool exhausted, retrying", "room_id", state.room.RoomID)
+									select {
+									case <-state.ctx.Done():
+										return
+									case <-time.After(time.Duration(500 + rand.Intn(500)) * time.Millisecond):
+									}
+									continue
 								}
 
 								// Check for invalid payload — will never succeed on retry
