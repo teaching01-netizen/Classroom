@@ -84,21 +84,23 @@ export const CourseCard = ({ course }) => {
         </button>
       </div>
 
-      <div style={{
-        height: '6px',
-        background: 'var(--color-border, #DCDBDD)',
-        borderRadius: '3px',
-        marginBottom: '12px',
-        overflow: 'hidden',
-      }}>
+      {attendancePercent > 0 && (
         <div style={{
-          height: '100%',
-          width: `${attendancePercent}%`,
-          background: 'var(--color-success, #257348)',
+          height: '6px',
+          background: 'var(--color-border, #DCDBDD)',
           borderRadius: '3px',
-          transition: 'width 0.6s ease-out',
-        }} />
-      </div>
+          marginBottom: '12px',
+          overflow: 'hidden',
+        }}>
+          <div style={{
+            height: '100%',
+            width: `${attendancePercent}%`,
+            background: 'var(--color-success, #257348)',
+            borderRadius: '3px',
+            transition: 'width 0.6s ease-out',
+          }} />
+        </div>
+      )}
 
       <div style={{ fontSize: '12px', color: 'var(--color-text-secondary, #4F5056)', marginBottom: '4px' }}>
         📅 {course.start_date} - {course.end_date}
@@ -113,9 +115,9 @@ export const CourseCard = ({ course }) => {
       <div style={{
         fontSize: '14px',
         fontWeight: '600',
-        color: attendancePercent >= 80 ? 'var(--color-success, #257348)' : attendancePercent >= 50 ? 'var(--color-warning, #7A631C)' : 'var(--color-danger, #9A3D4A)',
+        color: attendancePercent === 0 ? 'var(--color-text-secondary, #4F5056)' : attendancePercent >= 80 ? 'var(--color-success, #257348)' : attendancePercent >= 50 ? 'var(--color-warning, #7A631C)' : 'var(--color-danger, #9A3D4A)',
       }}>
-        {attendancePercent}% attendance
+        {attendancePercent > 0 ? `${attendancePercent}% attendance` : '— attendance'}
       </div>
     </div>
   );
