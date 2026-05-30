@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"qr-command-center/internal/cache"
 	"qr-command-center/internal/domain"
 )
 
@@ -24,6 +25,7 @@ type ClassroomClient struct {
 	tier    SessionTier   // new — tier for pool acquisition
 	client  *http.Client
 	baseURL string
+	cache   *cache.Cache // in-memory TTL cache for course/session data
 }
 
 // NewClassroomClient creates a ClassroomClient with the given auth instance.
@@ -37,6 +39,7 @@ func NewClassroomClient(auth *WarwickAuth) *ClassroomClient {
 			},
 		},
 		baseURL: "https://warwick.humantix.cloud",
+		cache:   cache.New(),
 	}
 }
 
@@ -53,6 +56,7 @@ func NewClassroomClientFromPool(pool *SessionPool, tier SessionTier) *ClassroomC
 			},
 		},
 		baseURL: "https://warwick.humantix.cloud",
+		cache:   cache.New(),
 	}
 }
 
@@ -64,6 +68,12 @@ func (c *ClassroomClient) Auth() *WarwickAuth {
 // GetCourses fetches the list of courses from Warwick.
 // Uses the session pool if configured, otherwise falls back to WarwickAuth.
 func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
+	if c.cache != nil {
+		if cached, ok := c.cache.Get("courses"); ok {
+			return cached.([]domain.CourseSummary), nil
+		}
+	}
+
 	if c.pool != nil {
 		return c.getCoursesWithPool()
 	}
@@ -77,6 +87,9 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 
 		courses, err := c.fetchCourses(cookie)
 		if err == nil {
+			if c.cache != nil {
+				c.cache.Set("courses", courses, 30*time.Second)
+			}
 			return courses, nil
 		}
 
@@ -94,6 +107,10 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 }
 
 func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
+	if cached, ok := c.cache.Get("courses"); ok {
+		return cached.([]domain.CourseSummary), nil
+	}
+
 	ref, err := c.pool.Acquire(c.tier)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
@@ -107,6 +124,7 @@ func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		courses, err := c.fetchCourses(ref.Cookie)
 		if err == nil {
+			c.cache.Set("courses", courses, 30*time.Second)
 			return courses, nil
 		}
 		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
@@ -184,6 +202,13 @@ func (c *ClassroomClient) fetchCourses(cookie string) ([]domain.CourseSummary, e
 
 // GetCourseDetail fetches the sessions for a specific course.
 func (c *ClassroomClient) GetCourseDetail(courseID string) (*domain.CourseDetail, error) {
+	key := "course:" + courseID
+	if c.cache != nil {
+		if cached, ok := c.cache.Get(key); ok {
+			return cached.(*domain.CourseDetail), nil
+		}
+	}
+
 	if c.pool != nil {
 		return c.getCourseDetailWithPool(courseID)
 	}
@@ -197,6 +222,9 @@ func (c *ClassroomClient) GetCourseDetail(courseID string) (*domain.CourseDetail
 
 		detail, err := c.fetchCourseDetail(cookie, courseID)
 		if err == nil {
+			if c.cache != nil {
+				c.cache.Set(key, detail, 30*time.Second)
+			}
 			return detail, nil
 		}
 
@@ -214,6 +242,11 @@ func (c *ClassroomClient) GetCourseDetail(courseID string) (*domain.CourseDetail
 }
 
 func (c *ClassroomClient) getCourseDetailWithPool(courseID string) (*domain.CourseDetail, error) {
+	key := "course:" + courseID
+	if cached, ok := c.cache.Get(key); ok {
+		return cached.(*domain.CourseDetail), nil
+	}
+
 	ref, err := c.pool.Acquire(c.tier)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
@@ -227,6 +260,7 @@ func (c *ClassroomClient) getCourseDetailWithPool(courseID string) (*domain.Cour
 	for attempt := 0; attempt < 2; attempt++ {
 		detail, err := c.fetchCourseDetail(ref.Cookie, courseID)
 		if err == nil {
+			c.cache.Set(key, detail, 30*time.Second)
 			return detail, nil
 		}
 		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
@@ -400,7 +434,7 @@ func (c *ClassroomClient) fetchSessionDetail(cookie, sessionID string) (*domain.
 // ToggleCheckin updates a student's check-in status for a session.
 func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, checked bool) error {
 	if c.pool != nil {
-		return c.toggleCheckinWithPool(sessionID, studentID, checked)
+		return c.toggleCheckinWithPool(courseID, sessionID, studentID, checked)
 	}
 
 	var lastErr error
@@ -411,6 +445,8 @@ func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, c
 		}
 		err = c.doToggleCheckin(cookie, sessionID, studentID, checked)
 		if err == nil {
+			c.cache.Invalidate("course:" + courseID)
+			c.cache.Invalidate("courses")
 			return nil
 		}
 		lastErr = err
@@ -424,7 +460,7 @@ func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, c
 	return lastErr
 }
 
-func (c *ClassroomClient) toggleCheckinWithPool(sessionID, studentID string, checked bool) error {
+func (c *ClassroomClient) toggleCheckinWithPool(courseID, sessionID, studentID string, checked bool) error {
 	ref, err := c.pool.Acquire(c.tier)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
@@ -438,6 +474,8 @@ func (c *ClassroomClient) toggleCheckinWithPool(sessionID, studentID string, che
 	for attempt := 0; attempt < 2; attempt++ {
 		err = c.doToggleCheckin(ref.Cookie, sessionID, studentID, checked)
 		if err == nil {
+			c.cache.Invalidate("course:" + courseID)
+			c.cache.Invalidate("courses")
 			return nil
 		}
 		lastErr = err
