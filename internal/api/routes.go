@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
 	"qr-command-center/internal/middleware"
@@ -21,6 +21,14 @@ var (
 	roomLimiter    = middleware.NewIPRateLimiter(10, 20)  // rooms API: 10 req/s, burst 20
 )
 
+// StopRateLimiters stops all package-level rate limiter goroutines.
+// Must be called during server shutdown to prevent goroutine leaks.
+func StopRateLimiters() {
+	teacherLimiter.Stop()
+	toggleLimiter.Stop()
+	roomLimiter.Stop()
+}
+
 var allowedOrigins = map[string]bool{
 	"http://localhost:3001": true,
 	"http://localhost:3000": true,
@@ -28,7 +36,7 @@ var allowedOrigins = map[string]bool{
 
 func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient) *chi.Mux {
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(chimiddleware.Logger)
 	r.Use(corsMiddleware)
 
 	r.Get("/api/", func(w http.ResponseWriter, r *http.Request) {

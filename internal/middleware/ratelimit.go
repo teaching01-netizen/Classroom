@@ -97,15 +97,15 @@ func (l *IPRateLimiter) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// extractIP attempts to get the real client IP from headers, falling back to RemoteAddr.
+// extractIP gets the real client IP.
+//
+// Security assumption: this service runs either directly exposed (RemoteAddr is the
+// source of truth) or behind a reverse proxy that sets X-Real-IP.
+// X-Forwarded-For is NOT trusted because it can be trivially spoofed by clients.
 func extractIP(r *http.Request) string {
-	// Prefer X-Forwarded-For.
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		ip := strings.TrimSpace(parts[0])
-		if ip != "" {
-			return ip
-		}
+	// X-Real-IP is set by reverse proxies (nginx, caddy, etc.) and is more trustworthy.
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return xri
 	}
 	// Strip port from RemoteAddr.
 	addr := r.RemoteAddr
@@ -115,9 +115,21 @@ func extractIP(r *http.Request) string {
 	return addr
 }
 
+// SetCleanupInterval sets the interval at which stale entries are removed.
+// It is safe to call before any Allow/Middleware calls, but should not be
+// called concurrently with cleanup runs (use during initial setup only).
+func (l *IPRateLimiter) SetCleanupInterval(d time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cleanupInterval = d
+}
+
 // cleanupLoop periodically removes entries that haven't been seen for the cleanup interval.
 func (l *IPRateLimiter) cleanupLoop() {
-	ticker := time.NewTicker(l.cleanupInterval)
+	l.mu.Lock()
+	interval := l.cleanupInterval
+	l.mu.Unlock()
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

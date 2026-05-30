@@ -3,6 +3,8 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -123,14 +125,26 @@ func TestIPRateLimiter_Middleware_PassesThroughAllowed(t *testing.T) {
 	}
 }
 
-func TestExtractIP_XForwardedFor(t *testing.T) {
+func TestExtractIP_XRealIP(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("X-Forwarded-For", "198.51.100.1, 203.0.113.5")
+	req.Header.Set("X-Real-IP", "198.51.100.1")
 	req.RemoteAddr = "10.0.0.1:9999"
 
 	ip := extractIP(req)
 	if ip != "198.51.100.1" {
 		t.Errorf("expected 198.51.100.1, got %s", ip)
+	}
+}
+
+func TestExtractIP_XRealIPTakesPrecedence(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Real-IP", "198.51.100.1")
+	req.Header.Set("X-Forwarded-For", "203.0.113.5")
+	req.RemoteAddr = "10.0.0.1:9999"
+
+	ip := extractIP(req)
+	if ip != "198.51.100.1" {
+		t.Errorf("expected X-Real-IP 198.51.100.1 to take precedence, got %s", ip)
 	}
 }
 
@@ -167,11 +181,14 @@ func TestExtractIP_EmptyXFF(t *testing.T) {
 
 func TestIPRateLimiter_StaleCleanup(t *testing.T) {
 	rl := NewIPRateLimiter(10, 5)
-	rl.cleanupInterval = 50 * time.Millisecond // speed up for test
+	rl.SetCleanupInterval(50 * time.Millisecond) // speed up for test
 	defer rl.Stop()
 
 	rl.Allow("stale-client")
-	if _, exists := rl.visitors["stale-client"]; !exists {
+	rl.mu.RLock()
+	_, afterAllow := rl.visitors["stale-client"]
+	rl.mu.RUnlock()
+	if !afterAllow {
 		t.Fatal("expected visitor to be created")
 	}
 
@@ -190,4 +207,34 @@ func TestIPRateLimiter_Stop_NoPanic(t *testing.T) {
 	rl := NewIPRateLimiter(10, 5)
 	rl.Stop() // should not panic
 	rl.Stop() // double stop should not panic
+}
+
+func TestConcurrentAccess(t *testing.T) {
+	rl := NewIPRateLimiter(0, 5) // no refill, burst 5 — exactly 5 tokens available
+	defer rl.Stop()
+
+	const goroutines = 20
+	var allowed atomic.Int64
+	var denied atomic.Int64
+	var wg sync.WaitGroup
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if rl.Allow("10.0.0.1") {
+				allowed.Add(1)
+			} else {
+				denied.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := allowed.Load(); got != 5 {
+		t.Errorf("expected exactly 5 allowed, got %d", got)
+	}
+	if got := denied.Load(); got != 15 {
+		t.Errorf("expected exactly 15 denied, got %d", got)
+	}
 }

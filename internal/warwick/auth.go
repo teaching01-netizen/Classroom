@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,8 +33,8 @@ type WarwickAuth struct {
 	sessionMu sync.RWMutex
 	session   *sessionState
 
-	forceRefreshMu sync.Mutex // serializes ForceRefresh calls
-	currentGen     uint64     // incremented on each successful ForceRefresh login
+	forceRefreshMu sync.Mutex  // serializes ForceRefresh calls
+	currentGen     atomic.Uint64 // incremented on each successful ForceRefresh login
 }
 
 func NewWarwickAuth(email, password, loginURL string) *WarwickAuth {
@@ -83,7 +84,7 @@ func (a *WarwickAuth) GetValidSession() (string, uint64, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	// auto-refresh via GetValidSession gets generation 0 (not a forced refresh)
+	session.generation = a.currentGen.Load()
 	a.session = session
 	return session.cookieValue, session.generation, nil
 }
@@ -104,8 +105,7 @@ func (a *WarwickAuth) ForceRefresh() (string, uint64, error) {
 		return "", 0, err
 	}
 
-	a.currentGen++
-	session.generation = a.currentGen
+	session.generation = a.currentGen.Add(1)
 
 	a.sessionMu.Lock()
 	a.session = session
@@ -118,9 +118,7 @@ func (a *WarwickAuth) ForceRefresh() (string, uint64, error) {
 // current ForceRefresh generation, indicating the caller's cookie has been
 // invalidated by a concurrent refresh.
 func (a *WarwickAuth) IsStaleGeneration(gen uint64) bool {
-	a.forceRefreshMu.Lock()
-	defer a.forceRefreshMu.Unlock()
-	return gen < a.currentGen
+	return gen < a.currentGen.Load()
 }
 
 func (a *WarwickAuth) performLogin() (*sessionState, error) {

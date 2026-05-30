@@ -33,7 +33,7 @@ func main() {
 		slog.Error("Failed to initialize Warwick auth", "error", err)
 		os.Exit(1)
 	}
-	_, err = auth.GetValidSession()
+	_, _, err = auth.GetValidSession()
 	if err != nil {
 		slog.Error("Warwick authentication failed", "error", err)
 		os.Exit(1)
@@ -106,5 +106,7 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("Server shutdown error", "error", err)
 	}
+
+	api.StopRateLimiters()
 	slog.Info("Server stopped")
 }
