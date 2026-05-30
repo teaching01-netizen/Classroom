@@ -56,25 +56,37 @@ func NewRoomManager(qrClient domain.QrClient, repository db.RoomRepository) *Roo
 	return rm
 }
 
-func (rm *RoomManager) Subscribe() <-chan RoomManagerEvent {
+func (rm *RoomManager) Subscribe() (<-chan RoomManagerEvent, func()) {
 	ch := make(chan RoomManagerEvent, 256)
 	rm.subscribeMu.Lock()
 	rm.subscribers = append(rm.subscribers, ch)
 	rm.subscribeMu.Unlock()
-	return ch
+	unsub := func() {
+		rm.subscribeMu.Lock()
+		defer rm.subscribeMu.Unlock()
+		for i, c := range rm.subscribers {
+			if c == ch {
+				rm.subscribers = append(rm.subscribers[:i], rm.subscribers[i+1:]...)
+				return
+			}
+		}
+	}
+	return ch, unsub
 }
 
 func (rm *RoomManager) fanoutLoop() {
 	for event := range rm.eventCh {
 		rm.subscribeMu.Lock()
-		for _, ch := range rm.subscribers {
+		subs := make([]chan RoomManagerEvent, len(rm.subscribers))
+		copy(subs, rm.subscribers)
+		rm.subscribeMu.Unlock()
+		for _, ch := range subs {
 			select {
 			case ch <- event:
 			default:
 				slog.Warn("dropping event for slow subscriber")
 			}
 		}
-		rm.subscribeMu.Unlock()
 	}
 }
 

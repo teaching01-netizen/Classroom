@@ -26,7 +26,8 @@ func wsHandler(rm *service.RoomManager) http.HandlerFunc {
 		defer conn.CloseNow()
 
 		ctx := conn.CloseRead(r.Context())
-		events := rm.Subscribe()
+		events, unsub := rm.Subscribe()
+		defer unsub()
 
 		// Send FullStateSync
 		rooms := rm.GetAllRooms()
