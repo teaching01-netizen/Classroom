@@ -12,17 +12,16 @@ export function SessionList() {
   const stats = useMemo(() => {
     const totalSessions = sessions.length;
     const doneSessions = sessions.filter(s => s.status === 'done').length;
-    const totalStudents = sessions.length > 0 ? sessions[0].total_students : 0;
+
+    // checked_in_count and total_students are not available at session-list level
+    // (require individual session detail API calls). Show placeholders.
     const totalChecked = sessions.reduce((sum, s) => sum + s.checked_in_count, 0);
-    const avgAttendance = totalSessions > 0 && totalStudents > 0
-      ? Math.round((totalChecked / (totalSessions * totalStudents)) * 100)
-      : 0;
 
     return [
       { value: totalSessions, label: 'Total Sessions' },
       { value: doneSessions, label: 'Completed' },
-      { value: totalStudents, label: 'Students' },
-      { value: `${avgAttendance}%`, label: 'Attendance' },
+      { value: '—', label: 'Students' },
+      { value: '—', label: 'Attendance' },
     ];
   }, [sessions]);
 
