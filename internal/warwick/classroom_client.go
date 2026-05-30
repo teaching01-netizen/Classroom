@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -112,7 +113,26 @@ func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
 		return cached.([]domain.CourseSummary), nil
 	}
 
-	ref, err := c.pool.Acquire(c.tier)
+	// Stale fallback + async refresh
+	if stale, ok := c.cache.GetStale("courses"); ok {
+		go c.refreshCoursesCache()
+		return stale.([]domain.CourseSummary), nil
+	}
+
+	return c.fetchCoursesWithPool()
+}
+
+func (c *ClassroomClient) refreshCoursesCache() {
+	courses, err := c.fetchCoursesWithPool()
+	if err != nil {
+		slog.Debug("cache_refresh_courses_failed", "error", err)
+		return
+	}
+	c.cache.Set("courses", courses, 30*time.Second)
+}
+
+func (c *ClassroomClient) fetchCoursesWithPool() ([]domain.CourseSummary, error) {
+	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return nil, domain.ErrAuthConflict
@@ -251,7 +271,27 @@ func (c *ClassroomClient) getCourseDetailWithPool(courseID string) (*domain.Cour
 		return cached.(*domain.CourseDetail), nil
 	}
 
-	ref, err := c.pool.Acquire(c.tier)
+	// Stale fallback + async refresh
+	if stale, ok := c.cache.GetStale(key); ok {
+		go c.refreshCourseDetailCache(courseID)
+		return stale.(*domain.CourseDetail), nil
+	}
+
+	return c.fetchCourseDetailWithPool(key, courseID)
+}
+
+func (c *ClassroomClient) refreshCourseDetailCache(courseID string) {
+	key := "course:" + courseID
+	detail, err := c.fetchCourseDetailWithPool(key, courseID)
+	if err != nil {
+		slog.Debug("cache_refresh_course_detail_failed", "course_id", courseID, "error", err)
+		return
+	}
+	c.cache.Set(key, detail, 30*time.Second)
+}
+
+func (c *ClassroomClient) fetchCourseDetailWithPool(key, courseID string) (*domain.CourseDetail, error) {
+	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return nil, domain.ErrAuthConflict
@@ -364,11 +404,45 @@ func (c *ClassroomClient) GetSessionDetail(courseID, sessionID string) (*domain.
 
 func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.SessionDetail, error) {
 	key := "session:" + sessionID
+
+	// 1) Fresh cache hit
 	if cached, ok := c.cache.Get(key); ok {
 		return cached.(*domain.SessionDetail), nil
 	}
 
-	ref, err := c.pool.Acquire(c.tier)
+	// 2) Stale cache hit — serve stale, refresh async in background
+	if stale, ok := c.cache.GetStale(key); ok {
+		go c.refreshSessionDetailCache(sessionID)
+		return stale.(*domain.SessionDetail), nil
+	}
+
+	// 3) Cold cache — need to fetch from Warwick
+	return c.fetchSessionDetailWithPool(key, sessionID)
+}
+
+// refreshSessionDetailCache is called async when stale data was served.
+// It acquires a session (with timeout) and populates the cache.
+func (c *ClassroomClient) refreshSessionDetailCache(sessionID string) {
+	key := "session:" + sessionID
+	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
+	if err != nil {
+		slog.Warn("cache_refresh_failed", "session_id", sessionID, "error", err)
+		return
+	}
+	defer c.pool.Release(ref)
+
+	// Single attempt — best effort, next poll or user action will trigger another refresh
+	detail, err := c.fetchSessionDetail(ref.Cookie, sessionID)
+	if err != nil {
+		slog.Debug("cache_refresh_fetch_failed", "session_id", sessionID, "error", err)
+		return
+	}
+	c.cache.Set(key, detail, 10*time.Second)
+}
+
+// fetchSessionDetailWithPool is the synchronous fallback when cache is cold.
+func (c *ClassroomClient) fetchSessionDetailWithPool(key, sessionID string) (*domain.SessionDetail, error) {
+	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return nil, domain.ErrAuthConflict
@@ -384,7 +458,7 @@ func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.Se
 	for attempt := 0; attempt < 2; attempt++ {
 		detail, err := c.fetchSessionDetail(ref.Cookie, sessionID)
 		if err == nil {
-			c.cache.Set(key, detail, 5*time.Second)
+			c.cache.Set(key, detail, 10*time.Second) // TTL 10s now
 			return detail, nil
 		}
 		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
