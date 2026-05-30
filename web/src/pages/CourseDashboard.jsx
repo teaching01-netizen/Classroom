@@ -26,9 +26,9 @@ export function CourseDashboard() {
 
     return [
       { value: activeCourses, label: 'Active Courses' },
-      { value: totalSessions, label: 'Total Sessions' },
+      { value: totalSessions > 0 ? totalSessions : '—', label: 'Total Sessions' },
       { value: totalStudents, label: 'Students' },
-      { value: `${avgAttendance}%`, label: 'Avg Attendance' },
+      { value: avgAttendance > 0 ? `${avgAttendance}%` : '—', label: 'Avg Attendance' },
     ];
   }, [courses]);
 
