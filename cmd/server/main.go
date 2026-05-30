@@ -42,15 +42,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Validate by acquiring and releasing a session
+	// Validate all sessions in the pool
 	slog.Info("Validating Warwick credentials...")
-	ref, err := sessionPool.Acquire(warwick.TierQR)
-	if err != nil {
-		slog.Error("Warwick authentication failed", "error", err)
-		os.Exit(1)
+	for i := 0; i < 2; i++ {
+		ref, err := sessionPool.Acquire(warwick.TierQR)
+		if err != nil {
+			slog.Error("Warwick authentication failed for QR session", "session", i, "error", err)
+			os.Exit(1)
+		}
+		sessionPool.Release(ref)
 	}
-	sessionPool.Release(ref)
-	slog.Info("Warwick authentication successful")
+	{
+		ref, err := sessionPool.Acquire(warwick.TierTeacher)
+		if err != nil {
+			slog.Error("Warwick authentication failed for teacher session", "error", err)
+			os.Exit(1)
+		}
+		sessionPool.Release(ref)
+	}
+	slog.Info("Warwick authentication successful", "qr_sessions", 2, "teacher_sessions", 1)
 
 	qrClient := warwick.NewWarwickQrClientFromPool(sessionPool, warwick.TierQR)
 	classroomClient := warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher)
