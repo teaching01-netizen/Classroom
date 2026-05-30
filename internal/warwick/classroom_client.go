@@ -405,9 +405,21 @@ func (c *ClassroomClient) fetchCourseDetail(cookie, courseID string) (*domain.Co
 		})
 	}
 
+	totalSessions := len(sessions)
+	completedSessions := 0
+	for _, s := range sessions {
+		if s.Status == domain.SessionStatusDone {
+			completedSessions++
+		}
+	}
+
 	return &domain.CourseDetail{
-		CourseSummary: domain.CourseSummary{CourseID: courseID},
-		Sessions:      sessions,
+		CourseSummary: domain.CourseSummary{
+			CourseID:          courseID,
+			TotalSessions:     totalSessions,
+			CompletedSessions: completedSessions,
+		},
+		Sessions: sessions,
 	}, nil
 }
 
