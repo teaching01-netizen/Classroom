@@ -3,6 +3,7 @@ package warwick
 import (
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
@@ -156,6 +157,12 @@ func NewSessionPool(email, password, loginURL string, qrSessions, teacherSession
 			password: password,
 			loginURL: loginURL,
 		}
+		// Spread session TTL expiry across a 5-minute window to prevent
+		// synchronized re-login when all sessions cross the refresh threshold
+		// at the same time (T+55min from startup).
+		stagger := time.Duration(rand.Intn(300)) * time.Second
+		sessions[i].obtainedAt = time.Now().Add(-stagger)
+		sessions[i].expiresAt = sessions[i].obtainedAt.Add(sessionTTL)
 	}
 
 	return &SessionPool{
