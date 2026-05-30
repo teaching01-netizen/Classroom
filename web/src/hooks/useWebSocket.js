@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useRoomStore } from '../store/useRoomStore';
 import { useSessionStore } from '../store/useSessionStore';
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:3001/ws';
+const WS_URL = import.meta.env.VITE_WS_URL || `/ws`;
 
 export const WS_RECONNECT_EVENT = 'ws-reconnect';
 
