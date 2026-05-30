@@ -59,15 +59,6 @@ func main() {
 	var refresher *service.DataRefresher
 	if sessionPool != nil {
 		qrClient = warwick.NewWarwickQrClientFromPool(sessionPool, warwick.TierQR)
-		classroomClient = warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher, sharedCache)
-		refresher = service.NewDataRefresher(classroomClient, cacheInterval)
-
-		// Sync warmup at startup — pre-fetches course list + active course details.
-		warmupCtx, warmupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := refresher.WarmOnce(warmupCtx); err != nil {
-			slog.Warn("initial cache warmup failed, will retry in background", "error", err)
-		}
-		warmupCancel()
 	}
 
 	// Connect to database
@@ -99,6 +90,19 @@ func main() {
 	}
 
 	favRepo := db.NewPgFavouriteRepository(pool)
+
+	if sessionPool != nil {
+		sessionCheckinRepo := db.NewPgSessionCheckinRepository(pool)
+		classroomClient = warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher, sharedCache, sessionCheckinRepo)
+		refresher = service.NewDataRefresher(classroomClient, cacheInterval)
+
+		// Sync warmup at startup — pre-fetches course list + active course details.
+		warmupCtx, warmupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := refresher.WarmOnce(warmupCtx); err != nil {
+			slog.Warn("initial cache warmup failed, will retry in background", "error", err)
+		}
+		warmupCancel()
+	}
 
 	wsMaxConns := getEnvInt("WARWICK_MAX_CONCURRENT_WS", 500)
 
