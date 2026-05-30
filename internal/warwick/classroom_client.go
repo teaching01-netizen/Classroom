@@ -553,9 +553,20 @@ func (c *ClassroomClient) fetchSessionDetail(cookie, sessionID string) (*domain.
 		})
 	}
 
+	checkedInCount := 0
+	for _, s := range students {
+		if s.CheckedIn {
+			checkedInCount++
+		}
+	}
+
 	return &domain.SessionDetail{
-		SessionSummary: domain.SessionSummary{SessionID: sessionID},
-		Students:       students,
+		SessionSummary: domain.SessionSummary{
+			SessionID:      sessionID,
+			TotalStudents:  len(students),
+			CheckedInCount: checkedInCount,
+		},
+		Students: students,
 	}, nil
 }
 
