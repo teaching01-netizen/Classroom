@@ -139,7 +139,7 @@ type SessionPool struct {
 // qrSessions: number of sessions dedicated to QR polling (steady, predictable traffic)
 // teacherSessions: number of sessions dedicated to teacher browsing (bursty)
 // interactiveSessions: number of sessions dedicated to toggle check-in (fast, low-latency)
-func NewSessionPool(email, password, loginURL string, qrSessions, teacherSessions, interactiveSessions int) (*SessionPool, error) {
+func NewSessionPool(email, password, loginURL string, qrSessions, teacherSessions, interactiveSessions int, transport ...*http.Transport) (*SessionPool, error) {
 	if qrSessions < 1 {
 		return nil, fmt.Errorf("warwick: qrSessions must be >= 1, got %d", qrSessions)
 	}
@@ -150,16 +150,25 @@ func NewSessionPool(email, password, loginURL string, qrSessions, teacherSession
 		return nil, fmt.Errorf("warwick: interactiveSessions must be >= 1, got %d", interactiveSessions)
 	}
 
+	var sharedTransport *http.Transport
+	if len(transport) > 0 {
+		sharedTransport = transport[0]
+	}
+
 	total := qrSessions + teacherSessions + interactiveSessions
 	sessions := make([]*pooledSession, total)
 	for i := range total {
-		sessions[i] = &pooledSession{
-			client: &http.Client{
-				Timeout: 30 * time.Second,
-				CheckRedirect: func(req *http.Request, via []*http.Request) error {
-					return http.ErrUseLastResponse
-				},
+		cli := &http.Client{
+			Timeout: 30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
 			},
+		}
+		if sharedTransport != nil {
+			cli.Transport = sharedTransport
+		}
+		sessions[i] = &pooledSession{
+			client: cli,
 			email:    email,
 			password: password,
 			loginURL: loginURL,

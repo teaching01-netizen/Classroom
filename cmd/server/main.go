@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -29,13 +30,22 @@ func main() {
 	slog.Info("Starting QR Command Center server...")
 
 	// Create session pool with traffic-tier isolation
-	// 2 QR sessions (round-robin for concurrent polling)
-	// 1 teacher session (sequential browsing is fine)
-	// 2 interactive sessions (low-latency for toggle check-in)
+	qrSessions := getEnvInt("WARWICK_QR_SESSIONS", 2)
+	teacherSessions := getEnvInt("WARWICK_TEACHER_SESSIONS", 2)
+	interactiveSessions := getEnvInt("WARWICK_INTERACTIVE_SESSIONS", 2)
+	connsPerHost := getEnvInt("WARWICK_CONNS_PER_HOST", 50)
+
 	slog.Info("Creating Warwick session pool...")
 	email := os.Getenv("WARWICK_EMAIL")
 	password := os.Getenv("WARWICK_PASSWORD")
-	sessionPool, err := warwick.NewSessionPool(email, password, "https://warwick.humantix.cloud/admin/", 2, 1, 2)
+
+	sharedTransport := &http.Transport{
+		MaxConnsPerHost:     connsPerHost,
+		MaxIdleConnsPerHost: connsPerHost,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+	sessionPool, err := warwick.NewSessionPool(email, password, "https://warwick.humantix.cloud/admin/", qrSessions, teacherSessions, interactiveSessions, sharedTransport)
 	if err != nil {
 		slog.Warn("Failed to create Warwick session pool; will retry on demand", "error", err)
 	}
@@ -138,6 +148,25 @@ func main() {
 
 	api.StopRateLimiters()
 	slog.Info("Server stopped")
+}
+
+// getEnvInt parses an integer from an env var, falling back to defaultVal on error or empty.
+// Values ≤ 0 are treated as invalid and fall back to defaultVal.
+func getEnvInt(key string, defaultVal int) int {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil {
+		slog.Warn("invalid integer for env var", "key", key, "value", val, "error", err)
+		return defaultVal
+	}
+	if n <= 0 {
+		slog.Warn("non-positive integer for env var, using default", "key", key, "value", val, "default", defaultVal)
+		return defaultVal
+	}
+	return n
 }
 
 // getEnvDuration parses a duration from an env var, falling back to defaultVal on error or empty.

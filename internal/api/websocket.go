@@ -6,6 +6,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -13,8 +16,40 @@ import (
 	"qr-command-center/internal/service"
 )
 
+var (
+	wsConnCount atomic.Int64
+	wsMaxConns  int64
+)
+
+func init() {
+	wsMaxConns = int64(envOrDefaultInt("WARWICK_MAX_CONCURRENT_WS", 500))
+}
+
+// envOrDefaultInt parses an integer from an env var, falling back to defaultVal.
+func envOrDefaultInt(key string, defaultVal int) int {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil {
+		return defaultVal
+	}
+	if n <= 0 {
+		return defaultVal
+	}
+	return n
+}
+
 func wsHandler(rm *service.RoomManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if wsConnCount.Load() >= wsMaxConns {
+			http.Error(w, "too many WebSocket connections", http.StatusServiceUnavailable)
+			return
+		}
+		wsConnCount.Add(1)
+		defer wsConnCount.Add(-1)
+
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			slog.Error("ws accept failed", "error", err)
