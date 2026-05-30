@@ -19,6 +19,31 @@ const (
 	TierTeacher                    // Teacher browsing + toggle — bursty
 )
 
+// Staggered re-auth / kicked detection constants.
+const (
+	// sessionMinValidAge is the threshold below which a session failure is
+	// considered a guaranteed admin-kick (human logged in, invalidated our session).
+	sessionMinValidAge = 2 * time.Minute
+
+	// sessionMaxValidAge is the threshold above which a session failure is
+	// considered normal TTL expiry (safe to re-login immediately).
+	sessionMaxValidAge = 55 * time.Minute
+
+	// sessionBackoffInitial is the first backoff duration after a detected kick.
+	sessionBackoffInitial = 30 * time.Second
+
+	// sessionBackoffMax is the maximum backoff duration (caps exponential growth).
+	sessionBackoffMax = 15 * time.Minute
+
+	// sessionBackoffMaxAttempts is the number of backoff steps before capping.
+	sessionBackoffMaxAttempts = 6
+)
+
+// ErrAuthConflict is returned when a pooled session is in its backoff window
+// after detecting a human-admin auth conflict. The caller should NOT retry with
+// a force-refresh — doing so would kick the human admin and cause a ping-pong.
+var ErrAuthConflict = fmt.Errorf("warwick: auth conflict — human admin likely logged in, backing off")
+
 // SessionRef is an acquired session handle.
 type SessionRef struct {
 	Cookie     string
@@ -41,6 +66,44 @@ type pooledSession struct {
 	generation uint64
 
 	inUse bool
+
+	// Staggered re-auth: exponential backoff after detecting a human-admin kick.
+	backedOffUntil time.Time // don't re-auth until this time
+	backoffCount   int       // consecutive human-conflict backoffs
+}
+
+// applyBackoff sets the next backoff window using exponential growth.
+// Caller must hold s.mu write lock.
+func (s *pooledSession) applyBackoff() {
+	s.backoffCount++
+	if s.backoffCount > sessionBackoffMaxAttempts {
+		s.backoffCount = sessionBackoffMaxAttempts
+	}
+	d := sessionBackoffInitial * time.Duration(1<<uint(s.backoffCount-1))
+	if d > sessionBackoffMax {
+		d = sessionBackoffMax
+	}
+	s.backedOffUntil = time.Now().Add(d)
+}
+
+// resetBackoff clears the backoff state after a successful login.
+// Caller must hold s.mu write lock.
+func (s *pooledSession) resetBackoff() {
+	s.backedOffUntil = time.Time{}
+	s.backoffCount = 0
+}
+
+// isBackedOff returns true when the session is in its human-conflict cooldown.
+// Caller must hold at least s.mu read lock.
+func (s *pooledSession) isBackedOff() bool {
+	return s.backedOffUntil.After(time.Now())
+}
+
+// isKickCandidate returns true when the session was obtained recently enough
+// that a subsequent login failure likely indicates an admin kick rather than
+// a normal TTL expiry. Caller must hold at least s.mu read lock.
+func (s *pooledSession) isKickCandidate() bool {
+	return !s.obtainedAt.IsZero() && time.Since(s.obtainedAt) <= sessionMaxValidAge
 }
 
 // SessionPool manages N independent Warwick sessions across traffic tiers.
@@ -164,11 +227,27 @@ func (p *SessionPool) Release(ref *SessionRef) {
 func (p *SessionPool) ForceRefreshOnSession(ref *SessionRef) (string, uint64, error) {
 	s := ref.session
 	s.mu.Lock()
+
+	if s.isBackedOff() {
+		s.mu.Unlock()
+		return "", 0, ErrAuthConflict
+	}
+
 	cookie, gen, err := p.doLoginLocked(s)
-	s.mu.Unlock()
 	if err != nil {
+		if s.isKickCandidate() {
+			s.applyBackoff()
+			s.mu.Unlock()
+			return "", 0, ErrAuthConflict
+		}
+		s.mu.Unlock()
 		return "", 0, err
 	}
+
+	// Login succeeded — reset backoff.
+	s.resetBackoff()
+	s.mu.Unlock()
+
 	ref.Cookie = cookie
 	ref.Generation = gen
 	return cookie, gen, nil
@@ -195,7 +274,24 @@ func (p *SessionPool) ensureValidSession(s *pooledSession) (string, uint64, erro
 		return s.cookie, s.generation, nil
 	}
 
-	return p.doLoginLocked(s)
+	// Backoff check: if we detected a human-admin kick, don't compete.
+	if s.isBackedOff() {
+		return "", 0, ErrAuthConflict
+	}
+
+	cookie, gen, err := p.doLoginLocked(s)
+	if err != nil {
+		// Login failed — determine if this is a human conflict (kick) or normal expiry.
+		if s.isKickCandidate() {
+			s.applyBackoff()
+			return "", 0, ErrAuthConflict
+		}
+		return "", 0, err
+	}
+
+	// Login succeeded — reset backoff.
+	s.resetBackoff()
+	return cookie, gen, nil
 }
 
 // doLoginLocked performs the login flow and updates the session.
