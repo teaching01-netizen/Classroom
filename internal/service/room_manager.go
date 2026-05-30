@@ -39,31 +39,43 @@ type RoomManager struct {
 	repository    db.RoomRepository
 	emitMu        sync.Mutex
 	lastEmittedAt map[string]time.Time // roomID → last emit time (rate limiting)
+
+	subscribers []chan RoomManagerEvent
+	subscribeMu sync.Mutex
 }
 
 func NewRoomManager(qrClient domain.QrClient, repository db.RoomRepository) *RoomManager {
-	return &RoomManager{
+	rm := &RoomManager{
 		rooms:         make(map[string]*RoomState),
 		eventCh:       make(chan RoomManagerEvent, 100),
 		qrClient:      qrClient,
 		repository:    repository,
 		lastEmittedAt: make(map[string]time.Time),
 	}
+	go rm.fanoutLoop()
+	return rm
 }
 
 func (rm *RoomManager) Subscribe() <-chan RoomManagerEvent {
 	ch := make(chan RoomManagerEvent, 256)
-	go func() {
-		for event := range rm.eventCh {
+	rm.subscribeMu.Lock()
+	rm.subscribers = append(rm.subscribers, ch)
+	rm.subscribeMu.Unlock()
+	return ch
+}
+
+func (rm *RoomManager) fanoutLoop() {
+	for event := range rm.eventCh {
+		rm.subscribeMu.Lock()
+		for _, ch := range rm.subscribers {
 			select {
 			case ch <- event:
 			default:
 				slog.Warn("dropping event for slow subscriber")
 			}
 		}
-		close(ch)
-	}()
-	return ch
+		rm.subscribeMu.Unlock()
+	}
 }
 
 func (rm *RoomManager) LoadRoomsFromDB() error {
