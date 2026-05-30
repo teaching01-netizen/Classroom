@@ -96,8 +96,12 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 		}
 
 		// Stale fallback + async refresh (deduplicated via tryRefresh)
+		// Only spawn refresh when pool is available — refreshCoursesCache calls
+		// getCoursesWithPool which would nil-deref on pool-less clients.
 		if stale, ok := c.cache.GetStale("courses"); ok {
-			c.tryRefresh("courses", c.refreshCoursesCache)
+			if c.pool != nil {
+				c.tryRefresh("courses", c.refreshCoursesCache)
+			}
 			return stale.([]domain.CourseSummary), nil
 		}
 	}
@@ -162,6 +166,9 @@ func (c *ClassroomClient) enrichCourses(courses []domain.CourseSummary) {
 
 			detail, err := c.GetCourseDetail(courses[idx].CourseID)
 			if err != nil {
+				slog.Debug("enrich_course_detail_failed",
+					"course_id", courses[idx].CourseID,
+					"error", err)
 				return
 			}
 
