@@ -6,7 +6,6 @@ import (
 	"embed"
 	"fmt"
 	"log/slog"
-	"os"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -25,12 +24,12 @@ func NewPool(databaseURL string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Disable prepared statement cache (required for Supabase pooler)
-	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	config.MaxConns = 25
 	config.MinConns = 5
 	config.MaxConnLifetime = 30 * time.Minute
 	config.MaxConnIdleTime = 5 * time.Minute
+	// Disable prepared statement cache (required for Supabase pooler)
+	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	return pgxpool.NewWithConfig(context.Background(), config)
 }
 
@@ -64,10 +63,13 @@ func RunMigrations(databaseURL string) error {
 		return err
 	}
 
+	// After successful migration (or ErrNoChange), verify schema version >= 4
 	var version int
-	if err := db.QueryRow("SELECT version FROM schema_migrations").Scan(&version); err != nil || version < 4 {
+	rowErr := db.QueryRowContext(context.Background(), "SELECT version FROM schema_migrations").Scan(&version)
+	if rowErr != nil || version < 4 {
 		slog.Error("schema version below required minimum", "have", version, "need", 4)
-		os.Exit(1)
+		return fmt.Errorf("schema version %d below required minimum 4", version)
 	}
+
 	return nil
 }
