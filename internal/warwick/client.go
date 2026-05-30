@@ -78,6 +78,9 @@ func (c *WarwickQrClient) FetchQR(classID string) (domain.QrResponse, error) {
 			if errors.Is(err, ErrAuthConflict) {
 				return domain.QrResponse{}, domain.ErrAuthConflict
 			}
+			if strings.Contains(err.Error(), "no available sessions") {
+				return domain.QrResponse{}, domain.ErrPoolExhausted
+			}
 			return domain.QrResponse{}, domain.ErrAuthExpired
 		}
 		defer c.pool.Release(ref)
@@ -99,6 +102,9 @@ func (c *WarwickQrClient) FetchQRWithFreshAuth(classID string) (domain.QrRespons
 		if err != nil {
 			if errors.Is(err, ErrAuthConflict) {
 				return domain.QrResponse{}, domain.ErrAuthConflict
+			}
+			if strings.Contains(err.Error(), "no available sessions") {
+				return domain.QrResponse{}, domain.ErrPoolExhausted
 			}
 			return domain.QrResponse{}, domain.ErrAuthExpired
 		}
