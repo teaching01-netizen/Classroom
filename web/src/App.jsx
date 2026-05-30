@@ -102,8 +102,8 @@ function PinnedCourseCard({ course }) {
         {course.enrolled_count != null && (
           <span>{course.enrolled_count} enrolled</span>
         )}
-        {course.sessions_count != null && (
-          <span>{course.sessions_count} sessions</span>
+        {course.total_sessions != null && (
+          <span>{course.total_sessions} sessions</span>
         )}
       </div>
 

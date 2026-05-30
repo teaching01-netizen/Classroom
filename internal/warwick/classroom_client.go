@@ -101,8 +101,8 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 		if stale, ok := c.cache.GetStale("courses"); ok {
 			if c.pool != nil {
 				c.tryRefresh("courses", c.refreshCoursesCache)
+				return stale.([]domain.CourseSummary), nil
 			}
-			return stale.([]domain.CourseSummary), nil
 		}
 	}
 
