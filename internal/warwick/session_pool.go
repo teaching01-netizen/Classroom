@@ -44,6 +44,10 @@ const (
 // a force-refresh — doing so would kick the human admin and cause a ping-pong.
 var ErrAuthConflict = fmt.Errorf("warwick: auth conflict — human admin likely logged in, backing off")
 
+// ErrNoAvailableSessions is returned when all sessions in the requested tier
+// are currently in use. Callers should retry with backoff rather than force-refreshing.
+var ErrNoAvailableSessions = fmt.Errorf("warwick: no available sessions")
+
 // SessionRef is an acquired session handle.
 type SessionRef struct {
 	Cookie     string
@@ -215,7 +219,7 @@ func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 	}
 
 	p.mu.Unlock()
-	return nil, fmt.Errorf("warwick: no available sessions in tier %d (all %d in use)",
+	return nil, fmt.Errorf("%w: tier %d (all %d in use)", ErrNoAvailableSessions,
 		tier, end-start)
 }
 

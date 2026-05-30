@@ -79,6 +79,60 @@ func TestFetchQRLoginPageHTML(t *testing.T) {
 	assert.Equal(t, domain.ErrKindAuthExpired, fetchErr.Kind)
 }
 
+func TestFetchQRPoolExhaustion(t *testing.T) {
+	loginServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "ASP.NET_SessionId=abc123; path=/; HttpOnly")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer loginServer.Close()
+
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1)
+	require.NoError(t, err)
+
+	// Acquire both sessions to exhaust the pool
+	ref1, err := pool.Acquire(TierQR)
+	require.NoError(t, err)
+	ref2, err := pool.Acquire(TierTeacher)
+	require.NoError(t, err)
+
+	client := NewWarwickQrClientFromPool(pool, TierQR)
+	_, err = client.FetchQR("18248")
+	require.Error(t, err)
+	var fetchErr *domain.FetchError
+	require.ErrorAs(t, err, &fetchErr)
+	assert.Equal(t, domain.ErrKindPoolExhausted, fetchErr.Kind)
+
+	pool.Release(ref1)
+	pool.Release(ref2)
+}
+
+func TestFetchQRWithFreshAuthPoolExhaustion(t *testing.T) {
+	loginServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "ASP.NET_SessionId=abc123; path=/; HttpOnly")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer loginServer.Close()
+
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1)
+	require.NoError(t, err)
+
+	// Acquire both sessions to exhaust the pool
+	ref1, err := pool.Acquire(TierQR)
+	require.NoError(t, err)
+	ref2, err := pool.Acquire(TierTeacher)
+	require.NoError(t, err)
+
+	client := NewWarwickQrClientFromPool(pool, TierQR)
+	_, err = client.FetchQRWithFreshAuth("18248")
+	require.Error(t, err)
+	var fetchErr *domain.FetchError
+	require.ErrorAs(t, err, &fetchErr)
+	assert.Equal(t, domain.ErrKindPoolExhausted, fetchErr.Kind)
+
+	pool.Release(ref1)
+	pool.Release(ref2)
+}
+
 func TestFetchQREmptyQRUrl(t *testing.T) {
 	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Set-Cookie", "ASP.NET_SessionId=abc123; path=/; HttpOnly")

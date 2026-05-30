@@ -372,6 +372,7 @@ roomLoop:
 							rm.mu.Lock()
 							state.room.ErrorMessage = strPtr("Session recovery failed after 10 attempts")
 							state.room.TransitionTo(domain.Stopped)
+							state.cancel()
 							state.cancel = nil
 							roomCopy = state.room
 							rm.mu.Unlock()
