@@ -1,5 +1,3 @@
-//go:build integration
-
 package warwick
 
 import (
@@ -22,8 +20,9 @@ import (
 // mockCheckinRepo implements db.SessionCheckinRepository for testing DB-backed cache behavior.
 type mockCheckinRepo struct {
 	mu           sync.Mutex
-	students     map[string][]domain.StudentCheckin // sessionID -> students
-	maxToggledAt map[string]*time.Time              // sessionID -> max toggled at
+	students     map[string][]domain.StudentCheckin        // sessionID -> students
+	toggledAt    map[string]map[string]time.Time            // sessionID -> studentID -> toggledAt
+	maxToggledAt map[string]*time.Time                      // sessionID -> max toggled at (legacy, kept for compat)
 }
 
 func (m *mockCheckinRepo) GetStudentsBySession(ctx context.Context, sessionID string) ([]domain.StudentCheckin, error) {
@@ -42,31 +41,42 @@ func (m *mockCheckinRepo) UpsertFromWarwick(ctx context.Context, sessionID strin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.students == nil {
+		m.students = make(map[string][]domain.StudentCheckin)
+	}
+	if m.toggledAt == nil {
+		m.toggledAt = make(map[string]map[string]time.Time)
+	}
+	if m.maxToggledAt == nil {
+		m.maxToggledAt = make(map[string]*time.Time)
+	}
+
 	existing := m.students[sessionID]
 	if existing == nil {
 		existing = make([]domain.StudentCheckin, 0)
 	}
 
+	// Build lookup by StudentID
+	existingMap := make(map[string]domain.StudentCheckin)
+	for _, e := range existing {
+		existingMap[e.StudentID] = e
+	}
+
 	for _, s := range students {
-		found := false
-		for i, e := range existing {
-			if e.StudentID == s.StudentID {
-				// If any toggle has occurred in this session, preserve checked_in
-				if m.maxToggledAt[sessionID] != nil {
-					existing[i].CheckedIn = e.CheckedIn
-				} else {
-					existing[i].CheckedIn = s.CheckedIn
-				}
-				existing[i].Name = s.Name
-				found = true
-				break
+		if prev, exists := existingMap[s.StudentID]; exists {
+			// Only preserve CheckedIn if THIS student was individually toggled
+			if _, toggled := m.toggledAt[sessionID][s.StudentID]; toggled {
+				s.CheckedIn = prev.CheckedIn
 			}
 		}
-		if !found {
-			existing = append(existing, s)
-		}
+		existingMap[s.StudentID] = s
 	}
-	m.students[sessionID] = existing
+
+	result := make([]domain.StudentCheckin, 0, len(existingMap))
+	for _, s := range existingMap {
+		result = append(result, s)
+	}
+	m.students[sessionID] = result
 	return nil
 }
 
@@ -74,10 +84,21 @@ func (m *mockCheckinRepo) UpsertStudent(ctx context.Context, sessionID string, s
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	now := time.Now()
+	if m.students == nil {
+		m.students = make(map[string][]domain.StudentCheckin)
+	}
+	if m.toggledAt == nil {
+		m.toggledAt = make(map[string]map[string]time.Time)
+	}
 	if m.maxToggledAt == nil {
 		m.maxToggledAt = make(map[string]*time.Time)
 	}
+
+	now := time.Now()
+	if m.toggledAt[sessionID] == nil {
+		m.toggledAt[sessionID] = make(map[string]time.Time)
+	}
+	m.toggledAt[sessionID][student.StudentID] = now
 	m.maxToggledAt[sessionID] = &now
 
 	existing := m.students[sessionID]
@@ -99,14 +120,23 @@ func (m *mockCheckinRepo) UpsertStudent(ctx context.Context, sessionID string, s
 func (m *mockCheckinRepo) GetMaxToggledAtForSession(ctx context.Context, sessionID string) (*time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.maxToggledAt == nil {
+
+	if m.toggledAt == nil {
 		return nil, nil
 	}
-	t := m.maxToggledAt[sessionID]
-	if t == nil {
+	studentToggles := m.toggledAt[sessionID]
+	if len(studentToggles) == 0 {
 		return nil, nil
 	}
-	return t, nil
+
+	var latest *time.Time
+	for _, t := range studentToggles {
+		if latest == nil || t.After(*latest) {
+			copy := t
+			latest = &copy
+		}
+	}
+	return latest, nil
 }
 
 // --- Test helpers ---
@@ -272,8 +302,10 @@ func TestClassroomClient_GetSessionDetail_StaleCache_DBFresh_RepopulatesFromDB(t
 				{StudentID: "S2", Name: "Bob", CheckedIn: false},
 			},
 		},
-		maxToggledAt: map[string]*time.Time{
-			"session1": &now,
+		toggledAt: map[string]map[string]time.Time{
+			"session1": {
+				"S1": now,
+			},
 		},
 	}
 
@@ -340,8 +372,10 @@ func TestClassroomClient_GetSessionDetail_StaleCache_DBSame_ServesStale(t *testi
 				{StudentID: "S1", Name: "Alice", CheckedIn: true}, // DB has toggled to true
 			},
 		},
-		maxToggledAt: map[string]*time.Time{
-			"session1": &now,
+		toggledAt: map[string]map[string]time.Time{
+			"session1": {
+				"S1": now,
+			},
 		},
 	}
 
