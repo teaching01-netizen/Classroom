@@ -1,2 +1,17 @@
+# secrets
 .env
+
+# go build output
+server
+
+# rust build output (docker context)
 target/
+
+# js deps
+web/node_modules/
+
+# vite build output
+web/dist/
+
+# os metadata
+.DS_Store
