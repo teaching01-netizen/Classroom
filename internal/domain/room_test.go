@@ -20,7 +20,7 @@ func TestValidTransitions(t *testing.T) {
 		{Running, Fetching}, {Running, Stopped},
 		{Fetching, Running}, {Fetching, Warning}, {Fetching, AuthExpired}, {Fetching, Stopped},
 		{Warning, Fetching}, {Warning, Stopped},
-		{AuthExpired, Stopped},
+		{AuthExpired, Fetching}, {AuthExpired, Stopped},
 		{Stopped, Running},
 	}
 	for _, c := range cases {
@@ -38,7 +38,7 @@ func TestInvalidTransitions(t *testing.T) {
 		{Fetching, Fetching}, {Fetching, Idle},
 		{Warning, Warning}, {Warning, Idle}, {Warning, Running}, {Warning, AuthExpired},
 		{AuthExpired, AuthExpired}, {AuthExpired, Idle}, {AuthExpired, Running},
-		{AuthExpired, Fetching}, {AuthExpired, Warning},
+		{AuthExpired, Warning},
 		{Stopped, Stopped}, {Stopped, Idle}, {Stopped, Fetching}, {Stopped, Warning}, {Stopped, AuthExpired},
 	}
 	for _, c := range cases {
@@ -57,6 +57,7 @@ func TestFetchErrorToRoomStatus(t *testing.T) {
 	assert.Equal(t, AuthExpired, ErrAuthExpired.ToRoomStatus())
 	assert.Equal(t, Warning, NewNetworkError("timeout").ToRoomStatus())
 	assert.Equal(t, Warning, NewInvalidPayloadError("bad json").ToRoomStatus())
+	assert.Equal(t, Warning, ErrRateLimited.ToRoomStatus())
 }
 
 func TestRoomTransitionTo(t *testing.T) {

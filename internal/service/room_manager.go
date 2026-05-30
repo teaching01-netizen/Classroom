@@ -241,11 +241,76 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 					}
 				}
 					if state.room.Status == domain.AuthExpired {
-						msg := "Session expired"
-						state.room.ErrorMessage = &msg
-						if state.cancel != nil {
-							state.cancel()
+						// Recovery loop — keep worker alive, retry with backoff
+						msg := "Session expired, retrying..."
+						state.room.WarningMessage = &msg
+						state.room.ErrorMessage = nil
+						roomCopy := state.room
+						rm.mu.Unlock()
+
+						go func() {
+							if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
+								slog.Error("failed to persist recovery state", "error", err)
+							}
+						}()
+						rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+
+						// Recovery loop with exponential backoff
+						backoff := 1 * time.Second
+						const maxBackoff = 30 * time.Second
+						recovered := false
+						for attempts := 0; attempts < 10; attempts++ {
+							select {
+							case <-state.ctx.Done():
+								return
+							case <-time.After(backoff):
+								resp, err := rm.qrClient.FetchQRWithFreshAuth(classID)
+								if err == nil {
+									rm.mu.Lock()
+									now := time.Now()
+									expiresAt := now.Add(time.Duration(resp.QrTime) * time.Second)
+									state.room.QRURL = &resp.QrURL
+									state.room.ExpiresAt = &expiresAt
+									state.room.LastUpdatedAt = &now
+									state.room.LastFetchAt = &now
+									state.room.WarningMessage = nil
+									state.room.ErrorMessage = nil
+									state.room.TransitionTo(domain.Running)
+									roomCopy = state.room
+									rm.mu.Unlock()
+									go func() {
+										if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
+											slog.Error("failed to persist recovery", "error", err)
+										}
+									}()
+									rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+									recovered = true
+									break
+								}
+								backoff *= 2
+								if backoff > maxBackoff {
+									backoff = maxBackoff
+								}
+							}
+							if recovered {
+								break
+							}
 						}
+						if !recovered {
+							rm.mu.Lock()
+							state.room.ErrorMessage = strPtr("Session recovery failed after 10 attempts")
+							state.room.TransitionTo(domain.Stopped)
+							roomCopy = state.room
+							rm.mu.Unlock()
+							go func() {
+								if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
+									slog.Error("failed to persist final recovery failure", "error", err)
+								}
+							}()
+							rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+							return
+						}
+						continue
 					} else {
 						msg := fmt.Sprintf("Error: %v", err)
 						state.room.WarningMessage = &msg
@@ -261,9 +326,6 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 
 					rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
 
-				if roomCopy.Status == domain.AuthExpired {
-					return
-				}
 					continue
 				}
 
@@ -292,3 +354,5 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 		}
 	}
 }
+
+func strPtr(s string) *string { return &s }

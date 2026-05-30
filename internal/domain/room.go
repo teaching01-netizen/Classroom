@@ -40,7 +40,7 @@ var allowedTransitions = map[RoomStatus][]RoomStatus{
 	Running:     {Fetching, Stopped},
 	Fetching:    {Running, Warning, AuthExpired, Stopped},
 	Warning:     {Fetching, Stopped},
-	AuthExpired: {Stopped},
+	AuthExpired: {Fetching, Stopped},
 	Stopped:     {Running},
 }
 
