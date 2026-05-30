@@ -461,8 +461,11 @@ func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, c
 		}
 		err = c.doToggleCheckin(cookie, sessionID, studentID, checked)
 		if err == nil {
-			c.cache.Invalidate("course:" + courseID)
-			c.cache.Invalidate("courses")
+			if c.cache != nil {
+				c.cache.Invalidate("course:" + courseID)
+				c.cache.Invalidate("courses")
+				c.cache.Invalidate("session:" + sessionID)
+			}
 			return nil
 		}
 		lastErr = err

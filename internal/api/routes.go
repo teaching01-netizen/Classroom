@@ -108,10 +108,14 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 func healthHandler(c *cache.Cache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		cacheSize := 0
+		if c != nil {
+			cacheSize = c.Size()
+		}
 		writeJSON(w, http.StatusOK, successResponse(map[string]interface{}{
 			"message": "QR Command Center API is running!",
 			"cache": map[string]interface{}{
-				"size": c.Size(),
+				"size": cacheSize,
 			},
 		}))
 	}
