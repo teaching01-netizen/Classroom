@@ -10,14 +10,10 @@ import (
 )
 
 func TestWSGuard_RejectsWhenAtLimit(t *testing.T) {
-	oldMax := wsMaxConns
-	wsMaxConns = 3
-	defer func() { wsMaxConns = oldMax }()
-
 	wsConnCount.Store(3)
 	defer wsConnCount.Store(0)
 
-	handler := wsHandler(nil)
+	handler := wsHandler(nil, 3)
 
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	rec := httptest.NewRecorder()
@@ -29,14 +25,10 @@ func TestWSGuard_RejectsWhenAtLimit(t *testing.T) {
 }
 
 func TestWSGuard_AllowsUnderLimit(t *testing.T) {
-	oldMax := wsMaxConns
-	wsMaxConns = 10
-	defer func() { wsMaxConns = oldMax }()
-
 	wsConnCount.Store(0)
 	defer wsConnCount.Store(0)
 
-	handler := wsHandler(nil)
+	handler := wsHandler(nil, 10)
 
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	rec := httptest.NewRecorder()
@@ -49,15 +41,11 @@ func TestWSGuard_AllowsUnderLimit(t *testing.T) {
 }
 
 func TestWSGuard_CounterIncrementsAndDecrements(t *testing.T) {
-	oldMax := wsMaxConns
-	wsMaxConns = 10
-	defer func() { wsMaxConns = oldMax }()
-
 	// Reset counter
 	wsConnCount.Store(0)
 	defer wsConnCount.Store(0)
 
-	handler := wsHandler(nil)
+	handler := wsHandler(nil, 10)
 
 	// Capture counter just before the call (should be 0)
 	before := wsConnCount.Load()

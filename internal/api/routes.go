@@ -37,7 +37,7 @@ func init() {
 	allowedOrigin = os.Getenv("CORS_ORIGIN")
 }
 
-func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.FavouriteRepository, c *cache.Cache, refresher *service.DataRefresher) *chi.Mux {
+func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.FavouriteRepository, c *cache.Cache, refresher *service.DataRefresher, wsMaxConns int64) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(chimiddleware.Logger)
 	r.Use(corsMiddleware)
@@ -70,8 +70,8 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.
 		r.Delete("/favourites/{courseId}", removeFavouriteHandler(favRepo))
 	})
 
-	r.Get("/ws", wsHandler(rm))
-	r.Get("/ws/", wsHandler(rm))
+	r.Get("/ws", wsHandler(rm, wsMaxConns))
+	r.Get("/ws/", wsHandler(rm, wsMaxConns))
 
 	r.Handle("/*", spaFallbackHandler())
 

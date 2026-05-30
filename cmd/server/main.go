@@ -100,7 +100,9 @@ func main() {
 
 	favRepo := db.NewPgFavouriteRepository(pool)
 
-	router := api.NewRouter(rm, classroomClient, favRepo, sharedCache, refresher)
+	wsMaxConns := getEnvInt("WARWICK_MAX_CONCURRENT_WS", 500)
+
+	router := api.NewRouter(rm, classroomClient, favRepo, sharedCache, refresher, int64(wsMaxConns))
 
 	addr := os.Getenv("PORT")
 	if addr == "" {
