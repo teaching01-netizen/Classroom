@@ -238,7 +238,9 @@ func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 
 			cookie, gen, err := p.ensureValidSession(s)
 			if err != nil {
+				p.mu.Lock()
 				s.inUse = false
+				p.mu.Unlock()
 				return nil, fmt.Errorf("warwick: acquire session: %w", err)
 			}
 
@@ -321,7 +323,9 @@ func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration
 
 				cookie, gen, err := p.ensureValidSession(s)
 				if err != nil {
+					p.mu.Lock()
 					s.inUse = false
+					p.mu.Unlock()
 					return nil, fmt.Errorf("warwick: acquire session: %w", err)
 				}
 
