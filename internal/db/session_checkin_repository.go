@@ -58,7 +58,7 @@ func (r *PgSessionCheckinRepository) UpsertFromWarwick(ctx context.Context, sess
 	if err != nil {
 		return fmt.Errorf("upsert from warwick begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(context.Background())
 
 	for _, student := range students {
 		_, err := tx.Exec(ctx,
@@ -88,7 +88,7 @@ func (r *PgSessionCheckinRepository) UpsertStudent(ctx context.Context, sessionI
 
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO session_checkins (session_id, student_id, student_name, checked_in, toggled_at, refreshed_at)
-		 VALUES ($1, $2, (SELECT student_name FROM session_checkins WHERE session_id=$1 AND student_id=$2), $3, NOW(), NOW())
+		 VALUES ($1, $2, COALESCE((SELECT student_name FROM session_checkins WHERE session_id=$1 AND student_id=$2), ''), $3, NOW(), NOW())
 		 ON CONFLICT (session_id, student_id) DO UPDATE SET
 		     checked_in   = EXCLUDED.checked_in,
 		     toggled_at   = NOW(),
