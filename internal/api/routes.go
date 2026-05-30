@@ -29,9 +29,13 @@ func StopRateLimiters() {
 	roomLimiter.Stop()
 }
 
-var allowedOrigins = map[string]bool{
-	"http://localhost:3001": true,
-	"http://localhost:3000": true,
+var allowedOrigin string
+
+func init() {
+	allowedOrigin = os.Getenv("CORS_ORIGIN")
+	if allowedOrigin == "" {
+		allowedOrigin = "*"
+	}
 }
 
 func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient) *chi.Mux {
@@ -39,11 +43,8 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient) *chi.Mux {
 	r.Use(chimiddleware.Logger)
 	r.Use(corsMiddleware)
 
-	r.Get("/api/", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, successResponse(map[string]string{
-			"message": "QR Command Center API is running!",
-		}))
-	})
+	r.Get("/api", healthHandler())
+	r.Get("/api/", healthHandler())
 
 	r.Route("/api/rooms", func(r chi.Router) {
 		r.Use(roomLimiter.Middleware)
@@ -67,6 +68,7 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient) *chi.Mux {
 	})
 
 	r.Get("/ws", wsHandler(rm))
+	r.Get("/ws/", wsHandler(rm))
 
 	r.Handle("/*", spaFallbackHandler())
 
@@ -76,23 +78,33 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient) *chi.Mux {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if allowedOrigins[origin] {
+		if allowedOrigin == "*" {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		} else if origin == allowedOrigin {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Access-Control-Max-Age", "86400")
+		} else {
+			// Not a recognized origin — still allow the request but don't echo origin
+			next.ServeHTTP(w, r)
+			return
 		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Max-Age", "86400")
 		if r.Method == "OPTIONS" {
-			if allowedOrigins[origin] {
-				w.WriteHeader(http.StatusOK)
-			} else {
-				w.WriteHeader(http.StatusNoContent)
-			}
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func healthHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, successResponse(map[string]string{
+			"message": "QR Command Center API is running!",
+		}))
+	}
 }
 
 func spaFallbackHandler() http.Handler {
