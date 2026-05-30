@@ -20,7 +20,10 @@ export const CourseCard = ({ course }) => {
     navigate(`/courses/${course.course_id}/sessions`);
   };
 
-  const attendancePercent = Math.min(Math.max(Math.round(course.avg_attendance_rate * 100), 0), 100);
+  const rawRate = course.avg_attendance_rate;
+  const attendancePercent = rawRate != null && rawRate > 0
+    ? Math.min(Math.max(Math.round(rawRate * 100), 0), 100)
+    : 0;
 
   return (
     <div
