@@ -58,6 +58,18 @@ func TestFetchErrorToRoomStatus(t *testing.T) {
 	assert.Equal(t, Warning, NewNetworkError("timeout").ToRoomStatus())
 	assert.Equal(t, Warning, NewInvalidPayloadError("bad json").ToRoomStatus())
 	assert.Equal(t, Warning, ErrRateLimited.ToRoomStatus())
+	assert.Equal(t, Warning, ErrAuthConflict.ToRoomStatus())
+	assert.Equal(t, Warning, ErrPoolExhausted.ToRoomStatus())
+}
+
+func TestErrPoolExhausted(t *testing.T) {
+	assert.Equal(t, "pool exhausted — all sessions in use", ErrPoolExhausted.Error())
+	assert.Equal(t, ErrKindPoolExhausted, ErrPoolExhausted.Kind)
+	assert.IsType(t, &FetchError{}, ErrPoolExhausted)
+}
+
+func TestErrPoolExhaustedToRoomStatus(t *testing.T) {
+	assert.Equal(t, Warning, ErrPoolExhausted.ToRoomStatus())
 }
 
 func TestRoomTransitionTo(t *testing.T) {

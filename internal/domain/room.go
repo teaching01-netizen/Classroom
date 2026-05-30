@@ -70,11 +70,13 @@ const (
 	ErrKindInvalidPayload
 	ErrKindRateLimited
 	ErrKindAuthConflict
+	ErrKindPoolExhausted
 )
 
 var ErrAuthExpired = &FetchError{Kind: ErrKindAuthExpired}
 var ErrRateLimited = &FetchError{Kind: ErrKindRateLimited}
 var ErrAuthConflict = &FetchError{Kind: ErrKindAuthConflict}
+var ErrPoolExhausted = &FetchError{Kind: ErrKindPoolExhausted}
 
 type FetchError struct {
 	Kind    FetchErrorKind
@@ -93,6 +95,8 @@ func (e *FetchError) Error() string {
 		return "warwick rate limit exceeded"
 	case ErrKindAuthConflict:
 		return "warwick auth conflict — human admin likely logged in"
+	case ErrKindPoolExhausted:
+		return "pool exhausted — all sessions in use"
 	default:
 		return "unknown fetch error"
 	}
@@ -105,6 +109,8 @@ func (e *FetchError) ToRoomStatus() RoomStatus {
 	case ErrKindRateLimited:
 		return Warning
 	case ErrKindAuthConflict:
+		return Warning
+	case ErrKindPoolExhausted:
 		return Warning
 	default:
 		return Warning
