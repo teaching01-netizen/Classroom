@@ -1,90 +1,79 @@
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
 
-const safeStorage = {
-  getItem: (name) => {
+const FAVOURITES_URL = '/api/teacher/favourites';
+
+export const usePinnedCoursesStore = create((set, get) => ({
+  pinnedCourseIds: [],
+  isLoading: false,
+
+  loadFavourites: async () => {
+    set({ isLoading: true });
     try {
-      const value = localStorage.getItem(name);
-      return value ? JSON.parse(value) : null;
-    } catch {
-      return null;
+      const res = await fetch(FAVOURITES_URL);
+      const result = await res.json();
+      if (result.success) {
+        set({ pinnedCourseIds: result.data.favourite_ids, isLoading: false });
+      } else {
+        set({ isLoading: false });
+      }
+    } catch (err) {
+      console.error('Failed to load favourites:', err);
+      set({ isLoading: false });
     }
   },
-  setItem: (name, value) => {
+
+  pinCourse: async (courseId) => {
+    set({ isLoading: true });
     try {
-      localStorage.setItem(name, JSON.stringify(value));
-    } catch (e) {
-      console.warn('Failed to persist pinned courses:', e);
+      const res = await fetch(FAVOURITES_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ course_id: courseId }),
+      });
+      if (!res.ok) {
+        throw new Error(`Pin failed: ${res.status}`);
+      }
+      set((state) => ({
+        pinnedCourseIds: state.pinnedCourseIds.includes(courseId)
+          ? state.pinnedCourseIds
+          : [...state.pinnedCourseIds, courseId],
+        isLoading: false,
+      }));
+    } catch (err) {
+      console.error('Failed to pin course:', err);
+      set({ isLoading: false });
     }
   },
-  removeItem: (name) => {
+
+  unpinCourse: async (courseId) => {
+    set({ isLoading: true });
     try {
-      localStorage.removeItem(name);
-    } catch {
-      // ignore
+      const res = await fetch(`${FAVOURITES_URL}/${courseId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        throw new Error(`Unpin failed: ${res.status}`);
+      }
+      set((state) => ({
+        pinnedCourseIds: state.pinnedCourseIds.filter((id) => id !== courseId),
+        isLoading: false,
+      }));
+    } catch (err) {
+      console.error('Failed to unpin course:', err);
+      set({ isLoading: false });
     }
   },
-};
 
-export const usePinnedCoursesStore = create(
-  persist(
-    (set, get) => ({
-      pinnedCourseIds: [],
-
-      pinCourse: (courseId) =>
-        set((state) => ({
-          pinnedCourseIds: state.pinnedCourseIds.includes(courseId)
-            ? state.pinnedCourseIds
-            : [...state.pinnedCourseIds, courseId],
-        })),
-
-      unpinCourse: (courseId) =>
-        set((state) => ({
-          pinnedCourseIds: state.pinnedCourseIds.filter((id) => id !== courseId),
-        })),
-
-      toggleCourse: (courseId) =>
-        set((state) => ({
-          pinnedCourseIds: state.pinnedCourseIds.includes(courseId)
-            ? state.pinnedCourseIds.filter((id) => id !== courseId)
-            : [...state.pinnedCourseIds, courseId],
-        })),
-
-      cleanupStalePins: (validCourseIds) =>
-        set((state) => ({
-          pinnedCourseIds: state.pinnedCourseIds.filter((id) =>
-            validCourseIds.includes(id)
-          ),
-        })),
-    }),
-    {
-      name: 'warwick-pinned-courses',
-      version: 1,
-      storage: createJSONStorage(() => safeStorage),
+  toggleCourse: async (courseId) => {
+    const { pinnedCourseIds } = get();
+    if (pinnedCourseIds.includes(courseId)) {
+      await get().unpinCourse(courseId);
+    } else {
+      await get().pinCourse(courseId);
     }
-  )
-);
+  },
+}));
 
 export const selectIsPinned = (courseId) => (state) =>
   state.pinnedCourseIds.includes(courseId);
 
 export const selectPinnedCourses = (courses) => (state) =>
   courses.filter((c) => state.pinnedCourseIds.includes(c.course_id));
-
-// Cross-tab sync: listen for storage changes from other tabs
-if (typeof window !== 'undefined') {
-  window.addEventListener('storage', (event) => {
-    if (event.key === 'warwick-pinned-courses' && event.newValue) {
-      try {
-        const parsed = JSON.parse(event.newValue);
-        if (parsed.state && Array.isArray(parsed.state.pinnedCourseIds)) {
-          usePinnedCoursesStore.setState({
-            pinnedCourseIds: parsed.state.pinnedCourseIds,
-          });
-        }
-      } catch {
-        // Ignore malformed storage events
-      }
-    }
-  });
-}

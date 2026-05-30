@@ -1,149 +1,230 @@
 ---
 phase: 02-code-review-command
-reviewed: 2026-05-29T19:00:00Z
-depth: standard
-files_reviewed: 2
+reviewed: 2026-05-30T13:00:00Z
+depth: deep
+files_reviewed: 8
 files_reviewed_list:
-  - web/src/components/QRModal.jsx
-  - web/src/pages/CheckinDetail.jsx
+  - internal/db/migrations/003_create_teacher_favourites.up.sql
+  - internal/db/migrations/003_create_teacher_favourites.down.sql
+  - internal/db/favourite_repository.go
+  - internal/api/favourite_handlers.go
+  - internal/api/routes.go
+  - cmd/server/main.go
+  - web/src/store/usePinnedCoursesStore.js
+  - web/src/App.jsx
 findings:
-  critical: 0
-  warning: 1
+  critical: 1
+  warning: 5
   info: 4
-  total: 5
+  total: 10
 status: issues_found
 ---
 
-# Phase 02: Code Review Report — Task 5: Expired state for QRModal
+# Phase 02: Code Review Report — Favourite Courses DB Migration
 
-**Reviewed:** 2026-05-29T19:00:00Z
-**Depth:** standard
-**Files Reviewed:** 2
+**Reviewed:** 2026-05-30T13:00:00Z
+**Depth:** deep (cross-file call-chain analysis)
+**Files Reviewed:** 8
 **Status:** issues_found
 
 ## Summary
 
-Reviewed T5 implementation — expired state overlay with final stats and "Get New QR" button on `QRModal.jsx`, with `onRefresh` prop wired in `CheckinDetail.jsx`. The conditional rendering is clean: ternary branch for expired vs active state, Fragment-wrapped active path with no changes. `onRefresh` is guarded with `{onRefresh && (...)}`, preserving backward compatibility.
+Feature adds a `teacher_favourites` table, Go repository layer, CRUD API handlers, and frontend zustand refactor to persist pinned courses in PostgreSQL instead of localStorage. Core architecture is sound — parameterized queries, embedded migrations, proper Go interfaces. **One CRITICAL bug in the frontend causes silent UI/DB desync on any API error.** Several warnings around error handling gaps, dead code, and missing tests.
 
-**Tests:** 31/34 passing across 6 test files. The 3 failures (`setLoading is not a function` in `useCheckins.test.js`) are pre-existing — not caused by T5. No regressions.
+## Critical Issues
 
-**Key concern:** The expired transition has no screen-reader announcement (`role="alert"` or `aria-live`). The ⏰ emoji lacks an accessible label. These degrade the UX for assistive-tech users who won't know the check-in period has ended.
+### CR-01: Frontend optimistic state update ignores API failure response
 
-## Warnings
+**File:** `web/src/store/usePinnedCoursesStore.js:24-40, 43-53`
 
-### WR-01: Expired state transition not announced to screen readers
+**Issue:** `pinCourse` and `unpinCourse` call `fetch()` then proceed to update local `pinnedCourseIds` state without checking `res.ok` or the JSON response body's `success` field. `fetch()` only rejects on network errors — HTTP 4xx/5xx responses resolve normally. If the API returns 500 (e.g., DB failure, constraint violation), the frontend silently adds/removes the course from local state, permanently desyncing the UI from the database until the next page reload.
 
-**File:** `web/src/components/QRModal.jsx:109`
+**Exploit scenario:**
+1. User clicks pin on course "CS101"
+2. Server returns 500 (transient DB error, connection pool exhaustion, etc.)
+3. `fetch()` resolves — no exception
+4. `set({ pinnedCourseIds: [...state.pinnedCourseIds, "CS101"] })` — local state updates optimistically
+5. UI shows CS101 as pinned
+6. User reloads page → course is gone → data loss perceived by user
 
-**Issue:** When the countdown reaches 0, the component switches from active to expired state. The expired container (line 109) has no `role="alert"`, `role="status"`, or `aria-live="polite"` attributes. A sighted user sees the visual change; a screen-reader user gets no announcement that the check-in period has ended or that a new action ("Get New QR") is available.
+**Fix:** Check HTTP response status and `result.success` before updating local state:
 
-**Fix:** Add `role="alert"` to the expired-state container:
-
-```jsx
-{isExpired ? (
-  <div
-    role="alert"
-    style={{
-      width: 'min(75vw, 420px)',
-      // ...rest unchanged
-    }}
-  >
+```javascript
+pinCourse: async (courseId) => {
+    set({ isLoading: true });
+    try {
+      const res = await fetch(FAVOURITES_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ course_id: courseId }),
+      });
+      const result = await res.json();
+      if (!res.ok || !result.success) {
+        set({ isLoading: false });
+        return;
+      }
+      set((state) => ({
+        pinnedCourseIds: state.pinnedCourseIds.includes(courseId)
+          ? state.pinnedCourseIds
+          : [...state.pinnedCourseIds, courseId],
+        isLoading: false,
+      }));
+    } catch {
+      set({ isLoading: false });
+    }
+  },
 ```
 
-Or use `aria-live="polite"` on a wrapping element that persists across both states.
-
-## Info
-
-### IN-01: ⏰ emoji lacks accessible label
-
-**File:** `web/src/components/QRModal.jsx:121-126`
-
-**Issue:** The alarm-clock emoji is rendered as bare text content. Screen readers will announce it as "alarm clock" or similar depending on platform/voice, but the reading is inconsistent. Better to mark it as decorative or provide an explicit label.
-
-**Fix:** Either treat as decorative (hides from a11y tree) or add an explicit label:
-
-```jsx
-<div role="img" aria-label="Expired" style={{ fontSize: '48px', lineHeight: '1' }}>
-  ⏰
-</div>
-```
-
-### IN-02: Dead code in active-state countdown pill (`timeLeft <= 0 ? 'Expired'`)
-
-**File:** `web/src/components/QRModal.jsx:210`
-
-**Issue:** Line 210 (`{timeLeft <= 0 ? 'Expired' : `Expires in ${timeLeft}s`}`) lives inside the active-state branch, which only renders when `isExpired === false`. But `isExpired` is `timeLeft !== null && timeLeft <= 0` — so when `timeLeft <= 0`, the active branch is never reached. The `<= 0` case here is unreachable dead code.
-
-**Note:** This was correct before T5 when there was no separate expired state. Now it's vestigial.
-
-**Fix:** Simplify the active-state pill to only handle the non-expired range:
-
-```jsx
-{timeLeft !== null && (
-  <div style={{ /* ... */ }}>
-    {timeLeft <= 10 && <span>⚠️</span>}
-    Expires in {timeLeft}s
-  </div>
-)}
-```
-
-### IN-03: No `type="button"` on "Get New QR" and "Close" buttons
-
-**File:** `web/src/components/QRModal.jsx:153-169, 216-230`
-
-**Issue:** Both `<button>` elements lack `type="button"`. If the modal is ever nested inside a `<form>` element (now or via future refactoring), these buttons would default to `type="submit"` and trigger a form submission. Defensive best practice is to always specify `type="button"` for non-submit buttons.
-
-**Fix:**
-
-```jsx
-<button type="button" onClick={onRefresh} style={{ /* ... */ }}>
-  Get New QR
-</button>
-<button type="button" onClick={onClose} style={{ /* ... */ }}>
-  Close
-</button>
-```
-
-### IN-04: Hardcoded pixel values in expired state (no CSS variable tokens)
-
-**File:** `web/src/components/QRModal.jsx:121-151`
-
-**Issue:** The expired state uses literal px values: `fontSize: '48px'` (alarm icon), `fontSize: '18px'` (heading), `fontSize: '14px'` (body), `maxWidth: '260px'` (body text). The rest of the component uses `var(--space-*)` tokens with px fallbacks. For consistency, define these values as CSS custom properties or use existing typography tokens (`--font-size-*`).
-
-**Fix (example):**
-
-```jsx
-<div style={{ fontSize: 'var(--font-size-display, 48px)', lineHeight: '1' }}>⏰</div>
-<div style={{ fontSize: 'var(--font-size-lg, 18px)', fontWeight: '600', ... }}>
-  Check-in period ended
-</div>
-```
-
-## Test Results
-
-| Result | Count |
-|--------|-------|
-| Test files passed | 5 of 6 |
-| Tests passed | 31 of 34 |
-| Tests failed | 3 (all pre-existing: `setLoading is not a function` in `useCheckins.test.js`) |
-
-The 3 failures reference `setLoading()` which does not exist on `useSessionStore` (the store exposes `setInitialLoading` and `setRefreshing`). These failures predate T5 and are unchanged by this commit.
-
-No regressions from T5.
-
-## Assessment
-
-**Approve with issues.** The implementation is functionally correct:
-- Expired state renders when `timeLeft <= 0`, with final stats and action button
-- Active state preserved identically (wrapped in Fragment, no regressions)
-- `onRefresh` is optional and backward-compatible (guarded render)
-- `isExpired` correctly handles the `null` case (no expiry → not expired)
-- Interval self-cleanup via `useCountdown` works correctly
-
-The findings are all low-severity — no critical bugs, security issues, or behavioral regressions. The accessibility gap (WR-01, IN-01) should be addressed before shipping for screen-reader users. The dead code (IN-02) is harmless but worth cleaning up for clarity.
+Same pattern required in `unpinCourse` (line 43-53).
 
 ---
 
-_Reviewed: 2026-05-29T19:00:00Z_
-_Reviewer: gsd-code-reviewer_
-_Depth: standard_
+## Warnings
+
+### WR-01: DELETE handler returns 500 for "not found" instead of 404
+
+**File:** `internal/api/favourite_handlers.go:56-58`
+
+**Issue:** When `repo.Remove()` returns an error because the favourite doesn't exist (message: "favourite not found: ..."), the handler returns `http.StatusInternalServerError` (500). This conflates a client-error condition (resource doesn't exist) with a server-error condition (DB unreachable, etc.). REST convention: DELETE on non-existent resource should return 404 (or 204 for idempotent delete).
+
+**Fix:** Map sentinel errors to correct HTTP status — either check error string (fragile) or define a sentinel error in the repository:
+
+```go
+// In favourite_repository.go:
+var ErrFavouriteNotFound = fmt.Errorf("favourite not found")
+
+func (r *PgFavouriteRepository) Remove(courseID string) error {
+    result, err := r.pool.Exec(...)
+    if err != nil {
+        return fmt.Errorf("remove favourite: %w", err)
+    }
+    if result.RowsAffected() == 0 {
+        return fmt.Errorf("%w: %s", ErrFavouriteNotFound, courseID)
+    }
+    return nil
+}
+
+// In favourite_handlers.go:
+if err := repo.Remove(courseID); err != nil {
+    if errors.Is(err, db.ErrFavouriteNotFound) {
+        writeJSON(w, http.StatusNotFound, errorResponse(err.Error()))
+    } else {
+        writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
+    }
+    return
+}
+```
+
+---
+
+### WR-02: POST favourites returns 200 instead of 201 Created
+
+**File:** `internal/api/favourite_handlers.go:45`
+
+**Issue:** Successful creation returns `200 OK`. REST best practice: POST that creates a resource should return `201 Created`. Minor, but affects API client expectations and HTTP cache semantics.
+
+**Fix:** `writeJSON(w, http.StatusCreated, successResponse(nil))`
+
+---
+
+### WR-03: Repository interface and methods lack context.Context propagation
+
+**File:** `internal/db/favourite_repository.go:10-14`
+
+**Issue:** `GetAll()`, `Add()`, `Remove()` don't accept `context.Context`. All implementations hardcode `context.Background()`. This prevents request-scoped cancellation from propagating to the database. If a client disconnects, the DB query continues. Consistent with pre-existing `RoomRepository` pattern, but still a quality gap.
+
+**Fix:** Add `ctx context.Context` as first parameter to all interface methods, thread it from handler's `r.Context()`:
+
+```go
+type FavouriteRepository interface {
+    GetAll(ctx context.Context) ([]string, error)
+    Add(ctx context.Context, courseID string) error
+    Remove(ctx context.Context, courseID string) error
+}
+```
+
+Then in handlers:
+```go
+ids, err := repo.GetAll(r.Context())
+```
+
+---
+
+### WR-04: No tests for new functionality
+
+**File:** (missing)
+
+**Issue:** Zero tests exist for any of the new code:
+- No Go tests for `FavouriteRepository` (even with pgxmock or integration test)
+- No Go tests for `favourite_handlers` (httptest)
+- No JS tests for `usePinnedCoursesStore` (even basic Vitest)
+- No test for the migration (up/down)
+
+Risk: regression on future changes to these paths will be undetectable.
+
+---
+
+### WR-05: Frontend silent catch blocks — no error logging or user feedback
+
+**File:** `web/src/store/usePinnedCoursesStore.js:19-21, 38-40, 51-53`
+
+**Issue:** All three `catch {}` blocks only set `{ isLoading: false }` without logging the error or exposing it to the UI. If an API call fails silently, the user has no indication that their action didn't persist. Combined with CR-01, this makes debugging failures in production nearly impossible.
+
+**Fix:** Log caught errors and surface minimal error state:
+
+```javascript
+catch (err) {
+  console.error('Failed to toggle favourite:', err);
+  set({ isLoading: false, error: err.message });
+}
+```
+
+(Add `error: null` to initial store state.)
+
+---
+
+## Info
+
+### IN-01: Dead code — `cleanupStalePins` is defined but never called
+
+**File:** `web/src/store/usePinnedCoursesStore.js:65-70`
+
+**Issue:** `cleanupStalePins` was part of the localStorage-based implementation. Now that favourites are server-authoritative, this method is unreferenced anywhere. Adds noise and suggests incomplete refactor.
+
+**Fix:** Remove the function and export.
+
+### IN-02: `toggleCourse` doesn't set `isLoading` state
+
+**File:** `web/src/store/usePinnedCoursesStore.js:56-63`
+
+**Issue:** `toggleCourse` calls `pinCourse`/`unpinCourse` which both set `isLoading: true`, but `toggleCourse` itself doesn't set loading before dispatching. If the toggle logic grows (e.g., optimistic local toggle before API call), the loading state won't be accurate during the brief synchronous window.
+
+**Fix:** Add `set({ isLoading: true })` at the top of `toggleCourse`, or make the loading state handling consistent by letting pinCourse/unpinCourse handle it entirely (they already do).
+
+### IN-03: No request body size limit on POST /api/teacher/favourites
+
+**File:** `internal/api/favourite_handlers.go:33`
+
+**Issue:** `json.NewDecoder(r.Body).Decode(&req)` reads the entire request body with no size limit. An attacker could send a multi-GB payload to exhaust server memory. The existing handlers (`createRoomHandler`, `toggleCheckinHandler`) share the same gap, so this is a pre-existing pattern; still worth noting.
+
+**Fix:** Use `http.MaxBytesReader`:
+```go
+r.Body = http.MaxBytesReader(w, r.Body, 4096)
+if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+```
+
+### IN-04: Missing `user_id` column — favourites are global across all teachers
+
+**File:** `internal/db/migrations/003_create_teacher_favourites.up.sql:1-4`
+
+**Issue:** The `teacher_favourites` table has no `user_id` column, making the favourites list shared across all teachers. Not a bug per the requirement ("shared across all users"), but notable because:
+1. If multi-user isolation is ever needed, a migration will be required
+2. Two teachers pinning different courses will see each other's pins
+
+Document this design decision for future maintainers.
+
+---
+
+_Reviewed: 2026-05-30T13:00:00Z_
+_Reviewer: gsd-code-reviewer (deep cross-file analysis)_
+_Depth: deep_

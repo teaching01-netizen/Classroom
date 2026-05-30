@@ -134,15 +134,13 @@ function PinnedCourseCard({ course }) {
 function HomePage() {
   const { courses, isLoading, error } = useCourses();
   const pinnedCourseIds = usePinnedCoursesStore((state) => state.pinnedCourseIds);
-  const cleanupStalePins = usePinnedCoursesStore((state) => state.cleanupStalePins);
+  const loadFavourites = usePinnedCoursesStore((state) => state.loadFavourites);
 
   useWebSocket();
 
   useEffect(() => {
-    if (courses.length > 0) {
-      cleanupStalePins(courses.map((c) => c.course_id));
-    }
-  }, [courses, cleanupStalePins]);
+    loadFavourites();
+  }, [loadFavourites]);
 
   const pinnedCourses = courses.filter((c) => pinnedCourseIds.includes(c.course_id));
 

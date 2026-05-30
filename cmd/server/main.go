@@ -73,7 +73,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	router := api.NewRouter(rm, classroomClient)
+	favRepo := db.NewPgFavouriteRepository(pool)
+
+	router := api.NewRouter(rm, classroomClient, favRepo)
 
 	addr := os.Getenv("PORT")
 	if addr == "" {

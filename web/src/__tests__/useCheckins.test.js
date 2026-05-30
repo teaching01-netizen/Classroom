@@ -6,7 +6,7 @@ beforeEach(() => {
     sessions: [],
     currentSession: null,
     students: [],
-    isLoading: false,
+    isInitialLoading: false,
     error: null,
   });
   vi.restoreAllMocks();
@@ -28,8 +28,8 @@ describe('useCheckins - fetchStudents updates store', () => {
 
     const response = await fetch('/api/teacher/courses/c1/sessions/s1');
     const result = await response.json();
-    const { setLoading, setStudents, setCurrentSession } = useSessionStore.getState();
-    setLoading();
+    const { setInitialLoading, setStudents, setCurrentSession } = useSessionStore.getState();
+    setInitialLoading();
     if (result.success) {
       setCurrentSession(result.data);
       setStudents(result.data.students || []);
@@ -38,7 +38,7 @@ describe('useCheckins - fetchStudents updates store', () => {
     const state = useSessionStore.getState();
     expect(state.students).toEqual(mockStudents);
     expect(state.currentSession.name).toBe('Session 1');
-    expect(state.isLoading).toBe(false);
+    expect(state.isInitialLoading).toBe(false);
   });
 
   it('sets error when fetch fails', async () => {
@@ -48,15 +48,15 @@ describe('useCheckins - fetchStudents updates store', () => {
 
     const response = await fetch('/api/teacher/courses/c1/sessions/s1');
     const result = await response.json();
-    const { setLoading, setError } = useSessionStore.getState();
-    setLoading();
+    const { setInitialLoading, setError } = useSessionStore.getState();
+    setInitialLoading();
     if (!result.success) {
       setError(result.error || 'Failed to fetch students');
     }
 
     const state = useSessionStore.getState();
     expect(state.error).toBe('Not found');
-    expect(state.isLoading).toBe(false);
+    expect(state.isInitialLoading).toBe(false);
   });
 });
 
@@ -134,8 +134,8 @@ describe('useCheckins - fetchStudents with courseId/sessionId', () => {
       json: () => Promise.resolve({ success: true, data: { students: mockStudents, name: 'S1' } }),
     }));
 
-    const { setLoading, setStudents, setCurrentSession } = useSessionStore.getState();
-    setLoading();
+    const { setInitialLoading, setStudents, setCurrentSession } = useSessionStore.getState();
+    setInitialLoading();
     const response = await fetch('/api/teacher/courses/c1/sessions/s1');
     const result = await response.json();
     if (result.success) {
@@ -146,6 +146,6 @@ describe('useCheckins - fetchStudents with courseId/sessionId', () => {
     const state = useSessionStore.getState();
     expect(state.students).toEqual(mockStudents);
     expect(state.currentSession.name).toBe('S1');
-    expect(state.isLoading).toBe(false);
+    expect(state.isInitialLoading).toBe(false);
   });
 });

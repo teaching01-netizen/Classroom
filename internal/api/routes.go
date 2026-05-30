@@ -10,6 +10,7 @@ import (
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
+	"qr-command-center/internal/db"
 	"qr-command-center/internal/middleware"
 	"qr-command-center/internal/service"
 	"qr-command-center/internal/warwick"
@@ -35,7 +36,7 @@ func init() {
 	allowedOrigin = os.Getenv("CORS_ORIGIN")
 }
 
-func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient) *chi.Mux {
+func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.FavouriteRepository) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(chimiddleware.Logger)
 	r.Use(corsMiddleware)
@@ -62,6 +63,10 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient) *chi.Mux {
 		r.Get("/courses/{courseId}", getCourseDetailHandler(cc))
 		r.Get("/courses/{courseId}/sessions/{sessionId}", getSessionDetailHandler(cc))
 		r.With(toggleLimiter.Middleware).Post("/courses/{courseId}/sessions/{sessionId}/toggle-checkin", toggleCheckinHandler(cc))
+
+		r.Get("/favourites", getFavouritesHandler(favRepo))
+		r.Post("/favourites", addFavouriteHandler(favRepo))
+		r.Delete("/favourites/{courseId}", removeFavouriteHandler(favRepo))
 	})
 
 	r.Get("/ws", wsHandler(rm))
