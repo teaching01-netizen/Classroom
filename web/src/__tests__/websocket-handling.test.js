@@ -22,12 +22,12 @@ describe('SESSION_STATS_UPDATED handling', () => {
     store.updateSessionStats({
       total_students: 30,
       checked_in: 20,
-      attendance_rate: 67,
+      avg_attendance_rate: 0.67,
     });
     const state = useSessionStore.getState();
     expect(state.currentSession.total_students).toBe(30);
     expect(state.currentSession.checked_in).toBe(20);
-    expect(state.currentSession.attendance_rate).toBe(67);
+    expect(state.currentSession.avg_attendance_rate).toBe(0.67);
     expect(state.currentSession.name).toBe('Session 1');
   });
 
