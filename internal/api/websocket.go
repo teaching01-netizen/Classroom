@@ -20,10 +20,10 @@ func wsHandler(rm *service.RoomManager) http.HandlerFunc {
 			slog.Error("ws accept failed", "error", err)
 			return
 		}
+		defer conn.CloseNow()
 		defer func() {
 			_ = conn.Close(websocket.StatusNormalClosure, "done")
 		}()
-		defer conn.CloseNow()
 
 		ctx := conn.CloseRead(r.Context())
 		events, unsub := rm.Subscribe()

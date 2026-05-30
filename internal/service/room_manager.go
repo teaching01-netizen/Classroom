@@ -401,6 +401,7 @@ roomLoop:
 										return
 									case <-time.After(time.Duration(500 + rand.Intn(500)) * time.Millisecond):
 									}
+									attempts--
 									continue
 								}
 
