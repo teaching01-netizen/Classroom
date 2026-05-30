@@ -15,7 +15,9 @@ import (
 const qrEndpoint = "https://warwick.humantix.cloud/admin/ClassAttendance/GetQRCode"
 
 type WarwickQrClient struct {
-	auth       *WarwickAuth
+	auth       *WarwickAuth   // kept for backward compatibility; nil when pool is used
+	pool       *SessionPool   // new — used when pool is set
+	tier       SessionTier    // new — tier for pool acquisition
 	client     *http.Client
 	qrEndpoint string
 }
@@ -46,11 +48,38 @@ func NewWarwickQrClientWithEndpoint(auth *WarwickAuth, endpoint string) *Warwick
 	}
 }
 
+// NewWarwickQrClientFromPool creates a QR client that acquires sessions from a pool.
+// This is the new preferred constructor — it enables session isolation.
+func NewWarwickQrClientFromPool(pool *SessionPool, tier SessionTier) *WarwickQrClient {
+	return &WarwickQrClient{
+		pool: pool,
+		tier: tier,
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		qrEndpoint: qrEndpoint,
+	}
+}
+
 func (c *WarwickQrClient) Auth() *WarwickAuth {
 	return c.auth
 }
 
+// FetchQR fetches a QR code. Uses the session pool if configured, otherwise
+// falls back to the single WarwickAuth session.
 func (c *WarwickQrClient) FetchQR(classID string) (domain.QrResponse, error) {
+	if c.pool != nil {
+		ref, err := c.pool.Acquire(c.tier)
+		if err != nil {
+			return domain.QrResponse{}, domain.ErrAuthExpired
+		}
+		defer c.pool.Release(ref)
+		return c.doFetch(classID, ref.Cookie)
+	}
+
 	cookie, _, err := c.auth.GetValidSession()
 	if err != nil {
 		return domain.QrResponse{}, domain.ErrAuthExpired
@@ -58,7 +87,22 @@ func (c *WarwickQrClient) FetchQR(classID string) (domain.QrResponse, error) {
 	return c.doFetch(classID, cookie)
 }
 
+// FetchQRWithFreshAuth forces a fresh login and fetches the QR code.
+// With the pool, only the acquired session is refreshed — other sessions unaffected.
 func (c *WarwickQrClient) FetchQRWithFreshAuth(classID string) (domain.QrResponse, error) {
+	if c.pool != nil {
+		ref, err := c.pool.Acquire(c.tier)
+		if err != nil {
+			return domain.QrResponse{}, domain.ErrAuthExpired
+		}
+		defer c.pool.Release(ref)
+
+		if _, _, err := c.pool.ForceRefreshOnSession(ref); err != nil {
+			return domain.QrResponse{}, domain.ErrAuthExpired
+		}
+		return c.doFetch(classID, ref.Cookie)
+	}
+
 	cookie, _, err := c.auth.ForceRefresh()
 	if err != nil {
 		return domain.QrResponse{}, domain.ErrAuthExpired

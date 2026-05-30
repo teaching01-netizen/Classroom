@@ -18,7 +18,9 @@ const (
 
 // ClassroomClient proxies requests to the Warwick admin panel's DataTables API endpoints.
 type ClassroomClient struct {
-	auth    *WarwickAuth
+	auth    *WarwickAuth  // kept for backward compatibility; nil when pool is used
+	pool    *SessionPool  // new — used when pool is set
+	tier    SessionTier   // new — tier for pool acquisition
 	client  *http.Client
 	baseURL string
 }
@@ -37,13 +39,34 @@ func NewClassroomClient(auth *WarwickAuth) *ClassroomClient {
 	}
 }
 
-// Auth returns the underlying WarwickAuth instance.
+// NewClassroomClientFromPool creates a ClassroomClient that acquires sessions from a pool.
+// This is the new preferred constructor — it enables session isolation.
+func NewClassroomClientFromPool(pool *SessionPool, tier SessionTier) *ClassroomClient {
+	return &ClassroomClient{
+		pool: pool,
+		tier: tier,
+		client: &http.Client{
+			Timeout:       30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		baseURL: "https://warwick.humantix.cloud",
+	}
+}
+
+// Auth returns the underlying WarwickAuth instance (may be nil when pool is used).
 func (c *ClassroomClient) Auth() *WarwickAuth {
 	return c.auth
 }
 
 // GetCourses fetches the list of courses from Warwick.
+// Uses the session pool if configured, otherwise falls back to WarwickAuth.
 func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
+	if c.pool != nil {
+		return c.getCoursesWithPool()
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		cookie, _, err := c.auth.GetValidSession()
@@ -64,6 +87,34 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 			continue
 		}
 
+		return nil, err
+	}
+	return nil, lastErr
+}
+
+func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
+	ref, err := c.pool.Acquire(c.tier)
+	if err != nil {
+		return nil, domain.ErrAuthExpired
+	}
+	defer c.pool.Release(ref)
+
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		courses, err := c.fetchCourses(ref.Cookie)
+		if err == nil {
+			return courses, nil
+		}
+		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
+			lastErr = err
+			if attempt == 0 {
+				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
+					return nil, domain.ErrAuthExpired
+				}
+				continue
+			}
+			return nil, lastErr
+		}
 		return nil, err
 	}
 	return nil, lastErr
@@ -126,6 +177,10 @@ func (c *ClassroomClient) fetchCourses(cookie string) ([]domain.CourseSummary, e
 
 // GetCourseDetail fetches the sessions for a specific course.
 func (c *ClassroomClient) GetCourseDetail(courseID string) (*domain.CourseDetail, error) {
+	if c.pool != nil {
+		return c.getCourseDetailWithPool(courseID)
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		cookie, _, err := c.auth.GetValidSession()
@@ -146,6 +201,34 @@ func (c *ClassroomClient) GetCourseDetail(courseID string) (*domain.CourseDetail
 			continue
 		}
 
+		return nil, err
+	}
+	return nil, lastErr
+}
+
+func (c *ClassroomClient) getCourseDetailWithPool(courseID string) (*domain.CourseDetail, error) {
+	ref, err := c.pool.Acquire(c.tier)
+	if err != nil {
+		return nil, domain.ErrAuthExpired
+	}
+	defer c.pool.Release(ref)
+
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		detail, err := c.fetchCourseDetail(ref.Cookie, courseID)
+		if err == nil {
+			return detail, nil
+		}
+		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
+			lastErr = err
+			if attempt == 0 {
+				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
+					return nil, domain.ErrAuthExpired
+				}
+				continue
+			}
+			return nil, lastErr
+		}
 		return nil, err
 	}
 	return nil, lastErr
@@ -196,6 +279,10 @@ func (c *ClassroomClient) fetchCourseDetail(cookie, courseID string) (*domain.Co
 
 // GetSessionDetail fetches the students and check-in status for a session.
 func (c *ClassroomClient) GetSessionDetail(courseID, sessionID string) (*domain.SessionDetail, error) {
+	if c.pool != nil {
+		return c.getSessionDetailWithPool(sessionID)
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		cookie, _, err := c.auth.GetValidSession()
@@ -216,6 +303,34 @@ func (c *ClassroomClient) GetSessionDetail(courseID, sessionID string) (*domain.
 			continue
 		}
 
+		return nil, err
+	}
+	return nil, lastErr
+}
+
+func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.SessionDetail, error) {
+	ref, err := c.pool.Acquire(c.tier)
+	if err != nil {
+		return nil, domain.ErrAuthExpired
+	}
+	defer c.pool.Release(ref)
+
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		detail, err := c.fetchSessionDetail(ref.Cookie, sessionID)
+		if err == nil {
+			return detail, nil
+		}
+		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
+			lastErr = err
+			if attempt == 0 {
+				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
+					return nil, domain.ErrAuthExpired
+				}
+				continue
+			}
+			return nil, lastErr
+		}
 		return nil, err
 	}
 	return nil, lastErr
@@ -265,6 +380,10 @@ func (c *ClassroomClient) fetchSessionDetail(cookie, sessionID string) (*domain.
 
 // ToggleCheckin updates a student's check-in status for a session.
 func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, checked bool) error {
+	if c.pool != nil {
+		return c.toggleCheckinWithPool(sessionID, studentID, checked)
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		cookie, _, err := c.auth.GetValidSession()
@@ -280,6 +399,30 @@ func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, c
 			break
 		}
 		if _, _, err := c.auth.ForceRefresh(); err != nil {
+			return domain.ErrAuthExpired
+		}
+	}
+	return lastErr
+}
+
+func (c *ClassroomClient) toggleCheckinWithPool(sessionID, studentID string, checked bool) error {
+	ref, err := c.pool.Acquire(c.tier)
+	if err != nil {
+		return domain.ErrAuthExpired
+	}
+	defer c.pool.Release(ref)
+
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		err = c.doToggleCheckin(ref.Cookie, sessionID, studentID, checked)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if err != domain.ErrAuthExpired || attempt == 1 {
+			break
+		}
+		if _, _, err := c.pool.ForceRefreshOnSession(ref); err != nil {
 			return domain.ErrAuthExpired
 		}
 	}

@@ -26,22 +26,34 @@ func main() {
 
 	slog.Info("Starting QR Command Center server...")
 
-	// Validate Warwick auth
-	slog.Info("Validating Warwick credentials...")
-	auth, err := warwick.FromEnv()
-	if err != nil {
-		slog.Error("Failed to initialize Warwick auth", "error", err)
+	// Create session pool with traffic-tier isolation
+	// 2 QR sessions (round-robin for concurrent polling)
+	// 1 teacher session (sequential browsing is fine)
+	slog.Info("Creating Warwick session pool with traffic-tier isolation...")
+	email := os.Getenv("WARWICK_EMAIL")
+	password := os.Getenv("WARWICK_PASSWORD")
+	if email == "" || password == "" {
+		slog.Error("WARWICK_EMAIL and WARWICK_PASSWORD must be set")
 		os.Exit(1)
 	}
-	_, _, err = auth.GetValidSession()
+	sessionPool, err := warwick.NewSessionPool(email, password, "https://warwick.humantix.cloud/admin/", 2, 1)
+	if err != nil {
+		slog.Error("Failed to create session pool", "error", err)
+		os.Exit(1)
+	}
+
+	// Validate by acquiring and releasing a session
+	slog.Info("Validating Warwick credentials...")
+	ref, err := sessionPool.Acquire(warwick.TierQR)
 	if err != nil {
 		slog.Error("Warwick authentication failed", "error", err)
 		os.Exit(1)
 	}
+	sessionPool.Release(ref)
 	slog.Info("Warwick authentication successful")
 
-	qrClient := warwick.NewWarwickQrClient(auth)
-	classroomClient := warwick.NewClassroomClient(auth)
+	qrClient := warwick.NewWarwickQrClientFromPool(sessionPool, warwick.TierQR)
+	classroomClient := warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher)
 
 	// Connect to database
 	databaseURL := os.Getenv("DATABASE_URL")
