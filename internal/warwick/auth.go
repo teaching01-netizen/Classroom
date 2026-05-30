@@ -21,6 +21,7 @@ type sessionState struct {
 	cookieValue string
 	obtainedAt  time.Time
 	expiresAt   time.Time
+	generation  uint64 // tracks which ForceRefresh generation produced this session
 }
 
 type WarwickAuth struct {
@@ -30,6 +31,9 @@ type WarwickAuth struct {
 	loginURL  string
 	sessionMu sync.RWMutex
 	session   *sessionState
+
+	forceRefreshMu sync.Mutex // serializes ForceRefresh calls
+	currentGen     uint64     // incremented on each successful ForceRefresh login
 }
 
 func NewWarwickAuth(email, password, loginURL string) *WarwickAuth {
@@ -58,12 +62,13 @@ func FromEnv() (*WarwickAuth, error) {
 	return NewWarwickAuth(email, password, "https://warwick.humantix.cloud/admin/"), nil
 }
 
-func (a *WarwickAuth) GetValidSession() (string, error) {
+func (a *WarwickAuth) GetValidSession() (string, uint64, error) {
 	a.sessionMu.RLock()
 	if a.session != nil && time.Now().Before(a.session.expiresAt.Add(-sessionRefreshBuffer)) {
 		cookie := a.session.cookieValue
+		gen := a.session.generation
 		a.sessionMu.RUnlock()
-		return cookie, nil
+		return cookie, gen, nil
 	}
 	a.sessionMu.RUnlock()
 
@@ -71,27 +76,51 @@ func (a *WarwickAuth) GetValidSession() (string, error) {
 	defer a.sessionMu.Unlock()
 
 	if a.session != nil && time.Now().Before(a.session.expiresAt.Add(-sessionRefreshBuffer)) {
-		return a.session.cookieValue, nil
+		return a.session.cookieValue, a.session.generation, nil
 	}
 
 	session, err := a.performLogin()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
+	// auto-refresh via GetValidSession gets generation 0 (not a forced refresh)
 	a.session = session
-	return session.cookieValue, nil
+	return session.cookieValue, session.generation, nil
 }
 
-func (a *WarwickAuth) ForceRefresh() (string, error) {
-	a.sessionMu.Lock()
-	defer a.sessionMu.Unlock()
+func (a *WarwickAuth) ForceRefresh() (string, uint64, error) {
+	a.forceRefreshMu.Lock()
+	defer a.forceRefreshMu.Unlock()
 
+	// Double-check: try the fast path first — if session is still fresh, return it.
+	cookie, gen, err := a.GetValidSession()
+	if err == nil {
+		return cookie, gen, nil
+	}
+
+	// Truly expired — perform a fresh login.
 	session, err := a.performLogin()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
+
+	a.currentGen++
+	session.generation = a.currentGen
+
+	a.sessionMu.Lock()
 	a.session = session
-	return session.cookieValue, nil
+	a.sessionMu.Unlock()
+
+	return session.cookieValue, session.generation, nil
+}
+
+// IsStaleGeneration returns true if the given generation is older than the
+// current ForceRefresh generation, indicating the caller's cookie has been
+// invalidated by a concurrent refresh.
+func (a *WarwickAuth) IsStaleGeneration(gen uint64) bool {
+	a.forceRefreshMu.Lock()
+	defer a.forceRefreshMu.Unlock()
+	return gen < a.currentGen
 }
 
 func (a *WarwickAuth) performLogin() (*sessionState, error) {

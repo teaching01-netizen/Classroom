@@ -73,11 +73,11 @@ func TestGetValidSessionCaches(t *testing.T) {
 	defer server.Close()
 
 	auth := NewWarwickAuth("test@test.com", "pass", server.URL)
-	cookie1, err := auth.GetValidSession()
+	cookie1, _, err := auth.GetValidSession()
 	require.NoError(t, err)
 	assert.Equal(t, "sess123", cookie1)
 
-	cookie2, err := auth.GetValidSession()
+	cookie2, _, err := auth.GetValidSession()
 	require.NoError(t, err)
 	assert.Equal(t, "sess123", cookie2)
 	assert.Equal(t, 1, callCount, "should only call login once")
