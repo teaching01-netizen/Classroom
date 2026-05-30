@@ -542,9 +542,10 @@ func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.Se
 									SessionID:     sessionID,
 									TotalStudents: len(students),
 								},
-								Students: students,
+								Students:    students,
+								QRActive:    cachedSession.Detail.QRActive,
+								QRExpiresAt: cachedSession.Detail.QRExpiresAt,
 							}
-							// Count checked-in students for CheckedInCount
 							for _, s := range students {
 								if s.CheckedIn {
 									detail.CheckedInCount++
@@ -557,6 +558,8 @@ func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.Se
 							}
 							c.cache.Set(key, cached, 10*time.Second)
 							return detail, nil
+						} else if dbErr != nil {
+							slog.Debug("failed to get students from DB for session", "session_id", sessionID, "error", dbErr)
 						}
 					}
 				}
@@ -566,8 +569,16 @@ func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.Se
 			}
 
 			// No checkinRepo or stale isn't CachedSession — serve stale as before
-			c.tryRefresh(key, func() { c.refreshSessionDetailCache(sessionID) })
-			return stale.(*domain.SessionDetail), nil
+			if detail, ok := stale.(*domain.SessionDetail); ok {
+				c.tryRefresh(key, func() { c.refreshSessionDetailCache(sessionID) })
+				return detail, nil
+			}
+			if cs, ok := stale.(*CachedSession); ok {
+				c.tryRefresh(key, func() { c.refreshSessionDetailCache(sessionID) })
+				return cs.Detail, nil
+			}
+			// Unknown type — fall through to Warwick
+			return c.fetchSessionDetailWithPool(key, sessionID)
 		}
 	}
 
@@ -578,8 +589,12 @@ func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.Se
 		dbCancel()
 		if err == nil && len(students) > 0 {
 			toggledCtx, toggledCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			maxToggledAt, _ := c.checkinRepo.GetMaxToggledAtForSession(toggledCtx, sessionID)
+			maxToggledAt, err2 := c.checkinRepo.GetMaxToggledAtForSession(toggledCtx, sessionID)
 			toggledCancel()
+			if err2 != nil {
+				slog.Debug("failed to get max_toggled_at for session", "session_id", sessionID, "error", err2)
+				maxToggledAt = nil
+			}
 
 			detail := &domain.SessionDetail{
 				SessionSummary: domain.SessionSummary{
