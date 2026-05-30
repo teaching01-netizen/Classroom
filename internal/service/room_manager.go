@@ -17,6 +17,7 @@ const (
 	roomRecoveryInitialBackoff = 1 * time.Second
 	roomRecoveryMaxBackoff     = 30 * time.Second
 	roomRecoveryMaxAttempts    = 10
+	minEmitInterval            = 5 * time.Second
 )
 
 type RoomManagerEvent struct {
@@ -31,19 +32,21 @@ type RoomState struct {
 }
 
 type RoomManager struct {
-	mu         sync.RWMutex
-	rooms      map[string]*RoomState
-	eventCh    chan RoomManagerEvent
-	qrClient   domain.QrClient
-	repository db.RoomRepository
+	mu            sync.RWMutex
+	rooms         map[string]*RoomState
+	eventCh       chan RoomManagerEvent
+	qrClient      domain.QrClient
+	repository    db.RoomRepository
+	lastEmittedAt map[string]time.Time // roomID → last emit time (rate limiting)
 }
 
 func NewRoomManager(qrClient domain.QrClient, repository db.RoomRepository) *RoomManager {
 	return &RoomManager{
-		rooms:      make(map[string]*RoomState),
-		eventCh:    make(chan RoomManagerEvent, 100),
-		qrClient:   qrClient,
-		repository: repository,
+		rooms:         make(map[string]*RoomState),
+		eventCh:       make(chan RoomManagerEvent, 100),
+		qrClient:      qrClient,
+		repository:    repository,
+		lastEmittedAt: make(map[string]time.Time),
 	}
 }
 
@@ -198,6 +201,22 @@ func (rm *RoomManager) StopRoom(roomID string) error {
 }
 
 func (rm *RoomManager) emit(event RoomManagerEvent) {
+	// Rate limit per room: skip RoomUpdated if emitted too recently.
+	// Room is already updated in-memory; subscribers see latest state on next allowed emit.
+	if event.Type == "RoomUpdated" {
+		if roomData, ok := event.Data.(domain.Room); ok {
+			rm.mu.Lock()
+			last, exists := rm.lastEmittedAt[roomData.RoomID]
+			now := time.Now()
+			if exists && now.Sub(last) < minEmitInterval {
+				rm.mu.Unlock()
+				return
+			}
+			rm.lastEmittedAt[roomData.RoomID] = now
+			rm.mu.Unlock()
+		}
+	}
+
 	select {
 	case rm.eventCh <- event:
 	default:
