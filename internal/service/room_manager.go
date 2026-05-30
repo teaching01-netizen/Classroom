@@ -37,6 +37,7 @@ type RoomManager struct {
 	eventCh       chan RoomManagerEvent
 	qrClient      domain.QrClient
 	repository    db.RoomRepository
+	emitMu        sync.Mutex
 	lastEmittedAt map[string]time.Time // roomID → last emit time (rate limiting)
 }
 
@@ -205,15 +206,15 @@ func (rm *RoomManager) emit(event RoomManagerEvent) {
 	// Room is already updated in-memory; subscribers see latest state on next allowed emit.
 	if event.Type == "RoomUpdated" {
 		if roomData, ok := event.Data.(domain.Room); ok {
-			rm.mu.Lock()
+			rm.emitMu.Lock()
 			last, exists := rm.lastEmittedAt[roomData.RoomID]
 			now := time.Now()
 			if exists && now.Sub(last) < minEmitInterval {
-				rm.mu.Unlock()
+				rm.emitMu.Unlock()
 				return
 			}
 			rm.lastEmittedAt[roomData.RoomID] = now
-			rm.mu.Unlock()
+			rm.emitMu.Unlock()
 		}
 	}
 
