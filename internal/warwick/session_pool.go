@@ -126,6 +126,7 @@ func (s *pooledSession) isKickCandidate() bool {
 //   - Rate limit buckets (each session has its own connection pool)
 type SessionPool struct {
 	mu              sync.Mutex
+	cond            *sync.Cond   // signals waiters when a session is released
 	sessions        []*pooledSession
 	qrNext          uint64
 	teacherNext     uint64
@@ -181,12 +182,14 @@ func NewSessionPool(email, password, loginURL string, qrSessions, teacherSession
 		sessions[i].expiresAt = sessions[i].obtainedAt.Add(sessionTTL)
 	}
 
-	return &SessionPool{
+	p := &SessionPool{
 		sessions:        sessions,
 		qrSize:          qrSessions,
 		teacherSize:     teacherSessions,
 		interactiveSize: interactiveSessions,
-	}, nil
+	}
+	p.cond = sync.NewCond(&p.mu)
+	return p, nil
 }
 
 // Acquire gets an available session for the given traffic tier.
@@ -253,6 +256,96 @@ func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 		tier, end-start)
 }
 
+// AcquireWithTimeout acquires a session for the given tier, waiting up to timeout
+// for one to become available if all are in use. Returns ErrNoAvailableSessions if
+// the timeout expires before a session is free, or if login fails.
+func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration) (*SessionRef, error) {
+	p.mu.Lock()
+
+	var start, end int
+	switch tier {
+	case TierQR:
+		start = 0
+		end = p.qrSize
+	case TierTeacher:
+		start = p.qrSize
+		end = p.qrSize + p.teacherSize
+	case TierInteractive:
+		start = p.qrSize + p.teacherSize
+		end = p.qrSize + p.teacherSize + p.interactiveSize
+	default:
+		p.mu.Unlock()
+		return nil, fmt.Errorf("warwick: unknown session tier %d", tier)
+	}
+
+	if start >= len(p.sessions) || end > len(p.sessions) {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("warwick: invalid pool configuration: tier %d range [%d,%d) out of %d sessions",
+			tier, start, end, len(p.sessions))
+	}
+
+	// Timer goroutine broadcasts the cond when the deadline expires,
+	// waking any blocked AcquireWithTimeout callers.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	var timedOut atomic.Bool
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-timer.C:
+			timedOut.Store(true)
+			p.cond.Broadcast()
+		case <-done:
+		}
+	}()
+
+	for {
+		// Round-robin within the tier
+		next := int(atomic.AddUint64(&p.qrNext, 1) - 1)
+		if tier == TierTeacher {
+			next = int(atomic.AddUint64(&p.teacherNext, 1) - 1)
+		}
+		if tier == TierInteractive {
+			next = int(atomic.AddUint64(&p.interactiveNext, 1) - 1)
+		}
+
+		for offset := 0; offset < (end - start); offset++ {
+			idx := start + (next+offset)%(end-start)
+			s := p.sessions[idx]
+			if !s.inUse {
+				s.inUse = true
+				p.mu.Unlock()
+
+				cookie, gen, err := p.ensureValidSession(s)
+				if err != nil {
+					s.inUse = false
+					return nil, fmt.Errorf("warwick: acquire session: %w", err)
+				}
+
+				return &SessionRef{
+					Cookie:     cookie,
+					Generation: gen,
+					session:    s,
+					pool:       p,
+				}, nil
+			}
+		}
+
+		// All sessions in use — check if deadline expired
+		if timedOut.Load() {
+			p.mu.Unlock()
+			return nil, fmt.Errorf("%w: tier %d (all %d in use, waited %v)",
+				ErrNoAvailableSessions, tier, end-start, timeout)
+		}
+
+		// Wait for a session to be released (or timeout broadcast)
+		p.cond.Wait()
+	}
+}
+
 // Release marks a session as no longer in use so it can be acquired by another caller.
 func (p *SessionPool) Release(ref *SessionRef) {
 	if ref == nil || ref.session == nil {
@@ -260,6 +353,7 @@ func (p *SessionPool) Release(ref *SessionRef) {
 	}
 	p.mu.Lock()
 	ref.session.inUse = false
+	p.cond.Signal()
 	p.mu.Unlock()
 }
 
