@@ -34,6 +34,15 @@ func newTestRepo(t *testing.T) *PgSessionCheckinRepository {
 }
 
 // cleanupTestSession deletes all rows created by tests using the test session prefix.
+func findStudentByID(students []domain.StudentCheckin, id string) *domain.StudentCheckin {
+	for _, s := range students {
+		if s.StudentID == id {
+			return &s
+		}
+	}
+	return nil
+}
+
 func cleanupTestSession(t *testing.T, pool *pgxpool.Pool, sessionID string) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(), `DELETE FROM session_checkins WHERE session_id = $1`, sessionID)
@@ -62,17 +71,20 @@ func TestUpsertFromWarwick_InsertsNewRows(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result, 3)
 
-	assert.Equal(t, "s1", result[0].StudentID)
-	assert.Equal(t, "Alice", result[0].Name)
-	assert.False(t, result[0].CheckedIn)
+	s1 := findStudentByID(result, "s1")
+	require.NotNil(t, s1)
+	assert.Equal(t, "Alice", s1.Name)
+	assert.False(t, s1.CheckedIn)
 
-	assert.Equal(t, "s2", result[1].StudentID)
-	assert.Equal(t, "Bob", result[1].Name)
-	assert.True(t, result[1].CheckedIn)
+	s2 := findStudentByID(result, "s2")
+	require.NotNil(t, s2)
+	assert.Equal(t, "Bob", s2.Name)
+	assert.True(t, s2.CheckedIn)
 
-	assert.Equal(t, "s3", result[2].StudentID)
-	assert.Equal(t, "Charlie", result[2].Name)
-	assert.False(t, result[2].CheckedIn)
+	s3 := findStudentByID(result, "s3")
+	require.NotNil(t, s3)
+	assert.Equal(t, "Charlie", s3.Name)
+	assert.False(t, s3.CheckedIn)
 }
 
 func TestUpsertFromWarwick_DoesNotOverwriteToggledRows(t *testing.T) {
@@ -263,8 +275,11 @@ func TestUpsertFromWarwick_DoesNotOverwriteToggledRows_MultipleStudents(t *testi
 	require.NoError(t, err)
 	require.Len(t, result, 2)
 
-	// s1 was toggled — should stay true
-	assert.True(t, result[0].CheckedIn, "toggled student should keep checked_in=true")
-	// s2 was never toggled — should be overwritten by Warwick
-	assert.False(t, result[1].CheckedIn, "non-toggled student should be overwritten by Warwick")
+	s1 := findStudentByID(result, "s1")
+	require.NotNil(t, s1)
+	assert.True(t, s1.CheckedIn, "toggled student should keep checked_in=true")
+
+	s2 := findStudentByID(result, "s2")
+	require.NotNil(t, s2)
+	assert.False(t, s2.CheckedIn, "non-toggled student should be overwritten by Warwick")
 }
