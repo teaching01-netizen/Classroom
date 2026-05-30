@@ -33,9 +33,6 @@ var allowedOrigin string
 
 func init() {
 	allowedOrigin = os.Getenv("CORS_ORIGIN")
-	if allowedOrigin == "" {
-		allowedOrigin = "*"
-	}
 }
 
 func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient) *chi.Mux {
@@ -77,19 +74,23 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient) *chi.Mux {
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if allowedOrigin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		origin := r.Header.Get("Origin")
 		if allowedOrigin == "*" {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 		} else if origin == allowedOrigin {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Add("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		} else {
-			// Not a recognized origin — still allow the request but don't echo origin
 			next.ServeHTTP(w, r)
 			return
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Max-Age", "86400")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
