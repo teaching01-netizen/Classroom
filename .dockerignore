@@ -1,0 +1,10 @@
+.env
+.env.*
+node_modules/
+web/node_modules/
+target/
+.git/
+.planning/
+.swarm/
+.opencode/
+*.md
