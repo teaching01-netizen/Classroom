@@ -86,7 +86,7 @@ func TestFetchQRPoolExhaustion(t *testing.T) {
 	}))
 	defer loginServer.Close()
 
-	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
 	// Acquire both sessions to exhaust the pool
@@ -113,7 +113,7 @@ func TestFetchQRWithFreshAuthPoolExhaustion(t *testing.T) {
 	}))
 	defer loginServer.Close()
 
-	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
 	// Acquire both sessions to exhaust the pool

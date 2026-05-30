@@ -30,10 +30,11 @@ func main() {
 	// Create session pool with traffic-tier isolation
 	// 2 QR sessions (round-robin for concurrent polling)
 	// 1 teacher session (sequential browsing is fine)
+	// 2 interactive sessions (low-latency for toggle check-in)
 	slog.Info("Creating Warwick session pool...")
 	email := os.Getenv("WARWICK_EMAIL")
 	password := os.Getenv("WARWICK_PASSWORD")
-	sessionPool, err := warwick.NewSessionPool(email, password, "https://warwick.humantix.cloud/admin/", 2, 1)
+	sessionPool, err := warwick.NewSessionPool(email, password, "https://warwick.humantix.cloud/admin/", 2, 1, 2)
 	if err != nil {
 		slog.Warn("Failed to create Warwick session pool; will retry on demand", "error", err)
 	}

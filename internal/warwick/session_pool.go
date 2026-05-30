@@ -16,8 +16,9 @@ import (
 type SessionTier int
 
 const (
-	TierQR      SessionTier = iota // QR polling — predictable, steady
-	TierTeacher                    // Teacher browsing + toggle — bursty
+	TierQR          SessionTier = iota // QR polling — predictable, steady
+	TierTeacher                        // Teacher browsing + toggle — bursty
+	TierInteractive                    // Toggle check-in — fast, low-latency
 )
 
 // Staggered re-auth / kicked detection constants.
@@ -124,26 +125,32 @@ func (s *pooledSession) isKickCandidate() bool {
 //   - ForceRefresh cascades (one session refresh does not affect others)
 //   - Rate limit buckets (each session has its own connection pool)
 type SessionPool struct {
-	mu          sync.Mutex
-	sessions    []*pooledSession
-	qrNext      uint64
-	teacherNext uint64
-	qrSize      int
-	teacherSize int
+	mu              sync.Mutex
+	sessions        []*pooledSession
+	qrNext          uint64
+	teacherNext     uint64
+	interactiveNext uint64
+	qrSize          int
+	teacherSize     int
+	interactiveSize int
 }
 
 // NewSessionPool creates a pool with the given session counts.
 // qrSessions: number of sessions dedicated to QR polling (steady, predictable traffic)
 // teacherSessions: number of sessions dedicated to teacher browsing (bursty)
-func NewSessionPool(email, password, loginURL string, qrSessions, teacherSessions int) (*SessionPool, error) {
+// interactiveSessions: number of sessions dedicated to toggle check-in (fast, low-latency)
+func NewSessionPool(email, password, loginURL string, qrSessions, teacherSessions, interactiveSessions int) (*SessionPool, error) {
 	if qrSessions < 1 {
 		return nil, fmt.Errorf("warwick: qrSessions must be >= 1, got %d", qrSessions)
 	}
 	if teacherSessions < 1 {
 		return nil, fmt.Errorf("warwick: teacherSessions must be >= 1, got %d", teacherSessions)
 	}
+	if interactiveSessions < 1 {
+		return nil, fmt.Errorf("warwick: interactiveSessions must be >= 1, got %d", interactiveSessions)
+	}
 
-	total := qrSessions + teacherSessions
+	total := qrSessions + teacherSessions + interactiveSessions
 	sessions := make([]*pooledSession, total)
 	for i := range total {
 		sessions[i] = &pooledSession{
@@ -166,9 +173,10 @@ func NewSessionPool(email, password, loginURL string, qrSessions, teacherSession
 	}
 
 	return &SessionPool{
-		sessions:    sessions,
-		qrSize:      qrSessions,
-		teacherSize: teacherSessions,
+		sessions:        sessions,
+		qrSize:          qrSessions,
+		teacherSize:     teacherSessions,
+		interactiveSize: interactiveSessions,
 	}, nil
 }
 
@@ -186,6 +194,9 @@ func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 	case TierTeacher:
 		start = p.qrSize
 		end = p.qrSize + p.teacherSize
+	case TierInteractive:
+		start = p.qrSize + p.teacherSize
+		end = p.qrSize + p.teacherSize + p.interactiveSize
 	default:
 		p.mu.Unlock()
 		return nil, fmt.Errorf("warwick: unknown session tier %d", tier)
@@ -201,6 +212,9 @@ func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 	next := int(atomic.AddUint64(&p.qrNext, 1) - 1)
 	if tier == TierTeacher {
 		next = int(atomic.AddUint64(&p.teacherNext, 1) - 1)
+	}
+	if tier == TierInteractive {
+		next = int(atomic.AddUint64(&p.interactiveNext, 1) - 1)
 	}
 
 	for offset := 0; offset < (end - start); offset++ {
