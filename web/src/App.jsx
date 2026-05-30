@@ -107,8 +107,8 @@ function PinnedCourseCard({ course }) {
         )}
       </div>
 
-      {course.attendance_rate != null && (() => {
-        const attendancePercent = Math.min(Math.max(Math.round(course.attendance_rate * 100), 0), 100);
+      {course.avg_attendance_rate != null && (() => {
+        const attendancePercent = Math.min(Math.max(Math.round(course.avg_attendance_rate * 100), 0), 100);
         return (
           <div style={{ marginTop: 'var(--space-4, 16px)' }}>
             <div style={{
