@@ -1,9 +1,23 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useCountdown } from '../hooks/useCountdown';
 
 export const QRModal = ({ qrUrl, expiresIn, onClose, courseId, roomName, className, checkedCount, totalCount, onRefresh }) => {
   const timeLeft = useCountdown(expiresIn);
   const isExpired = timeLeft !== null && timeLeft <= 0;
+  const autoRefreshed = useRef(false);
+
+  useEffect(() => {
+    if (!isExpired) {
+      autoRefreshed.current = false;
+    }
+  }, [qrUrl, isExpired]);
+
+  useEffect(() => {
+    if (isExpired && onRefresh && !autoRefreshed.current) {
+      autoRefreshed.current = true;
+      onRefresh();
+    }
+  }, [isExpired, onRefresh]);
 
   useEffect(() => {
     const handleEscape = (e) => {
