@@ -233,7 +233,7 @@ roomLoop:
 		select {
 		case <-state.ctx.Done():
 			return
-		case <-time.After(1 * time.Second):
+		case <-time.After(time.Duration(500 + rand.Intn(1000)) * time.Millisecond):
 			now := time.Now()
 			rm.mu.RLock()
 			expiresAt := state.room.ExpiresAt
