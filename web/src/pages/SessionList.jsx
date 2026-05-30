@@ -13,10 +13,6 @@ export function SessionList() {
     const totalSessions = sessions.length;
     const doneSessions = sessions.filter(s => s.status === 'done').length;
 
-    // checked_in_count and total_students are not available at session-list level
-    // (require individual session detail API calls). Show placeholders.
-    const totalChecked = sessions.reduce((sum, s) => sum + s.checked_in_count, 0);
-
     return [
       { value: totalSessions, label: 'Total Sessions' },
       { value: doneSessions, label: 'Completed' },
