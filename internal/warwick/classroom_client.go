@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"qr-command-center/internal/cache"
@@ -27,6 +28,10 @@ type ClassroomClient struct {
 	client  *http.Client
 	baseURL string
 	cache   *cache.Cache // in-memory TTL cache for course/session data
+
+	// refreshing tracks in-flight async cache refreshes keyed by cache key.
+	// Prevents thundering-herd goroutine creation on stale cache hits.
+	refreshing sync.Map
 }
 
 // NewClassroomClient creates a ClassroomClient with the given auth instance.
@@ -65,6 +70,19 @@ func NewClassroomClientFromPool(pool *SessionPool, tier SessionTier, sharedCache
 // Auth returns the underlying WarwickAuth instance (may be nil when pool is used).
 func (c *ClassroomClient) Auth() *WarwickAuth {
 	return c.auth
+}
+
+// tryRefresh spawns an async refresh fn for key if one isn't already running.
+// Returns true if the refresh was started, false if one was already in-flight.
+func (c *ClassroomClient) tryRefresh(key string, fn func()) bool {
+	if _, loaded := c.refreshing.LoadOrStore(key, true); loaded {
+		return false
+	}
+	go func() {
+		defer c.refreshing.Delete(key)
+		fn()
+	}()
+	return true
 }
 
 // GetCourses fetches the list of courses from Warwick.
@@ -109,14 +127,16 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 }
 
 func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
-	if cached, ok := c.cache.Get("courses"); ok {
-		return cached.([]domain.CourseSummary), nil
-	}
+	if c.cache != nil {
+		if cached, ok := c.cache.Get("courses"); ok {
+			return cached.([]domain.CourseSummary), nil
+		}
 
-	// Stale fallback + async refresh
-	if stale, ok := c.cache.GetStale("courses"); ok {
-		go c.refreshCoursesCache()
-		return stale.([]domain.CourseSummary), nil
+		// Stale fallback + async refresh (deduplicated via tryRefresh)
+		if stale, ok := c.cache.GetStale("courses"); ok {
+			c.tryRefresh("courses", c.refreshCoursesCache)
+			return stale.([]domain.CourseSummary), nil
+		}
 	}
 
 	return c.fetchCoursesWithPool()
@@ -125,10 +145,17 @@ func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
 func (c *ClassroomClient) refreshCoursesCache() {
 	courses, err := c.fetchCoursesWithPool()
 	if err != nil {
-		slog.Debug("cache_refresh_courses_failed", "error", err)
+		// Pool-level issues (capacity/auth) at Warn; transient fetch errors at Debug
+		if errors.Is(err, domain.ErrAuthConflict) || errors.Is(err, domain.ErrPoolExhausted) || errors.Is(err, domain.ErrAuthExpired) {
+			slog.Warn("cache_refresh_courses_pool_failed", "error", err)
+		} else {
+			slog.Debug("cache_refresh_courses_fetch_failed", "error", err)
+		}
 		return
 	}
-	c.cache.Set("courses", courses, 30*time.Second)
+	if c.cache != nil {
+		c.cache.Set("courses", courses, 30*time.Second)
+	}
 }
 
 func (c *ClassroomClient) fetchCoursesWithPool() ([]domain.CourseSummary, error) {
@@ -148,7 +175,9 @@ func (c *ClassroomClient) fetchCoursesWithPool() ([]domain.CourseSummary, error)
 	for attempt := 0; attempt < 2; attempt++ {
 		courses, err := c.fetchCourses(ref.Cookie)
 		if err == nil {
-			c.cache.Set("courses", courses, 30*time.Second)
+			if c.cache != nil {
+				c.cache.Set("courses", courses, 30*time.Second)
+			}
 			return courses, nil
 		}
 		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
@@ -267,14 +296,16 @@ func (c *ClassroomClient) GetCourseDetail(courseID string) (*domain.CourseDetail
 
 func (c *ClassroomClient) getCourseDetailWithPool(courseID string) (*domain.CourseDetail, error) {
 	key := "course:" + courseID
-	if cached, ok := c.cache.Get(key); ok {
-		return cached.(*domain.CourseDetail), nil
-	}
+	if c.cache != nil {
+		if cached, ok := c.cache.Get(key); ok {
+			return cached.(*domain.CourseDetail), nil
+		}
 
-	// Stale fallback + async refresh
-	if stale, ok := c.cache.GetStale(key); ok {
-		go c.refreshCourseDetailCache(courseID)
-		return stale.(*domain.CourseDetail), nil
+		// Stale fallback + async refresh (deduplicated via tryRefresh)
+		if stale, ok := c.cache.GetStale(key); ok {
+			c.tryRefresh(key, func() { c.refreshCourseDetailCache(courseID) })
+			return stale.(*domain.CourseDetail), nil
+		}
 	}
 
 	return c.fetchCourseDetailWithPool(key, courseID)
@@ -284,10 +315,17 @@ func (c *ClassroomClient) refreshCourseDetailCache(courseID string) {
 	key := "course:" + courseID
 	detail, err := c.fetchCourseDetailWithPool(key, courseID)
 	if err != nil {
-		slog.Debug("cache_refresh_course_detail_failed", "course_id", courseID, "error", err)
+		// Pool-level issues (capacity/auth) at Warn; transient fetch errors at Debug
+		if errors.Is(err, domain.ErrAuthConflict) || errors.Is(err, domain.ErrPoolExhausted) || errors.Is(err, domain.ErrAuthExpired) {
+			slog.Warn("cache_refresh_course_detail_pool_failed", "course_id", courseID, "error", err)
+		} else {
+			slog.Debug("cache_refresh_course_detail_fetch_failed", "course_id", courseID, "error", err)
+		}
 		return
 	}
-	c.cache.Set(key, detail, 30*time.Second)
+	if c.cache != nil {
+		c.cache.Set(key, detail, 30*time.Second)
+	}
 }
 
 func (c *ClassroomClient) fetchCourseDetailWithPool(key, courseID string) (*domain.CourseDetail, error) {
@@ -307,7 +345,9 @@ func (c *ClassroomClient) fetchCourseDetailWithPool(key, courseID string) (*doma
 	for attempt := 0; attempt < 2; attempt++ {
 		detail, err := c.fetchCourseDetail(ref.Cookie, courseID)
 		if err == nil {
-			c.cache.Set(key, detail, 30*time.Second)
+			if c.cache != nil {
+				c.cache.Set(key, detail, 30*time.Second)
+			}
 			return detail, nil
 		}
 		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
@@ -405,15 +445,17 @@ func (c *ClassroomClient) GetSessionDetail(courseID, sessionID string) (*domain.
 func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.SessionDetail, error) {
 	key := "session:" + sessionID
 
-	// 1) Fresh cache hit
-	if cached, ok := c.cache.Get(key); ok {
-		return cached.(*domain.SessionDetail), nil
-	}
+	if c.cache != nil {
+		// 1) Fresh cache hit
+		if cached, ok := c.cache.Get(key); ok {
+			return cached.(*domain.SessionDetail), nil
+		}
 
-	// 2) Stale cache hit — serve stale, refresh async in background
-	if stale, ok := c.cache.GetStale(key); ok {
-		go c.refreshSessionDetailCache(sessionID)
-		return stale.(*domain.SessionDetail), nil
+		// 2) Stale cache hit — serve stale, refresh async in background (deduplicated via tryRefresh)
+		if stale, ok := c.cache.GetStale(key); ok {
+			c.tryRefresh(key, func() { c.refreshSessionDetailCache(sessionID) })
+			return stale.(*domain.SessionDetail), nil
+		}
 	}
 
 	// 3) Cold cache — need to fetch from Warwick
@@ -421,23 +463,17 @@ func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.Se
 }
 
 // refreshSessionDetailCache is called async when stale data was served.
-// It acquires a session (with timeout) and populates the cache.
+// It delegates to fetchSessionDetailWithPool which handles the retry loop,
+// pool acquisition, and cache population on success.
 func (c *ClassroomClient) refreshSessionDetailCache(sessionID string) {
-	key := "session:" + sessionID
-	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
+	_, err := c.fetchSessionDetailWithPool("session:"+sessionID, sessionID)
 	if err != nil {
-		slog.Warn("cache_refresh_failed", "session_id", sessionID, "error", err)
-		return
+		if errors.Is(err, domain.ErrAuthConflict) || errors.Is(err, domain.ErrPoolExhausted) || errors.Is(err, domain.ErrAuthExpired) {
+			slog.Warn("cache_refresh_session_detail_failed", "session_id", sessionID, "error", err)
+		} else {
+			slog.Debug("cache_refresh_session_detail_failed", "session_id", sessionID, "error", err)
+		}
 	}
-	defer c.pool.Release(ref)
-
-	// Single attempt — best effort, next poll or user action will trigger another refresh
-	detail, err := c.fetchSessionDetail(ref.Cookie, sessionID)
-	if err != nil {
-		slog.Debug("cache_refresh_fetch_failed", "session_id", sessionID, "error", err)
-		return
-	}
-	c.cache.Set(key, detail, 10*time.Second)
 }
 
 // fetchSessionDetailWithPool is the synchronous fallback when cache is cold.
@@ -458,7 +494,9 @@ func (c *ClassroomClient) fetchSessionDetailWithPool(key, sessionID string) (*do
 	for attempt := 0; attempt < 2; attempt++ {
 		detail, err := c.fetchSessionDetail(ref.Cookie, sessionID)
 		if err == nil {
-			c.cache.Set(key, detail, 10*time.Second) // TTL 10s now
+			if c.cache != nil {
+				c.cache.Set(key, detail, 10*time.Second) // TTL 10s now
+			}
 			return detail, nil
 		}
 		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
@@ -570,9 +608,11 @@ func (c *ClassroomClient) toggleCheckinWithPool(courseID, sessionID, studentID s
 	for attempt := 0; attempt < 2; attempt++ {
 		err = c.doToggleCheckin(ref.Cookie, sessionID, studentID, checked)
 		if err == nil {
-			c.cache.Invalidate("course:" + courseID)
-			c.cache.Invalidate("courses")
-			c.cache.Invalidate("session:" + sessionID)
+			if c.cache != nil {
+				c.cache.Invalidate("course:" + courseID)
+				c.cache.Invalidate("courses")
+				c.cache.Invalidate("session:" + sessionID)
+			}
 			return nil
 		}
 		lastErr = err

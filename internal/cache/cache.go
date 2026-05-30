@@ -45,6 +45,20 @@ func (c *Cache) Invalidate(key string) {
 	delete(c.items, key)
 }
 
+// GetStale returns cached data even if the TTL has expired.
+// Returns false only if the key does not exist at all.
+// This enables "serve stale" patterns where callers can return slightly
+// stale data while triggering an async refresh.
+func (c *Cache) GetStale(key string) (interface{}, bool) {
+	c.mu.RLock()
+	e, ok := c.items[key]
+	c.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	return e.data, true
+}
+
 func (c *Cache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
