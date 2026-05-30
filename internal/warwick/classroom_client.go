@@ -29,7 +29,7 @@ type ClassroomClient struct {
 }
 
 // NewClassroomClient creates a ClassroomClient with the given auth instance.
-func NewClassroomClient(auth *WarwickAuth) *ClassroomClient {
+func NewClassroomClient(auth *WarwickAuth, sharedCache *cache.Cache) *ClassroomClient {
 	return &ClassroomClient{
 		auth: auth,
 		client: &http.Client{
@@ -39,13 +39,14 @@ func NewClassroomClient(auth *WarwickAuth) *ClassroomClient {
 			},
 		},
 		baseURL: "https://warwick.humantix.cloud",
-		cache:   cache.New(),
+		cache:   sharedCache,
 	}
 }
 
 // NewClassroomClientFromPool creates a ClassroomClient that acquires sessions from a pool.
 // This is the new preferred constructor — it enables session isolation.
-func NewClassroomClientFromPool(pool *SessionPool, tier SessionTier) *ClassroomClient {
+// sharedCache is a shared in-memory cache for Warwick responses. Must not be nil.
+func NewClassroomClientFromPool(pool *SessionPool, tier SessionTier, sharedCache *cache.Cache) *ClassroomClient {
 	return &ClassroomClient{
 		pool: pool,
 		tier: tier,
@@ -56,7 +57,7 @@ func NewClassroomClientFromPool(pool *SessionPool, tier SessionTier) *ClassroomC
 			},
 		},
 		baseURL: "https://warwick.humantix.cloud",
-		cache:   cache.New(),
+		cache:   sharedCache,
 	}
 }
 
@@ -115,6 +116,9 @@ func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return nil, domain.ErrAuthConflict
+		}
+		if errors.Is(err, ErrNoAvailableSessions) {
+			return nil, domain.ErrPoolExhausted
 		}
 		return nil, domain.ErrAuthExpired
 	}
@@ -252,6 +256,9 @@ func (c *ClassroomClient) getCourseDetailWithPool(courseID string) (*domain.Cour
 		if errors.Is(err, ErrAuthConflict) {
 			return nil, domain.ErrAuthConflict
 		}
+		if errors.Is(err, ErrNoAvailableSessions) {
+			return nil, domain.ErrPoolExhausted
+		}
 		return nil, domain.ErrAuthExpired
 	}
 	defer c.pool.Release(ref)
@@ -356,10 +363,18 @@ func (c *ClassroomClient) GetSessionDetail(courseID, sessionID string) (*domain.
 }
 
 func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.SessionDetail, error) {
+	key := "session:" + sessionID
+	if cached, ok := c.cache.Get(key); ok {
+		return cached.(*domain.SessionDetail), nil
+	}
+
 	ref, err := c.pool.Acquire(c.tier)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return nil, domain.ErrAuthConflict
+		}
+		if errors.Is(err, ErrNoAvailableSessions) {
+			return nil, domain.ErrPoolExhausted
 		}
 		return nil, domain.ErrAuthExpired
 	}
@@ -369,6 +384,7 @@ func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.Se
 	for attempt := 0; attempt < 2; attempt++ {
 		detail, err := c.fetchSessionDetail(ref.Cookie, sessionID)
 		if err == nil {
+			c.cache.Set(key, detail, 5*time.Second)
 			return detail, nil
 		}
 		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
@@ -461,10 +477,13 @@ func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, c
 }
 
 func (c *ClassroomClient) toggleCheckinWithPool(courseID, sessionID, studentID string, checked bool) error {
-	ref, err := c.pool.Acquire(c.tier)
+	ref, err := c.pool.Acquire(TierInteractive)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return domain.ErrAuthConflict
+		}
+		if errors.Is(err, ErrNoAvailableSessions) {
+			return domain.ErrPoolExhausted
 		}
 		return domain.ErrAuthExpired
 	}
@@ -476,6 +495,7 @@ func (c *ClassroomClient) toggleCheckinWithPool(courseID, sessionID, studentID s
 		if err == nil {
 			c.cache.Invalidate("course:" + courseID)
 			c.cache.Invalidate("courses")
+			c.cache.Invalidate("session:" + sessionID)
 			return nil
 		}
 		lastErr = err

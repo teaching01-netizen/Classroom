@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -18,8 +19,16 @@ func getCoursesHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 		}
 		courses, err := cc.GetCourses()
 		if err != nil {
-			if err == domain.ErrAuthExpired {
+			if errors.Is(err, domain.ErrAuthExpired) {
 				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
+				return
+			}
+			if errors.Is(err, domain.ErrPoolExhausted) {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
+				return
+			}
+			if errors.Is(err, domain.ErrAuthConflict) {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
 				return
 			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
@@ -43,8 +52,16 @@ func getCourseDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 
 		detail, err := cc.GetCourseDetail(courseID)
 		if err != nil {
-			if err == domain.ErrAuthExpired {
+			if errors.Is(err, domain.ErrAuthExpired) {
 				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
+				return
+			}
+			if errors.Is(err, domain.ErrPoolExhausted) {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
+				return
+			}
+			if errors.Is(err, domain.ErrAuthConflict) {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
 				return
 			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
@@ -70,8 +87,16 @@ func getSessionDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 
 		detail, err := cc.GetSessionDetail(courseID, sessionID)
 		if err != nil {
-			if err == domain.ErrAuthExpired {
+			if errors.Is(err, domain.ErrAuthExpired) {
 				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
+				return
+			}
+			if errors.Is(err, domain.ErrPoolExhausted) {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
+				return
+			}
+			if errors.Is(err, domain.ErrAuthConflict) {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
 				return
 			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
@@ -102,8 +127,16 @@ func toggleCheckinHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 		}
 
 		if err := cc.ToggleCheckin(courseID, sessionID, req.StudentID, req.Checked); err != nil {
-			if err == domain.ErrAuthExpired {
+			if errors.Is(err, domain.ErrAuthExpired) {
 				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
+				return
+			}
+			if errors.Is(err, domain.ErrPoolExhausted) {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
+				return
+			}
+			if errors.Is(err, domain.ErrAuthConflict) {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
 				return
 			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))

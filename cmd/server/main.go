@@ -13,6 +13,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"qr-command-center/internal/api"
+	"qr-command-center/internal/cache"
 	"qr-command-center/internal/db"
 	"qr-command-center/internal/service"
 	"qr-command-center/internal/warwick"
@@ -39,11 +40,13 @@ func main() {
 		slog.Warn("Failed to create Warwick session pool; will retry on demand", "error", err)
 	}
 
+	sharedCache := cache.New()
+
 	var qrClient *warwick.WarwickQrClient
 	var classroomClient *warwick.ClassroomClient
 	if sessionPool != nil {
 		qrClient = warwick.NewWarwickQrClientFromPool(sessionPool, warwick.TierQR)
-		classroomClient = warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher)
+		classroomClient = warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher, sharedCache)
 	}
 
 	// Connect to database
@@ -76,7 +79,7 @@ func main() {
 
 	favRepo := db.NewPgFavouriteRepository(pool)
 
-	router := api.NewRouter(rm, classroomClient, favRepo)
+	router := api.NewRouter(rm, classroomClient, favRepo, sharedCache)
 
 	addr := os.Getenv("PORT")
 	if addr == "" {

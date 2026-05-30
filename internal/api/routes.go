@@ -10,6 +10,7 @@ import (
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
+	"qr-command-center/internal/cache"
 	"qr-command-center/internal/db"
 	"qr-command-center/internal/middleware"
 	"qr-command-center/internal/service"
@@ -36,13 +37,13 @@ func init() {
 	allowedOrigin = os.Getenv("CORS_ORIGIN")
 }
 
-func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.FavouriteRepository) *chi.Mux {
+func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.FavouriteRepository, c *cache.Cache) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(chimiddleware.Logger)
 	r.Use(corsMiddleware)
 
-	r.Get("/api", healthHandler())
-	r.Get("/api/", healthHandler())
+	r.Get("/api", healthHandler(c))
+	r.Get("/api/", healthHandler(c))
 
 	r.Route("/api/rooms", func(r chi.Router) {
 		r.Use(roomLimiter.Middleware)
@@ -105,10 +106,13 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func healthHandler() http.HandlerFunc {
+func healthHandler(c *cache.Cache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, successResponse(map[string]string{
+		writeJSON(w, http.StatusOK, successResponse(map[string]interface{}{
 			"message": "QR Command Center API is running!",
+			"cache": map[string]interface{}{
+				"size": c.Size(),
+			},
 		}))
 	}
 }
