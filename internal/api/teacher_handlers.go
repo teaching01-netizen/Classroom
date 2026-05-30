@@ -12,6 +12,10 @@ import (
 
 func getCoursesHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
+			return
+		}
 		courses, err := cc.GetCourses()
 		if err != nil {
 			if err == domain.ErrAuthExpired {
@@ -27,6 +31,10 @@ func getCoursesHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 
 func getCourseDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
+			return
+		}
 		courseID := chi.URLParam(r, "courseId")
 		if courseID == "" {
 			writeJSON(w, http.StatusBadRequest, errorResponse("courseId is required"))
@@ -48,6 +56,10 @@ func getCourseDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 
 func getSessionDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
+			return
+		}
 		courseID := chi.URLParam(r, "courseId")
 		sessionID := chi.URLParam(r, "sessionId")
 
@@ -71,6 +83,10 @@ func getSessionDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 
 func toggleCheckinHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
+			return
+		}
 		courseID := chi.URLParam(r, "courseId")
 		sessionID := chi.URLParam(r, "sessionId")
 

@@ -211,6 +211,22 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 		}
 	}()
 
+	if rm.qrClient == nil {
+		rm.mu.Lock()
+		msg := "QR client not available (session pool not initialized)"
+		state.room.ErrorMessage = &msg
+		_ = state.room.TransitionTo(domain.Stopped)
+		roomCopy := state.room
+		rm.mu.Unlock()
+		go func() {
+			if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
+				slog.Error("failed to persist QR client error", "error", err)
+			}
+		}()
+		rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+		return
+	}
+
 roomLoop:
 	for {
 		select {

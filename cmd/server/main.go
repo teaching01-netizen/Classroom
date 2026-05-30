@@ -38,8 +38,12 @@ func main() {
 		slog.Warn("Failed to create Warwick session pool; will retry on demand", "error", err)
 	}
 
-	qrClient := warwick.NewWarwickQrClientFromPool(sessionPool, warwick.TierQR)
-	classroomClient := warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher)
+	var qrClient *warwick.WarwickQrClient
+	var classroomClient *warwick.ClassroomClient
+	if sessionPool != nil {
+		qrClient = warwick.NewWarwickQrClientFromPool(sessionPool, warwick.TierQR)
+		classroomClient = warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher)
+	}
 
 	// Connect to database
 	databaseURL := os.Getenv("DATABASE_URL")
