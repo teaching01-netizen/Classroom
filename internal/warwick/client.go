@@ -97,6 +97,9 @@ func (c *WarwickQrClient) FetchQRWithFreshAuth(classID string) (domain.QrRespons
 	if c.pool != nil {
 		ref, err := c.pool.Acquire(c.tier)
 		if err != nil {
+			if errors.Is(err, ErrAuthConflict) {
+				return domain.QrResponse{}, domain.ErrAuthConflict
+			}
 			return domain.QrResponse{}, domain.ErrAuthExpired
 		}
 		defer c.pool.Release(ref)
