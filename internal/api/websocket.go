@@ -5,84 +5,59 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"sync"
+	"time"
 
 	"nhooyr.io/websocket"
 
 	"qr-command-center/internal/service"
 )
 
-type wsClient struct {
-	conn *websocket.Conn
-	send chan []byte
-}
-
 func wsHandler(rm *service.RoomManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
-			slog.Error("websocket accept failed", "error", err)
+			slog.Error("ws accept failed", "error", err)
 			return
 		}
+		defer conn.CloseNow()
 
-		client := &wsClient{
-			conn: conn,
-			send: make(chan []byte, 256),
-		}
-
+		ctx := conn.CloseRead(r.Context())
 		events := rm.Subscribe()
 
 		// Send FullStateSync
 		rooms := rm.GetAllRooms()
 		syncData := marshalEvent(service.RoomManagerEvent{Type: "FullStateSync", Data: rooms})
-		select {
-		case client.send <- syncData:
-		default:
+		writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err = conn.Write(writeCtx, websocket.MessageText, syncData)
+		cancel()
+		if err != nil {
+			if websocket.CloseStatus(err) == -1 {
+				slog.Error("ws write failed", "error", err)
+			}
+			return
 		}
 
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		// Write pump
-		go func() {
-			defer wg.Done()
-			for msg := range client.send {
-				ctx, cancel := context.WithTimeout(r.Context(), 10000)
-				err := client.conn.Write(ctx, websocket.MessageText, msg)
+		// Single goroutine: writes events from subscribe channel
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-events:
+				if !ok {
+					return
+				}
+				data := marshalEvent(event)
+				writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				err := conn.Write(writeCtx, websocket.MessageText, data)
 				cancel()
 				if err != nil {
-					slog.Error("ws write failed", "error", err)
+					if websocket.CloseStatus(err) == -1 {
+						slog.Error("ws write failed", "error", err)
+					}
 					return
 				}
 			}
-		}()
-
-		// Read pump (just wait for close)
-		go func() {
-			defer wg.Done()
-			for {
-				_, _, err := client.conn.Read(r.Context())
-				if err != nil {
-					return
-				}
-			}
-		}()
-
-		// Event forwarder
-		go func() {
-			for event := range events {
-				data := marshalEvent(event)
-				select {
-				case client.send <- data:
-				default:
-					slog.Warn("dropping event for slow ws client")
-				}
-			}
-			close(client.send)
-		}()
-
-		wg.Wait()
-		client.conn.Close(websocket.StatusNormalClosure, "done")
+		}
 	}
 }
 
