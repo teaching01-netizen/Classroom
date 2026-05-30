@@ -87,15 +87,31 @@ func (c *ClassroomClient) tryRefresh(key string, fn func()) bool {
 
 // GetCourses fetches the list of courses from Warwick.
 // Uses the session pool if configured, otherwise falls back to WarwickAuth.
+// After fetching raw courses, it enriches them with session counts from course details
+// before caching. The enrichment runs concurrently with bounded parallelism.
 func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 	if c.cache != nil {
 		if cached, ok := c.cache.Get("courses"); ok {
 			return cached.([]domain.CourseSummary), nil
 		}
+
+		// Stale fallback + async refresh (deduplicated via tryRefresh)
+		if stale, ok := c.cache.GetStale("courses"); ok {
+			c.tryRefresh("courses", c.refreshCoursesCache)
+			return stale.([]domain.CourseSummary), nil
+		}
 	}
 
 	if c.pool != nil {
-		return c.getCoursesWithPool()
+		courses, err := c.getCoursesWithPool()
+		if err != nil {
+			return nil, err
+		}
+		c.enrichCourses(courses)
+		if c.cache != nil {
+			c.cache.Set("courses", courses, 30*time.Second)
+		}
+		return courses, nil
 	}
 
 	var lastErr error
@@ -107,6 +123,7 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 
 		courses, err := c.fetchCourses(cookie)
 		if err == nil {
+			c.enrichCourses(courses)
 			if c.cache != nil {
 				c.cache.Set("courses", courses, 30*time.Second)
 			}
@@ -126,39 +143,38 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 	return nil, lastErr
 }
 
+// enrichCourses concurrently fetches course details to populate session counts.
+// Uses GetCourseDetail which handles its own caching — no extra API calls on warm cache.
+func (c *ClassroomClient) enrichCourses(courses []domain.CourseSummary) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5) // limit concurrency
+	var mu sync.Mutex
+
+	for i := range courses {
+		if courses[i].Status == domain.CourseStatusFinished {
+			continue
+		}
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			detail, err := c.GetCourseDetail(courses[idx].CourseID)
+			if err != nil {
+				return
+			}
+
+			mu.Lock()
+			courses[idx].TotalSessions = detail.TotalSessions
+			courses[idx].CompletedSessions = detail.CompletedSessions
+			mu.Unlock()
+		}(i)
+	}
+	wg.Wait()
+}
+
 func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
-	if c.cache != nil {
-		if cached, ok := c.cache.Get("courses"); ok {
-			return cached.([]domain.CourseSummary), nil
-		}
-
-		// Stale fallback + async refresh (deduplicated via tryRefresh)
-		if stale, ok := c.cache.GetStale("courses"); ok {
-			c.tryRefresh("courses", c.refreshCoursesCache)
-			return stale.([]domain.CourseSummary), nil
-		}
-	}
-
-	return c.fetchCoursesWithPool()
-}
-
-func (c *ClassroomClient) refreshCoursesCache() {
-	courses, err := c.fetchCoursesWithPool()
-	if err != nil {
-		// Pool-level issues (capacity/auth) at Warn; transient fetch errors at Debug
-		if errors.Is(err, domain.ErrAuthConflict) || errors.Is(err, domain.ErrPoolExhausted) || errors.Is(err, domain.ErrAuthExpired) {
-			slog.Warn("cache_refresh_courses_pool_failed", "error", err)
-		} else {
-			slog.Debug("cache_refresh_courses_fetch_failed", "error", err)
-		}
-		return
-	}
-	if c.cache != nil {
-		c.cache.Set("courses", courses, 30*time.Second)
-	}
-}
-
-func (c *ClassroomClient) fetchCoursesWithPool() ([]domain.CourseSummary, error) {
 	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
@@ -175,9 +191,6 @@ func (c *ClassroomClient) fetchCoursesWithPool() ([]domain.CourseSummary, error)
 	for attempt := 0; attempt < 2; attempt++ {
 		courses, err := c.fetchCourses(ref.Cookie)
 		if err == nil {
-			if c.cache != nil {
-				c.cache.Set("courses", courses, 30*time.Second)
-			}
 			return courses, nil
 		}
 		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
@@ -196,6 +209,23 @@ func (c *ClassroomClient) fetchCoursesWithPool() ([]domain.CourseSummary, error)
 		return nil, err
 	}
 	return nil, lastErr
+}
+
+func (c *ClassroomClient) refreshCoursesCache() {
+	courses, err := c.getCoursesWithPool()
+	if err != nil {
+		// Pool-level issues (capacity/auth) at Warn; transient fetch errors at Debug
+		if errors.Is(err, domain.ErrAuthConflict) || errors.Is(err, domain.ErrPoolExhausted) || errors.Is(err, domain.ErrAuthExpired) {
+			slog.Warn("cache_refresh_courses_pool_failed", "error", err)
+		} else {
+			slog.Debug("cache_refresh_courses_fetch_failed", "error", err)
+		}
+		return
+	}
+	c.enrichCourses(courses)
+	if c.cache != nil {
+		c.cache.Set("courses", courses, 30*time.Second)
+	}
 }
 
 func (c *ClassroomClient) fetchCourses(cookie string) ([]domain.CourseSummary, error) {
