@@ -12,6 +12,7 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+COPY --from=frontend-builder /app/web/dist ./web/dist/
 RUN CGO_ENABLED=0 go build -o qr-command-center-server ./cmd/server
 
 # Stage 3: Final image
