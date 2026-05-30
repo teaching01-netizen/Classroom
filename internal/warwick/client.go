@@ -51,7 +51,7 @@ func (c *WarwickQrClient) Auth() *WarwickAuth {
 }
 
 func (c *WarwickQrClient) FetchQR(classID string) (domain.QrResponse, error) {
-	cookie, err := c.auth.GetValidSession()
+	cookie, _, err := c.auth.GetValidSession()
 	if err != nil {
 		return domain.QrResponse{}, domain.ErrAuthExpired
 	}
@@ -59,7 +59,7 @@ func (c *WarwickQrClient) FetchQR(classID string) (domain.QrResponse, error) {
 }
 
 func (c *WarwickQrClient) FetchQRWithFreshAuth(classID string) (domain.QrResponse, error) {
-	cookie, err := c.auth.ForceRefresh()
+	cookie, _, err := c.auth.ForceRefresh()
 	if err != nil {
 		return domain.QrResponse{}, domain.ErrAuthExpired
 	}
@@ -85,6 +85,10 @@ func (c *WarwickQrClient) doFetch(classID string, cookie string) (domain.QrRespo
 
 	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
 		return domain.QrResponse{}, domain.ErrAuthExpired
+	}
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return domain.QrResponse{}, domain.ErrRateLimited
 	}
 
 	contentType := resp.Header.Get("Content-Type")

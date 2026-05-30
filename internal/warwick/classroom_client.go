@@ -46,7 +46,7 @@ func (c *ClassroomClient) Auth() *WarwickAuth {
 func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		cookie, err := c.auth.GetValidSession()
+		cookie, _, err := c.auth.GetValidSession()
 		if err != nil {
 			return nil, domain.ErrAuthExpired
 		}
@@ -58,7 +58,7 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 
 		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
-			if _, rerr := c.auth.ForceRefresh(); rerr != nil {
+			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
 				return nil, domain.ErrAuthExpired
 			}
 			continue
@@ -128,7 +128,7 @@ func (c *ClassroomClient) fetchCourses(cookie string) ([]domain.CourseSummary, e
 func (c *ClassroomClient) GetCourseDetail(courseID string) (*domain.CourseDetail, error) {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		cookie, err := c.auth.GetValidSession()
+		cookie, _, err := c.auth.GetValidSession()
 		if err != nil {
 			return nil, domain.ErrAuthExpired
 		}
@@ -140,7 +140,7 @@ func (c *ClassroomClient) GetCourseDetail(courseID string) (*domain.CourseDetail
 
 		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
-			if _, rerr := c.auth.ForceRefresh(); rerr != nil {
+			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
 				return nil, domain.ErrAuthExpired
 			}
 			continue
@@ -198,7 +198,7 @@ func (c *ClassroomClient) fetchCourseDetail(cookie, courseID string) (*domain.Co
 func (c *ClassroomClient) GetSessionDetail(courseID, sessionID string) (*domain.SessionDetail, error) {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		cookie, err := c.auth.GetValidSession()
+		cookie, _, err := c.auth.GetValidSession()
 		if err != nil {
 			return nil, domain.ErrAuthExpired
 		}
@@ -210,7 +210,7 @@ func (c *ClassroomClient) GetSessionDetail(courseID, sessionID string) (*domain.
 
 		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
-			if _, rerr := c.auth.ForceRefresh(); rerr != nil {
+			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
 				return nil, domain.ErrAuthExpired
 			}
 			continue
@@ -267,7 +267,7 @@ func (c *ClassroomClient) fetchSessionDetail(cookie, sessionID string) (*domain.
 func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, checked bool) error {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		cookie, err := c.auth.GetValidSession()
+		cookie, _, err := c.auth.GetValidSession()
 		if err != nil {
 			return domain.ErrAuthExpired
 		}
@@ -279,7 +279,7 @@ func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, c
 		if err != domain.ErrAuthExpired || attempt == 1 {
 			break
 		}
-		if _, err := c.auth.ForceRefresh(); err != nil {
+		if _, _, err := c.auth.ForceRefresh(); err != nil {
 			return domain.ErrAuthExpired
 		}
 	}
@@ -337,6 +337,10 @@ func (c *ClassroomClient) checkAuth(resp *http.Response) error {
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return domain.ErrAuthExpired
+	}
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return domain.ErrRateLimited
 	}
 
 	contentType := resp.Header.Get("Content-Type")

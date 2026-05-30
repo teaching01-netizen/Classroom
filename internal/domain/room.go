@@ -68,9 +68,11 @@ const (
 	ErrKindAuthExpired FetchErrorKind = iota
 	ErrKindNetwork
 	ErrKindInvalidPayload
+	ErrKindRateLimited
 )
 
 var ErrAuthExpired = &FetchError{Kind: ErrKindAuthExpired}
+var ErrRateLimited = &FetchError{Kind: ErrKindRateLimited}
 
 type FetchError struct {
 	Kind    FetchErrorKind
@@ -85,6 +87,8 @@ func (e *FetchError) Error() string {
 		return fmt.Sprintf("network request failed: %s", e.Message)
 	case ErrKindInvalidPayload:
 		return fmt.Sprintf("invalid response payload: %s", e.Message)
+	case ErrKindRateLimited:
+		return "warwick rate limit exceeded"
 	default:
 		return "unknown fetch error"
 	}
@@ -94,6 +98,8 @@ func (e *FetchError) ToRoomStatus() RoomStatus {
 	switch e.Kind {
 	case ErrKindAuthExpired:
 		return AuthExpired
+	case ErrKindRateLimited:
+		return Warning
 	default:
 		return Warning
 	}
