@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,38 +30,13 @@ func main() {
 	// Create session pool with traffic-tier isolation
 	// 2 QR sessions (round-robin for concurrent polling)
 	// 1 teacher session (sequential browsing is fine)
-	slog.Info("Creating Warwick session pool with traffic-tier isolation...")
+	slog.Info("Creating Warwick session pool...")
 	email := os.Getenv("WARWICK_EMAIL")
 	password := os.Getenv("WARWICK_PASSWORD")
-	if email == "" || password == "" {
-		slog.Error("WARWICK_EMAIL and WARWICK_PASSWORD must be set")
-		os.Exit(1)
-	}
 	sessionPool, err := warwick.NewSessionPool(email, password, "https://warwick.humantix.cloud/admin/", 2, 1)
 	if err != nil {
-		slog.Error("Failed to create session pool", "error", err)
-		os.Exit(1)
+		slog.Warn("Failed to create Warwick session pool; will retry on demand", "error", err)
 	}
-
-	// Validate all sessions in the pool
-	slog.Info("Validating Warwick credentials...")
-	for i := 0; i < 2; i++ {
-		ref, err := sessionPool.Acquire(warwick.TierQR)
-		if err != nil {
-			slog.Error("Warwick authentication failed for QR session", "session", i, "error", err)
-			os.Exit(1)
-		}
-		sessionPool.Release(ref)
-	}
-	{
-		ref, err := sessionPool.Acquire(warwick.TierTeacher)
-		if err != nil {
-			slog.Error("Warwick authentication failed for teacher session", "error", err)
-			os.Exit(1)
-		}
-		sessionPool.Release(ref)
-	}
-	slog.Info("Warwick authentication successful", "qr_sessions", 2, "teacher_sessions", 1)
 
 	qrClient := warwick.NewWarwickQrClientFromPool(sessionPool, warwick.TierQR)
 	classroomClient := warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher)
@@ -95,9 +71,15 @@ func main() {
 
 	router := api.NewRouter(rm, classroomClient)
 
-	addr := os.Getenv("SERVER_ADDR")
+	addr := os.Getenv("PORT")
 	if addr == "" {
-		addr = "0.0.0.0:3001"
+		addr = os.Getenv("SERVER_ADDR")
+	}
+	if addr == "" {
+		addr = ":3000"
+	}
+	if !strings.Contains(addr, ":") {
+		addr = ":" + addr
 	}
 
 	srv := &http.Server{
