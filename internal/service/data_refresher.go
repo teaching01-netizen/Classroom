@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -41,23 +42,23 @@ func (d *DataRefresher) Run(ctx context.Context) {
 			slog.Info("data_refresher stopped")
 			return
 		case <-ticker.C:
-			d.safeRefresh()
+			d.safeRefresh(ctx)
 		}
 	}
 }
 
 // safeRefresh wraps refresh with panic recovery, matching the runRoomWorker pattern.
-func (d *DataRefresher) safeRefresh() {
+func (d *DataRefresher) safeRefresh(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("data_refresher panicked", "error", r)
 		}
 	}()
-	d.refresh()
+	d.refresh(ctx)
 }
 
 // refresh executes one fetch cycle: fetches courses then warms detail cache for active ones.
-func (d *DataRefresher) refresh() {
+func (d *DataRefresher) refresh(ctx context.Context) {
 	start := time.Now()
 	slog.Debug("cache_refresh_started")
 
@@ -70,6 +71,12 @@ func (d *DataRefresher) refresh() {
 	detailCount := 0
 	for _, course := range courses {
 		if course.Status != domain.CourseStatusFinished {
+			select {
+			case <-ctx.Done():
+				slog.Warn("cache_refresh_cancelled", "error", ctx.Err(), "course_count", len(courses), "detail_count", detailCount)
+				return
+			default:
+			}
 			if _, err := d.cc.GetCourseDetail(course.CourseID); err != nil {
 				slog.Warn("cache_refresh_course_detail_failed", "course_id", course.CourseID, "error", err)
 				continue
@@ -102,7 +109,14 @@ func (d *DataRefresher) LastFetch() time.Time {
 }
 
 // WarmOnce performs a synchronous warmup fetch. Used during server startup.
-func (d *DataRefresher) WarmOnce(ctx context.Context) error {
+func (d *DataRefresher) WarmOnce(ctx context.Context) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("cache_warmup_panicked", "error", r)
+			err = fmt.Errorf("warmup panicked: %v", r)
+		}
+	}()
+
 	slog.Info("cache_warmup_started")
 
 	courses, err := d.cc.GetCourses()
@@ -110,18 +124,26 @@ func (d *DataRefresher) WarmOnce(ctx context.Context) error {
 		return err
 	}
 
+	detailCount := 0
 	for _, course := range courses {
 		if course.Status != domain.CourseStatusFinished {
+			select {
+			case <-ctx.Done():
+				slog.Warn("cache_warmup_cancelled", "error", ctx.Err(), "course_count", len(courses), "detail_count", detailCount)
+				return ctx.Err()
+			default:
+			}
 			if _, err := d.cc.GetCourseDetail(course.CourseID); err != nil {
 				slog.Warn("cache_warmup_course_detail_failed", "course_id", course.CourseID, "error", err)
 				continue
 			}
+			detailCount++
 		}
 	}
 
 	d.warm.Store(true)
 	d.lastFetch.Store(time.Now())
 
-	slog.Info("cache_warmup_completed", "course_count", len(courses))
+	slog.Info("cache_warmup_completed", "course_count", len(courses), "detail_count", detailCount)
 	return nil
 }

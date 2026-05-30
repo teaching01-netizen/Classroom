@@ -141,6 +141,7 @@ func main() {
 }
 
 // getEnvDuration parses a duration from an env var, falling back to defaultVal on error or empty.
+// Values ≤ 0 are treated as invalid and fall back to defaultVal.
 func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	val := os.Getenv(key)
 	if val == "" {
@@ -149,6 +150,10 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	d, err := time.ParseDuration(val)
 	if err != nil {
 		slog.Warn("invalid duration for env var", "key", key, "value", val, "error", err)
+		return defaultVal
+	}
+	if d <= 0 {
+		slog.Warn("non-positive duration for env var, using default", "key", key, "value", val, "default", defaultVal)
 		return defaultVal
 	}
 	return d
