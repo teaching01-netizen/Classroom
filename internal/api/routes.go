@@ -10,8 +10,15 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
+	"qr-command-center/internal/middleware"
 	"qr-command-center/internal/service"
 	"qr-command-center/internal/warwick"
+)
+
+var (
+	teacherLimiter = middleware.NewIPRateLimiter(5, 10)   // teacher/courses browsing: 5 req/s, burst 10
+	toggleLimiter  = middleware.NewIPRateLimiter(2, 3)    // POST toggle-checkin: 2 req/s, burst 3
+	roomLimiter    = middleware.NewIPRateLimiter(10, 20)  // rooms API: 10 req/s, burst 20
 )
 
 var allowedOrigins = map[string]bool{
@@ -31,6 +38,8 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient) *chi.Mux {
 	})
 
 	r.Route("/api/rooms", func(r chi.Router) {
+		r.Use(roomLimiter.Middleware)
+
 		r.Get("/", getRoomsHandler(rm))
 		r.Post("/", createRoomHandler(rm))
 		r.Post("/from-session", createRoomFromSessionHandler(rm))
@@ -41,10 +50,12 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient) *chi.Mux {
 	})
 
 	r.Route("/api/teacher", func(r chi.Router) {
+		r.Use(teacherLimiter.Middleware)
+
 		r.Get("/courses", getCoursesHandler(cc))
 		r.Get("/courses/{courseId}", getCourseDetailHandler(cc))
 		r.Get("/courses/{courseId}/sessions/{sessionId}", getSessionDetailHandler(cc))
-		r.Post("/courses/{courseId}/sessions/{sessionId}/toggle-checkin", toggleCheckinHandler(cc))
+		r.With(toggleLimiter.Middleware).Post("/courses/{courseId}/sessions/{sessionId}/toggle-checkin", toggleCheckinHandler(cc))
 	})
 
 	r.Get("/ws", wsHandler(rm))
