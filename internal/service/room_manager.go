@@ -115,6 +115,10 @@ func (rm *RoomManager) DeleteRoom(roomID string) error {
 	}
 	rm.mu.Unlock()
 
+	rm.emitMu.Lock()
+	delete(rm.lastEmittedAt, roomID)
+	rm.emitMu.Unlock()
+
 	rm.emit(RoomManagerEvent{Type: "RoomDeleted", Data: roomID})
 	return nil
 }
@@ -205,7 +209,10 @@ func (rm *RoomManager) emit(event RoomManagerEvent) {
 	// Rate limit per room: skip RoomUpdated if emitted too recently.
 	// Room is already updated in-memory; subscribers see latest state on next allowed emit.
 	if event.Type == "RoomUpdated" {
-		if roomData, ok := event.Data.(domain.Room); ok {
+		roomData, ok := event.Data.(domain.Room)
+		if !ok {
+			slog.Warn("emit: RoomUpdated with non-Room data", "type", fmt.Sprintf("%T", event.Data))
+		} else {
 			rm.emitMu.Lock()
 			last, exists := rm.lastEmittedAt[roomData.RoomID]
 			now := time.Now()
