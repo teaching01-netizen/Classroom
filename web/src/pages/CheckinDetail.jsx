@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { useCheckins } from '../hooks/useCheckins';
 import { StatsBar } from '../components/StatsBar';
 import { StudentTable } from '../components/StudentTable';
+import { Pagination } from '../components/Pagination';
 import { QRModal } from '../components/QRModal';
 import { BackBreadcrumb } from '../components/BackBreadcrumb';
 
@@ -12,6 +13,8 @@ export function CheckinDetail() {
   const [showQR, setShowQR] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
+  const [page, setPage] = useState(1);
+  const perPage = 25;
   const [room, setRoom] = useState(null);
   const [isStarting, setIsStarting] = useState(false);
   const [autoStartError, setAutoStartError] = useState(null);
@@ -24,6 +27,11 @@ export function CheckinDetail() {
     };
   }, []);
 
+  // Reset page to 1 when search or filter changes
+  useEffect(() => {
+    setPage(1);
+  }, [searchQuery, filterStatus]);
+
   // Auto-start QR check-in session on mount
   useEffect(() => {
     if (!sessionId) return;
@@ -33,9 +41,18 @@ export function CheckinDetail() {
     const autoStart = async () => {
       try {
         // 1. Check if room already exists
-        const roomsRes = await fetch('/api/rooms');
+        const roomsRes = await fetch('/api/rooms?lite=true');
         if (!roomsRes.ok) throw new Error(`Failed to fetch rooms: ${roomsRes.status}`);
-        const roomsData = await roomsRes.json();
+        let roomsData;
+        try {
+          roomsData = await roomsRes.json();
+        } catch (e) {
+          if (e instanceof SyntaxError) {
+            console.error('JSON parse error fetching rooms:', e.message);
+            throw new Error('Invalid response from rooms API — please try again');
+          }
+          throw e;
+        }
         if (!roomsData.success) throw new Error(roomsData.error || 'Failed to fetch rooms');
         const existingRoom = roomsData.data?.find(r => r.room_id === sessionId);
 
@@ -48,7 +65,16 @@ export function CheckinDetail() {
           if (existingRoom.status !== 'Running' && existingRoom.status !== 'Fetching') {
             const startRes = await fetch(`/api/rooms/${sessionId}/start`, { method: 'POST' });
             if (!startRes.ok) throw new Error(`Failed to start room: ${startRes.status}`);
-            const startResult = await startRes.json();
+            let startResult;
+            try {
+              startResult = await startRes.json();
+            } catch (e) {
+              if (e instanceof SyntaxError) {
+                console.error('JSON parse error starting room:', e.message);
+                throw new Error('Invalid response when starting room — please try again');
+              }
+              throw e;
+            }
             if (!startResult.success) throw new Error(startResult.error || 'Failed to start room');
           }
 
@@ -65,7 +91,16 @@ export function CheckinDetail() {
             }
             try {
               const res = await fetch(`/api/rooms/${sessionId}`);
-              const result = await res.json();
+              let result;
+              try {
+                result = await res.json();
+              } catch (e) {
+                if (e instanceof SyntaxError) {
+                  console.error('JSON parse error polling room:', e.message);
+                  return;
+                }
+                throw e;
+              }
               if (result.success && result.data.qr_url) {
                 setRoom(result.data);
                 clearInterval(pollRef.current);
@@ -105,6 +140,16 @@ export function CheckinDetail() {
       return matchesSearch && matchesFilter;
     });
   }, [students, searchQuery, filterStatus]);
+
+  const totalPages = Math.ceil(filteredStudents.length / perPage);
+  const paginatedStudents = filteredStudents.slice((page - 1) * perPage, page * perPage);
+
+  // Clamp page when filtered list shrinks
+  useEffect(() => {
+    if (totalPages > 0 && page > totalPages) {
+      setPage(totalPages);
+    }
+  }, [totalPages, page]);
 
   const stats = useMemo(() => {
     const checkedCount = students.filter((s) => s.checked_in).length;
@@ -148,7 +193,17 @@ export function CheckinDetail() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId }),
       });
-      const createResult = await createRes.json();
+      let createResult;
+      try {
+        createResult = await createRes.json();
+      } catch (e) {
+        if (e instanceof SyntaxError) {
+          console.error('JSON parse error creating room:', e.message);
+          setAutoStartError('Invalid response when creating room — please try again');
+          return;
+        }
+        throw e;
+      }
       if (!createResult.success) {
         setAutoStartError(`Failed to create room: ${createResult.error}`);
         return;
@@ -160,13 +215,29 @@ export function CheckinDetail() {
       const startRes = await fetch(`/api/rooms/${newRoom.room_id}/start`, {
         method: 'POST',
       });
-      const startResult = await startRes.json();
+      let startResult;
+      try {
+        startResult = await startRes.json();
+      } catch (e) {
+        if (e instanceof SyntaxError) {
+          console.error('JSON parse error starting room:', e.message);
+          setAutoStartError('Invalid response when starting room — please try again');
+          return;
+        }
+        throw e;
+      }
       if (!startResult.success) {
         setAutoStartError(`Failed to start room: ${startResult.error}`);
         return;
       }
 
       setShowQR(true);
+
+      // Clear any existing poll before starting a new one
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
 
       let pollAttempts = 0;
       const MAX_POLL_ATTEMPTS = 30;
@@ -180,7 +251,16 @@ export function CheckinDetail() {
         }
         try {
           const res = await fetch(`/api/rooms/${newRoom.room_id}`);
-          const result = await res.json();
+          let result;
+          try {
+            result = await res.json();
+          } catch (e) {
+            if (e instanceof SyntaxError) {
+              console.error('JSON parse error polling room:', e.message);
+              return;
+            }
+            throw e;
+          }
           if (result.success && result.data.qr_url) {
             setRoom(result.data);
             clearInterval(pollRef.current);
@@ -337,7 +417,14 @@ export function CheckinDetail() {
         </select>
       </div>
 
-      <StudentTable students={filteredStudents} onToggleCheckin={toggleCheckin} />
+      <StudentTable
+        students={paginatedStudents}
+        onToggleCheckin={toggleCheckin}
+        page={page}
+        perPage={perPage}
+        totalItems={filteredStudents.length}
+        onPageChange={setPage}
+      />
 
       {filteredStudents.length === 0 && (
         <div style={{ textAlign: 'center', padding: '64px', color: 'var(--color-text-secondary, #4F5056)' }}>

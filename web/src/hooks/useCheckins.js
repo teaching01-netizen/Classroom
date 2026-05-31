@@ -4,7 +4,7 @@ import { usePolling } from './usePolling';
 import { useFocusRefetch } from './useFocusRefetch';
 import { useWsReconnect } from './useWebSocket';
 
-const POLL_INTERVAL_MS = 5000;
+const POLL_INTERVAL_MS = 10000;
 
 export const useCheckins = (courseId, sessionId) => {
   const { students, currentSession, isInitialLoading, isRefreshing, error, setStudents, setCurrentSession, updateStudentCheckin, setInitialLoading, setRefreshing, setError, reset } = useSessionStore();

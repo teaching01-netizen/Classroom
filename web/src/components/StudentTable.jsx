@@ -1,8 +1,10 @@
 import React from 'react';
 import { StudentRow } from './StudentRow';
+import { Pagination } from './Pagination';
 
-export const StudentTable = ({ students, onToggleCheckin }) => {
+export const StudentTable = ({ students, onToggleCheckin, page, perPage, totalItems, onPageChange }) => {
   return (
+    <>
     <table
       style={{
         width: '100%',
@@ -86,5 +88,14 @@ export const StudentTable = ({ students, onToggleCheckin }) => {
         ))}
       </tbody>
     </table>
+    {totalItems > 0 && (
+      <Pagination
+        currentPage={page}
+        totalItems={totalItems}
+        perPage={perPage}
+        onPageChange={onPageChange}
+      />
+    )}
+    </>
   );
 };
