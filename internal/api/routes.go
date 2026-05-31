@@ -12,6 +12,7 @@ import (
 
 	"qr-command-center/internal/cache"
 	"qr-command-center/internal/db"
+	"qr-command-center/internal/domain"
 	"qr-command-center/internal/middleware"
 	"qr-command-center/internal/service"
 	"qr-command-center/internal/warwick"
@@ -139,7 +140,24 @@ func spaFallbackHandler() http.Handler {
 
 func getRoomsHandler(rm *service.RoomManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		lite := r.URL.Query().Get("lite")
 		rooms := rm.GetAllRooms()
+
+		if lite == "true" || lite == "1" {
+			liteRooms := make([]domain.RoomLite, 0, len(rooms))
+			for _, room := range rooms {
+				liteRooms = append(liteRooms, domain.RoomLite{
+					RoomID:    room.RoomID,
+					ClassID:   room.ClassID,
+					Name:      room.Name,
+					Status:    room.Status,
+					QRURL:     room.QRURL,
+					ExpiresAt: room.ExpiresAt,
+				})
+			}
+			writeJSON(w, http.StatusOK, successResponse(liteRooms))
+			return
+		}
 		writeJSON(w, http.StatusOK, successResponse(rooms))
 	}
 }

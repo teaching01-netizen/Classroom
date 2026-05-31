@@ -139,6 +139,18 @@ type Room struct {
 	CreatedAt      time.Time  `json:"-"`
 }
 
+// RoomLite is a stripped-down version of Room returned when the `lite` query
+// parameter is set. It contains only the fields the frontend needs for
+// auto-start room existence checks, keeping the payload small.
+type RoomLite struct {
+	RoomID    string     `json:"room_id"`
+	ClassID   string     `json:"class_id"`
+	Name      *string    `json:"name"`
+	Status    RoomStatus `json:"status"`
+	QRURL     *string    `json:"qr_url"`
+	ExpiresAt *time.Time `json:"expires_at"`
+}
+
 func NewRoom(roomID string, classID string, name *string) Room {
 	return Room{
 		RoomID:  roomID,
