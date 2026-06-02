@@ -984,35 +984,62 @@ func (c *ClassroomClient) effectiveUserID() string {
 // uuidRegex matches UUID v4 strings commonly used as Warwick UserIDs.
 var uuidRegex = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 
-// detectUserIDFromPage fetches the Warwick admin panel HTML and extracts the
-// authenticated user's GUID. Returns empty string on any failure (non-fatal).
+// detectUserIDFromPage tries multiple Warwick admin pages to extract the
+// authenticated user's GUID from the HTML. It uses a redirect-following
+// client because /admin/ returns 302 → the actual dashboard page.
+// Returns empty string on any failure (non-fatal).
 func (c *ClassroomClient) detectUserIDFromPage(cookie string) string {
-	resp, err := c.doRequest("GET", "/admin/", cookie, nil)
+	detector := &http.Client{
+		Timeout: 15 * time.Second,
+	}
+
+	// Try pages that are likely to contain the UserID.
+	paths := []string{"/admin/", "/admin/ClassAttendance", "/admin/ClassAttendance/Index"}
+	for _, path := range paths {
+		if uid := c.tryDetectUserID(detector, cookie, path); uid != "" {
+			return uid
+		}
+	}
+
+	slog.Debug("warwick_userid_detect_all_pages_failed")
+	return ""
+}
+
+func (c *ClassroomClient) tryDetectUserID(client *http.Client, cookie, path string) string {
+	u := c.baseURL + path
+	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
-		slog.Debug("warwick_userid_detect_request_failed", "error", err)
+		slog.Debug("warwick_userid_detect_request_failed", "path", path, "error", err)
+		return ""
+	}
+	req.Header.Set("Cookie", fmt.Sprintf("ASP.NET_SessionId=%s", cookie))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Debug("warwick_userid_detect_request_failed", "path", path, "error", err)
 		return ""
 	}
 	defer resp.Body.Close()
 
-	if err := c.checkAuth(resp); err != nil {
-		slog.Debug("warwick_userid_detect_auth_failed", "error", err)
-		return ""
-	}
-
 	limited := io.LimitReader(resp.Body, maxBodySize)
 	body, err := io.ReadAll(limited)
 	if err != nil {
-		slog.Debug("warwick_userid_detect_read_failed", "error", err)
 		return ""
 	}
+
+	slog.Debug("warwick_userid_detect_page_fetched",
+		"path", path,
+		"status", resp.StatusCode,
+		"content_type", resp.Header.Get("Content-Type"),
+		"body_bytes", len(body),
+	)
 
 	matches := uuidRegex.FindAllString(string(body), -1)
 	if len(matches) == 0 {
-		slog.Debug("warwick_userid_detect_no_uuid_found")
 		return ""
 	}
 
-	slog.Info("warwick_userid_detected", "user_id", matches[0], "total_uuids", len(matches))
+	slog.Info("warwick_userid_detected", "path", path, "user_id", matches[0], "total_uuids", len(matches))
 	return matches[0]
 }
 
