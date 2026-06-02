@@ -112,7 +112,7 @@ func DefaultDataTablesRequest(columns []string) DataTablesRequest {
 	return DataTablesRequest{
 		Draw:    1,
 		Start:   0,
-		Length:  -1, // fetch all records — avoids silent truncation for large result sets
+		Length:  500, // large page size — Warwick's ASP.NET DataTables treats -1 as TOP 0
 		Search:  DataTablesSearch{Value: "", Regex: false},
 		Order:   []DataTablesOrder{{Column: 0, Dir: "asc"}},
 		Columns: cols,

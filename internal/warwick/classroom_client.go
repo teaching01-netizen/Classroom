@@ -310,6 +310,7 @@ func (c *ClassroomClient) fetchCourses(cookie string) ([]domain.CourseSummary, e
 		"records_total", data.RecordsTotal,
 		"records_filtered", data.RecordsFiltered,
 		"data_count", len(data.Data),
+		"body_preview", body[:min(len(body), 300)],
 	)
 
 	if len(data.Data) == 0 {
