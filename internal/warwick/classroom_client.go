@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"context"
 	"sync"
@@ -23,6 +24,10 @@ import (
 
 const (
 	maxBodySize = 1 << 20 // 1MB
+
+	// defaultUserID is the fallback Warwick UserID for course queries.
+	// Override via ClassroomClient.SetUserID or WARWICK_USER_ID env var.
+	defaultUserID = "f21992ca-e6d2-424d-a188-90e37018ab38"
 )
 
 // CachedSession wraps a SessionDetail with its last-known MaxToggledAt for
@@ -41,6 +46,10 @@ type ClassroomClient struct {
 	client  *http.Client
 	baseURL string
 	cache   *cache.Cache // in-memory TTL cache for course/session data
+
+	// userID identifies the Warwick user for course queries.
+	// Set via SetUserID; falls back to defaultUserID when empty.
+	userID string
 
 	checkinRepo db.SessionCheckinRepository // optional — nil = DB-backed path disabled
 
@@ -223,6 +232,13 @@ func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
 	}
 	defer c.pool.Release(ref)
 
+	// Auto-detect UserID from Warwick admin page when not explicitly configured.
+	if c.userID == "" {
+		if detected := c.detectUserIDFromPage(ref.Cookie); detected != "" {
+			c.userID = detected
+		}
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		courses, err := c.fetchCourses(ref.Cookie)
@@ -266,9 +282,10 @@ func (c *ClassroomClient) refreshCoursesCache() {
 }
 
 func (c *ClassroomClient) fetchCourses(cookie string) ([]domain.CourseSummary, error) {
+	userID := c.effectiveUserID()
 	body := EncodeDataTablesBody(DefaultDataTablesRequest([]string{"CourseName", "Cycle", "Enrolled"}), map[string]string{
 		"keyword": "",
-		"UserID":  "f21992ca-e6d2-424d-a188-90e37018ab38",
+		"UserID":  userID,
 	})
 
 	resp, err := c.doRequest("POST", "/admin/api/ClassAttendanceSearch", cookie, strings.NewReader(body))
@@ -285,6 +302,22 @@ func (c *ClassroomClient) fetchCourses(cookie string) ([]domain.CourseSummary, e
 	var data ClassAttendanceSearchResponse
 	if err := json.NewDecoder(limited).Decode(&data); err != nil {
 		return nil, domain.NewInvalidPayloadError(fmt.Sprintf("decode ClassAttendanceSearch: %v", err))
+	}
+
+	slog.Debug("warwick_courses_fetch",
+		"user_id", userID,
+		"http_status", resp.StatusCode,
+		"records_total", data.RecordsTotal,
+		"records_filtered", data.RecordsFiltered,
+		"data_count", len(data.Data),
+	)
+
+	if len(data.Data) == 0 {
+		slog.Warn("warwick_courses_empty",
+			"user_id", userID,
+			"records_total", data.RecordsTotal,
+			"hint", "UserID may not match the authenticated Warwick session; set WARWICK_USER_ID env var",
+		)
 	}
 
 	courses := make([]domain.CourseSummary, 0, len(data.Data))
@@ -932,6 +965,55 @@ func (c *ClassroomClient) checkAuth(resp *http.Response) error {
 // Must be called before the client is used if rate limiting is desired.
 func (c *ClassroomClient) SetRateLimiter(l *rate.Limiter) {
 	c.rateLimiter = l
+}
+
+// SetUserID sets the Warwick UserID used for course queries.
+// When empty (default), the hardcoded defaultUserID is used.
+func (c *ClassroomClient) SetUserID(id string) {
+	c.userID = id
+}
+
+// effectiveUserID returns the configured userID or the hardcoded default.
+func (c *ClassroomClient) effectiveUserID() string {
+	if c.userID != "" {
+		return c.userID
+	}
+	return defaultUserID
+}
+
+// uuidRegex matches UUID v4 strings commonly used as Warwick UserIDs.
+var uuidRegex = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+
+// detectUserIDFromPage fetches the Warwick admin panel HTML and extracts the
+// authenticated user's GUID. Returns empty string on any failure (non-fatal).
+func (c *ClassroomClient) detectUserIDFromPage(cookie string) string {
+	resp, err := c.doRequest("GET", "/admin/", cookie, nil)
+	if err != nil {
+		slog.Debug("warwick_userid_detect_request_failed", "error", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkAuth(resp); err != nil {
+		slog.Debug("warwick_userid_detect_auth_failed", "error", err)
+		return ""
+	}
+
+	limited := io.LimitReader(resp.Body, maxBodySize)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		slog.Debug("warwick_userid_detect_read_failed", "error", err)
+		return ""
+	}
+
+	matches := uuidRegex.FindAllString(string(body), -1)
+	if len(matches) == 0 {
+		slog.Debug("warwick_userid_detect_no_uuid_found")
+		return ""
+	}
+
+	slog.Info("warwick_userid_detected", "user_id", matches[0], "total_uuids", len(matches))
+	return matches[0]
 }
 
 // InvalidateReportCache removes any cached attendance report for the given course.

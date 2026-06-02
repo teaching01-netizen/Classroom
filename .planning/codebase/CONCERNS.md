@@ -1,375 +1,167 @@
 # Codebase Concerns
 
-**Analysis Date:** Fri May 29 2026
+**Analysis Date:** 2026-06-02
 
-## 1. Concurrent Request Handling Audit
+## Tech Debt
 
-### 1A. Shared Warwick Session (`WarwickAuth`) — Thread-Safe ✓
+**Hardcoded Warwick UserID in Course Fetch:**
+- Issue: `fetchCourses()` sends a hardcoded `UserID` of `f21992ca-e6d2-424d-a188-90e37018ab38` to Warwick
+- Files: `internal/warwick/classroom_client.go:272`
+- Impact: Breaks multi-user scenarios; any user-specific filtering would be wrong
+- Fix approach: Make configurable via env var or derive from authenticated session
 
-`internal/warwick/auth.go:26-33`:
-```go
-type WarwickAuth struct {
-    sessionMu sync.RWMutex
-    session   *sessionState
-}
-```
+**Session Date Always `time.Now()`:**
+- Issue: When persisting Warwick session data to DB, `session_date` is always `time.Now()`
+- Files: `internal/warwick/classroom_client.go:662`
+- Impact: Historical session data gets wrong date in `session_checkins` table
+- Fix approach: Extract date from Warwick API response or CourseSummary when available
 
-**Verdict:** Correct. `GetValidSession()` (line 61) uses double-checked locking:
-1. RLock → check cache → RUnlock (fast path)
-2. Lock → re-check → performLogin → Unlock (slow path with re-check)
+**`avg_attendance_rate` Always Zero in Course List:**
+- Issue: The Warwick `ClassAttendanceSearch` endpoint does not return attendance rate; `CourseSummary.AvgAttendanceRate` is never populated from the API
+- Files: `internal/warwick/classroom_client.go:290-319`, `internal/domain/classroom.go:34`
+- Impact: Frontend shows "— attendance" for all courses in the dashboard; the field is always 0.0
+- Fix approach: Either compute from session data (expensive) or remove from the list view and only show on attendance report
 
-`ForceRefresh()` (line 85) acquires write lock directly. `performLogin()` (line 97) is only called while holding write lock.
+**No Server-Side Authentication:**
+- Issue: The Go server has zero authentication — anyone who can reach port 3000 can manage rooms and toggle check-ins
+- Files: `internal/api/routes.go:41-81`
+- Impact: Security risk in any non-localhost deployment; anyone can toggle student attendance
+- Fix approach: Add auth middleware (API key, session token, or reverse proxy auth)
 
-No data race on the session cookie itself.
+**`FetchError` Sentinel Comparison Inconsistency:**
+- Issue: Some error checks use `errors.Is(err, domain.ErrAuthExpired)` (pointer identity) while the codebase also creates `&FetchError{Kind: ErrKindAuthExpired}` inline
+- Files: `internal/api/teacher_handlers.go:25-36` vs `internal/warwick/classroom_client.go:153-163`
+- Impact: Inline-created FetchErrors won't match sentinel checks; some error paths may return 500 instead of 401
+- Fix approach: Standardize on `errors.As` with `*FetchError` variable everywhere
 
----
+## Known Bugs
 
-### 1B. RoomManager `rooms` Map — Correct Locking (with one gap)
+**CourseDetail.Name Empty on Direct Access:**
+- Symptoms: `GET /api/teacher/courses/:courseId` returns `{"name": ""}` when courses cache is not yet warm
+- Files: `internal/warwick/classroom_client.go:442-495` (fixed in `populateCourseName`)
+- Trigger: First request before DataRefresher completes initial warmup
+- Workaround: `populateCourseName()` reads from cached courses list; if courses cache is cold, name stays empty
 
-`internal/service/room_manager.go:25-31`:
-```go
-type RoomManager struct {
-    mu         sync.RWMutex
-    rooms      map[string]*RoomState
-    eventCh    chan RoomManagerEvent
-    ...
-}
-```
+## Security Considerations
 
-All map access is under the mutex:
-- `GetRoom` (line 110): RLock ✓
-- `GetAllRooms` (line 120): RLock ✓
-- `CreateRoom` (line 84-86): Lock → write ✓
-- `DeleteRoom` (line 97): Lock → delete ✓
-- `StartRoom` (line 131): Lock ✓
-- `StopRoom` (line 164): Lock ✓
-- `LoadRoomsFromDB` (line 62): Lock ✓
+**No Authentication on API Endpoints:**
+- Risk: Unauthenticated access to all endpoints including toggle-checkin (can modify student attendance)
+- Files: `internal/api/routes.go:41-81`
+- Current mitigation: None
+- Recommendations: Add auth middleware; at minimum, API key or reverse proxy auth
 
-**Gap: Room worker goroutine (`runRoomWorker`, line 200) accesses `state` fields under the mutex correctly but transitions may conflict with concurrent `StopRoom` (see #3 below).**
+**Hardcoded Dev Credentials in docker-compose.yml:**
+- Risk: PostgreSQL credentials (`qruser`/`qrpassword`) are committed in plaintext
+- Files: `docker-compose.yml:9-10`
+- Current mitigation: Only for local development
+- Recommendations: Use `.env` file for docker-compose credentials; document that these are dev-only
 
----
+**CORS Misconfiguration Risk:**
+- Risk: If `CORS_ORIGIN=*` is set, any origin can make authenticated requests
+- Files: `internal/api/routes.go:83-109`
+- Current mitigation: Origin checking when `CORS_ORIGIN` is set to specific domain
+- Recommendations: Default to same-origin; warn if `*` is used in production
 
-### 1C. Room Worker Goroutine Locking — Correct (sporadic extra fetch on stop)
+## Performance Bottlenecks
 
-The worker at `internal/service/room_manager.go:200` holds `rm.mu` when accessing `state.room`:
-- Line 213: RLock for read → RUnlock
-- Line 221: Lock for `TransitionTo(Fetching)` → Unlock
-- Line 232: Lock for error handling → Unlock
-- Line 271: Lock for QR update → Unlock
+**Course Enrichment Fan-Out:**
+- Problem: `GetCourses()` triggers concurrent `GetCourseDetail()` for every non-finished course to populate session counts
+- Files: `internal/warwick/classroom_client.go:181-211`
+- Cause: Each enrichment call acquires a pool session and makes a Warwick API call; bounded to 5 concurrent but still N API calls
+- Improvement path: Cache course details independently; the DataRefresher already calls GetCourses() periodically which triggers enrichment
 
-**No data race on `state.room` fields.** `rm.mu` serializes all access.
+**Attendance Report Computation:**
+- Problem: `GetCourseAttendanceReport` fetches every session live from Warwick with 2 concurrent goroutines
+- Files: `internal/warwick/report_client.go:29-251`
+- Cause: Each session requires a pool acquisition + Warwick API call; 90s timeout for large courses
+- Improvement path: Use DB-cached session data when available; only fetch live for sessions not in DB
 
----
+## Fragile Areas
 
-## 2. ToggleCheckin Race: Shared Session Cookie Contention
+**Session Pool Auth Conflict Detection:**
+- Files: `internal/warwick/session_pool.go:82-120`
+- Why fragile: Heuristic-based — uses session age (< 2min = kick, > 55min = normal expiry) to distinguish admin login from TTL expiry; could misclassify under clock skew or slow responses
+- Safe modification: Test with mock login servers; the existing test suite in `session_pool_test.go` covers basic scenarios
 
-**Severity: Medium**
+**Room Worker Recovery Loop:**
+- Files: `internal/service/room_manager.go:338-457`
+- Why fragile: Complex state machine with exponential backoff, pool exhaustion retry, auth conflict detection, and context cancellation checks — all within a single 120-line block
+- Safe modification: Add targeted tests for each recovery path; current tests cover happy path only
 
-**Files:** `internal/warwick/classroom_client.go:267-287`, `internal/warwick/auth.go:61-83`
+**Frontend WebSocket Reconnect:**
+- Files: `web/src/hooks/useWebSocket.js:52-58`
+- Why fragile: Fixed 3-second retry delay, max 10 attempts, no exponential backoff; stale room state after reconnect
+- Safe modification: Add backoff and verify state sync after reconnect
 
-**Failure sequence (two concurrent POST requests for different students):**
+## Scaling Limits
 
-```
-Time│ Req A (toggle studentA)         │ Req B (toggle studentB)        │ Warwick server
-────┼──────────────────────────────────┼────────────────────────────────┼─────────────────
-t1  │ GetValidSession() → cookie C1   │                                │
-t2  │                                  │ GetValidSession() → cookie C1 │
-t3  │ doToggleCheckin(C1, studentA)   │                                │ processes toggle-A
-t4  │                                  │ doToggleCheckin(C1, studentB) │ processes toggle-B
-t5  │ ← 200 OK                        │                                │
-t6  │                                  │ ← 200 OK                      │
-```
+**Session Pool Capacity:**
+- Current capacity: 6 total sessions (2 QR + 2 Teacher + 2 Interactive by default)
+- Limit: All sessions in use → `ErrNoAvailableSessions` → 503 for teachers, retry-with-backoff for room workers
+- Scaling path: Increase `WARWICK_*_SESSIONS` env vars; each additional session requires its own Warwick login
 
-The session cookie is **shared state with no per-request isolation**. This works under low concurrency. Under high concurrency:
+**In-Memory Cache:**
+- Current capacity: Unbounded map (no eviction beyond TTL expiry)
+- Limit: Under high cardinality (many sessions), memory grows without bound between GC cycles
+- Scaling path: Add max-size LRU eviction or use external cache (Redis)
 
-```
-Time│ Req A                            │ Req B                         │ Warwick server
-────┼──────────────────────────────────┼────────────────────────────────┼─────────────────
-t1  │ GetValidSession() → cookie C1   │                                │
-t2  │ doToggleCheckin(C1, studentA)   │                                │
-t3  │ ← redirect (session expired)    │                                │
-t4  │                                  │ GetValidSession() → cookie C1 │ (still cached!)
-t5  │ ForceRefresh() → cookie C2      │                                │
-t6  │ doToggleCheckin(C2, studentA)   │                                │ processes toggle-A
-t7  │ ← 200 OK                        │                                │
-t8  │                                  │ doToggleCheckin(C1, studentB) │ stale cookie!
-t9  │                                  │ ← redirect (session expired)  │
-t10 │                                  │ ForceRefresh() → cookie C2    │ (already refreshed)
-t11 │                                  │ doToggleCheckin(C2, studentB) │ processes toggle-B
-t12 │                                  │ ← 200 OK                      │
-```
+**WebSocket Connections:**
+- Current capacity: 500 concurrent (configurable via `WARWICK_MAX_CONCURRENT_WS`)
+- Limit: Each connection holds a goroutine and a channel
+- Scaling path: For >500 concurrent users, use external WebSocket service
 
-**Impact:** Req B uses a stale cookie (C1) at t8 because it fetched the session before A's ForceRefresh invalidated it. B wastes one round-trip + a refresh + a retry. Functional correctness is preserved (retry logic works), but latency doubles for the second request.
+## Dependencies at Risk
 
-**Worse scenario under load:** If Warwick rate-limits per-session (many concurrent toggles), ALL concurrent requests could get auth-expired simultaneously, triggering a **thundering herd of ForceRefresh()** calls. While `sessionMu` serializes them, each ForceRefresh performs a POST login to Warwick. This could trigger Warwick anti-bot measures.
+**Warwick Humantix API:**
+- Risk: Unofficial/undocumented API — endpoints, response format, and rate limits could change without notice
+- Impact: All course/session/student data and QR code functionality breaks
+- Migration plan: No alternative; the entire application depends on this single external API
 
-**Fix approaches:**
-1. Accept current behavior (retry handles it, functional correctness holds).
-2. Add per-request session pinning: snapshot the cookie at request start and fail-fast if it changes mid-request.
-3. Add a distributed semaphore on ToggleCheckin to limit concurrent Warwick toggles to N (e.g., 5).
-4. Rate-limit the `/api/teacher/*` endpoints to prevent abuse.
+**`nhooyr.io/websocket`:**
+- Risk: Library is maintained but less popular than `gorilla/websocket`; API is stable
+- Impact: WebSocket functionality breaks if library becomes unmaintained
+- Migration plan: Switch to `gorilla/websocket` (well-established alternative)
 
----
+## Missing Critical Features
 
-## 3. StartRoom / StopRoom Races
+**No Authentication:**
+- Problem: No user auth means the app is wide open on any non-localhost deployment
+- Blocks: Any production use beyond single-user localhost
 
-### 3A. Cannot start two workers for the same room ✓
+**No Error Boundaries on Backend:**
+- Problem: Panic recovery exists in room workers and refresher, but not in HTTP handlers
+- Blocks: A panic in a handler crashes the entire server process
 
-`internal/service/room_manager.go:130-140`:
-```go
-func (rm *RoomManager) StartRoom(roomID string) error {
-    rm.mu.Lock()
-    defer rm.mu.Unlock()
-    state, ok := rm.rooms[roomID]
-    if !ok { return fmt.Errorf("room not found") }
-    if state.cancel != nil { return nil }  // ← guards: already running
-    ...
-    go rm.runRoomWorker(state)
-```
+**No Health Check for Warwick Connectivity:**
+- Problem: `/api` health endpoint reports cache warmth but not Warwick session validity
+- Blocks: Monitoring/alerting on Warwick auth expiry
 
-Second concurrent `StartRoom` for same room: `state.cancel != nil` is true under the mutex → returns nil. **Safe.**
+## Test Coverage Gaps
 
-### 3B. StopRoom can race with worker goroutine — Spurious extra fetch
+**Room Worker Recovery Paths:**
+- What's not tested: Auth conflict recovery, pool exhaustion retry, invalid payload handling, context cancellation during recovery
+- Files: `internal/service/room_manager.go:260-501`
+- Risk: Regression in error handling paths goes unnoticed
+- Priority: High
 
-**Severity: Low**
+**HTTP Handler Error Mapping:**
+- What's not tested: Handler-level error → HTTP status code mapping for all Warwick error types
+- Files: `internal/api/teacher_handlers.go:17-214`
+- Risk: Wrong HTTP status returned for auth expiry, pool exhaustion, etc.
+- Priority: Medium
 
-**Timeline (TOCTOU window in worker loop):**
+**Frontend Hook Integration:**
+- What's not tested: Full fetch → store → render cycle for useCourses, useSessions, useCheckins
+- Files: `web/src/hooks/useCourses.js`, `web/src/hooks/useCheckins.js`, `web/src/hooks/useSessions.js`
+- Risk: Hook bugs only caught in manual testing
+- Priority: Medium
 
-```
-Worker iteration:              StopRoom(roomID):
-┌──────────────────────┐       ┌───────────────────────────┐
-│ RLock (line 213)     │       │                           │
-│ read expiresAt       │       │                           │
-│ RUnlock (line 216)   │       │                           │
-│                      │       │ Lock (line 164)           │
-│ shouldFetch = true   │       │ state.cancel()            │
-│                      │       │ cancel = nil              │
-│                      │       │ TransitionTo(Stopped)     │
-│                      │       │ Unlock (line 165)         │
-│ Lock (line 221)      │ ←──── │                           │
-│ TransitionTo(Fetch) │       │                           │
-│  → invalid! (Stopped→Fetch) │                           │
-│ slog.Warn (line 223) │       │                           │
-│ FetchQR (line 230)   │  ←─── spurious HTTP call!        │
-│   → wasteful network │       │                           │
-│ Lock (line 232)      │       │                           │
-│ ...process result... │       │                           │
-│ Unlock (line 254)    │       │                           │
-│ ...continue...       │       │                           │
-│ next select: ctx.Done│  ←─── finally notices cancel     │
-│ return               │       │                           │
-```
-
-**Root cause:** Worker checks `state.ctx.Done()` only in the `select` at line 208. Between `select` wakeup and the next `Lock` acquisition, `StopRoom` can preempt. The worker does **not** re-check `ctx.Done()` after acquiring the lock.
-
-`internal/service/room_manager.go:207-211`:
-```go
-for {
-    select {
-    case <-state.ctx.Done():
-        return
-    case <-time.After(1 * time.Second):
-        // ↓↓↓ no ctx.Done() check before acquiring lock ↓↓↓
-    }
-    // ... RLock/RUnlock (pure read) ...
-    // ... Lock ...
-    state.room.TransitionTo(Fetching)  // may be invalid
-    FetchQR(...)                        // may be wasteful
-```
-
-**Impact:** A single spurious QR fetch to Warwick after room is stopped. **No crash, no data corruption** — just a wasted HTTP call (~200ms) and an invalid-transition warning log.
-
-**Fix:**
-```go
-case <-time.After(1 * time.Second):
-    rm.mu.RLock()
-    if state.ctx.Err() != nil {  // ← check if cancelled
-        rm.mu.RUnlock()
-        return
-    }
-    expiresAt := state.room.ExpiresAt
-    classID := state.room.ClassID
-    rm.mu.RUnlock()
-```
+**DataRefresher Background Loop:**
+- What's not tested: Long-running refresh loop behavior, panic recovery, interval accuracy
+- Files: `internal/service/data_refresher.go:32-47`
+- Risk: Refresher silently stops working
+- Priority: Low
 
 ---
 
-## 4. createRoomHandler ID Generation — Duplicate Risk with SessionID
-
-### 4A. UUID-based (`createRoomHandler`) — Safe ✓
-
-`internal/api/routes.go:111`:
-```go
-room, err := rm.CreateRoom(uuid.New().String(), req.ClassID, req.Name)
-```
-
-`uuid.New().String()` collision probability is negligible (~2^-122). Map write at `room_manager.go:84-86` is mutex-protected.
-
-**Verdict:** Safe.
-
-### 4B. SessionID-based (`createRoomFromSessionHandler`) — TOCTOU Race
-
-`internal/api/routes.go:178`:
-```go
-room, err := rm.CreateRoom(req.SessionID, req.SessionID, nil)
-```
-
-`internal/service/room_manager.go:70-90`:
-```go
-func (rm *RoomManager) CreateRoom(roomID string, ...) (domain.Room, error) {
-    existing, err := rm.repository.GetRoom(roomID)  // ← DB check, NO mutex
-    if err == nil && existing.RoomID != "" {
-        return existing, nil
-    }
-    // ... create room ...
-    saved, err := rm.repository.CreateRoom(room)  // ← DB write
-    ...
-    rm.mu.Lock()
-    rm.rooms[saved.RoomID] = &RoomState{room: saved}  // ← map write under mutex
-    rm.mu.Unlock()
-```
-
-**Race timeline (two concurrent requests with same sessionID):**
-
-```
-Time│ Req A                          │ Req B                          │ DB state
-────┼─────────────────────────────────┼────────────────────────────────┼────────────
-t1  │ repository.GetRoom("S1")       │                                │ empty
-t2  │ → not found                   │                                │
-t3  │                                │ repository.GetRoom("S1")       │ empty
-t4  │                                │ → not found                   │
-t5  │ repository.CreateRoom(Room{S1})│                                │ inserts S1
-t6  │ → saved                       │                                │
-t7  │ rm.mu.Lock()                  │                                │
-t8  │ rm.rooms["S1"] = state        │                                │
-t9  │ rm.mu.Unlock()                │                                │
-t10 │                                │ repository.CreateRoom(Room{S1})│ duplicate!
-t11 │                                │ → error                       │
-```
-
-**If DB has unique constraint on room_id:** Req B gets error at t11, handler returns 500. Functional but sloppy.
-
-**If DB does NOT have unique constraint:** Both succeed. Req B overwrites Req A's entry in the map at t10 (after acquiring mutex). Req A's room is **lost** from the map.
-
-**Severity:** Medium (DB-dependent; most SQL schemas would have PK unique constraint).
-
-**Fix:** Move the dedup check inside the mutex, or use `INSERT ... ON CONFLICT DO NOTHING` / `INSERT ... ON CONFLICT DO UPDATE` at the DB level.
-
----
-
-## 5. REST Endpoints — No Auth, No Rate Limiting, No Body Limits
-
-**Severity: Critical**
-
-### 5A. No Authentication
-
-Every endpoint in `internal/api/routes.go:33-50` is unprotected:
-| Method | Endpoint | Effect |
-|--------|----------|--------|
-| POST | `/api/rooms` | Create room |
-| DELETE | `/api/rooms/{id}` | Delete room |
-| POST | `/api/rooms/{id}/start` | Start QR polling |
-| POST | `/api/rooms/{id}/stop` | Stop QR polling |
-| POST | `/api/teacher/courses/{cid}/sessions/{sid}/toggle-checkin` | Toggle attendance |
-| GET | `/ws` | Full state stream |
-
-Any client that reaches the server IP/port can call all of them. No cookie, no token, no header check.
-
-### 5B. No Rate Limiting
-
-Under 100+ concurrent users, the following breaks first:
-
-**1. Warwick session thundering herd** (`internal/warwick/auth.go:61-83`):
-- All handlers share one `WarwickAuth` with one session cookie.
-- All `GetValidSession()` calls hit the same RWMutex. While fast, if Warwick invalidates the session (e.g., too many concurrent requests from the same session), ALL subsequent requests trigger `ForceRefresh()` → POST login → serialized under `sessionMu`.
-- Login takes ~500ms-2s. During that window, all 100 requests queue on `sessionMu.Lock()`. Latency spikes to seconds.
-
-**2. Event channel overflow** (`internal/service/room_manager.go:36`):
-```go
-eventCh: make(chan RoomManagerEvent, 100),
-```
-Buffer of 100. Under high room churn, events are dropped. WS clients miss state transitions. Non-fatal but unreliable.
-
-**3. No request body size limits** (`internal/api/routes.go:103`, `internal/api/teacher_handlers.go:78`):
-```go
-if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-```
-No `http.MaxBytesReader`. An attacker can POST a multi-GB JSON payload and exhaust server memory.
-
-**4. QR fetch amplification** (`internal/service/room_manager.go:230`):
-Each active room worker calls `FetchQR()` every ~45 seconds. If 50 rooms are running, that's 50 concurrent HTTP calls to Warwick. The `WarwickQrClient` shares the same `WarwickAuth` session. Concurrent `GetValidSession()` is mutex-protected but the actual HTTP fetches are not throttled.
-
-**5. WebSocket origin restriction bypass** (`internal/api/websocket.go:22`):
-```go
-conn, err := websocket.Accept(w, r, nil)
-```
-No origin check, no subprotocol validation. Any page that reaches the server can open a WebSocket and receive the full room state stream.
-
-### 5C. What breaks first under 100+ concurrent users
-
-| Priority | Failure | Trigger | Impact |
-|----------|---------|---------|--------|
-| 1 | Warwick session invalidation | >N concurrent toggles with same cookie | All Warwick calls fail, ForceRefresh cascade, 503s |
-| 2 | Event channel saturation | Rapid room start/stop | Lost WS events, UI desync |
-| 3 | OOM from large request body | Malicious POST with GB-sized body | Server crash |
-| 4 | QR fetch thundering herd | 50+ running rooms | Warwick rate-limits the session |
-| 5 | Unauthenticated room deletion | Any client can DELETE | Data loss |
-
-### Fixes
-
-**For auth:**
-Add a chi middleware that validates a bearer token or session cookie before allowing mutating operations:
-```go
-r.With(authMiddleware).Route("/api/rooms", func(r chi.Router) {
-    ...
-})
-```
-
-**For rate limiting:**
-Add chi middleware or use `github.com/go-chi/httprate`:
-```go
-r.Use(httprate.LimitByIP(100, 1*time.Minute))
-// Stricter for mutation endpoints:
-r.With(httprate.LimitByIP(10, 1*time.Minute)).Post("/{id}/start", ...)
-```
-
-**For request body size:**
-```go
-r.Body = http.MaxBytesReader(w, r.Body, 1<<20)  // 1MB max
-```
-
-**For WS origin:**
-```go
-conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-    OriginPatterns: []string{"localhost:3000", "localhost:3001"},
-})
-```
-
----
-
-## 6. Minor Concurrency Issues
-
-### 6A. `runRoomWorker` — Worker cancels own context under mutex
-`internal/service/room_manager.go:246-248`:
-```go
-if state.cancel != nil {
-    state.cancel()  // cancels ctx while holding rm.mu
-}
-```
-Holding the mutex while calling `state.cancel()` is safe here, but if any `<-ctx.Done()` listeners acquire the same mutex, it would deadlock. Currently no such listener exists, but this is fragile.
-
-### 6B. `runRoomWorker` — go func persists room copy outside lock
-Lines 256-260 and 284-288: Persistence happens in a goroutine after releasing the lock. The `roomCopy` is a value copy, so this is safe. But stacked goroutines (one per fetch cycle) could queue up if the DB is slow. No cleanup on worker exit — these goroutines continue after the worker returns. Non-fatal but wasteful.
-
-### 6C. No context cancellation propagation to DB operations
-`internal/service/room_manager.go:182-186`:
-```go
-go func() {
-    if _, err := rm.repository.UpdateRoom(room); err != nil { ... }
-}()
-```
-These goroutines use `context.Background()` implicitly (via the repository's own context). During server shutdown (`main.go:106`), these goroutines may still be running and writing to the DB.
-
----
-
-*Concerns audit: Fri May 29 2026*
+*Concerns audit: 2026-06-02*

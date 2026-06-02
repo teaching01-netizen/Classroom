@@ -95,6 +95,10 @@ func main() {
 	if sessionPool != nil {
 		sessionCheckinRepo := db.NewPgSessionCheckinRepository(pool)
 		classroomClient = warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher, sharedCache, sessionCheckinRepo)
+		// Configure Warwick UserID from env var (overrides hardcoded default).
+		if uid := os.Getenv("WARWICK_USER_ID"); uid != "" {
+			classroomClient.SetUserID(uid)
+		}
 		// Rate limit live session-detail fetches used by the attendance report
 		// to 2 req/s with a burst of 2. Protects the upstream from fan-out storms.
 		classroomClient.SetRateLimiter(rate.NewLimiter(rate.Limit(2), 2))
