@@ -126,7 +126,7 @@ type CourseAttendanceReport struct {
 	Students   []StudentAttendance `json:"students"`
 	Errors     []ReportError       `json:"errors"`
 	Truncated  bool                `json:"truncated"`
-	Threshold  float64             `json:"threshold"`
+	Threshold  int                   `json:"threshold"`
 	ComputedAt time.Time           `json:"computedAt"`
 	DurationMs int64               `json:"durationMs"`
 }

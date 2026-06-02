@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-export function useCourseAttendance(courseId, { threshold = 0.8 } = {}) {
+export function useCourseAttendance(courseId, { threshold = 0 } = {}) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);

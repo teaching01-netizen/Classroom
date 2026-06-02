@@ -108,14 +108,14 @@ func TestCompute_EmptyCourse(t *testing.T) {
 	fetcher := newMockFetcher()
 	course := makeCourse("c1", "Empty Course", nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
 	assert.Equal(t, "c1", report.CourseID)
 	assert.Equal(t, "Empty Course", report.CourseName)
 	assert.Empty(t, report.Students)
 	assert.False(t, report.Truncated)
 	assert.Empty(t, report.Errors)
-	assert.Equal(t, 0.80, report.Threshold)
+	assert.Equal(t, 2, report.Threshold)
 	assert.Zero(t, fetcher.getCallCount())
 }
 
@@ -134,7 +134,7 @@ func TestCompute_AllAttended(t *testing.T) {
 		fetcher.set(s.SessionID, makeDetail(students), nil)
 	}
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
 	require.Len(t, report.Students, 5)
 	for _, st := range report.Students {
@@ -166,7 +166,7 @@ func TestCompute_PartialAttendance(t *testing.T) {
 		makeStudent("s2", "Bob", false),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
 	require.Len(t, report.Students, 2)
 
@@ -176,11 +176,11 @@ func TestCompute_PartialAttendance(t *testing.T) {
 	assert.Equal(t, 1.0, alice.AttendanceRate)
 	assert.False(t, alice.AtRisk)
 
-	// Bob: 2/3 = 0.667, at-risk with threshold 0.80.
+	// Bob: 2/3 = 0.667, 1 absence. threshold=2 → NOT at-risk (1 < 2).
 	bob := findStudent(report.Students, "s2")
 	require.NotNil(t, bob)
 	assert.InDelta(t, 0.667, bob.AttendanceRate, 0.001)
-	assert.True(t, bob.AtRisk)
+	assert.False(t, bob.AtRisk)
 }
 
 func TestCompute_Threshold(t *testing.T) {
@@ -196,15 +196,19 @@ func TestCompute_Threshold(t *testing.T) {
 		makeStudent("s1", "Alice", false),
 	}), nil)
 
-	// threshold=0.80 → at-risk (0.5 < 0.80)
-	report1 := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	// threshold=2 → at-risk (1 absence >= 2? No, 1 < 2 → NOT at-risk)
+	// Wait — s1 has 1 absence out of 2 done sessions. With threshold=2, at-risk only if absences >= 2.
+	report1 := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 	require.Len(t, report1.Students, 1)
-	assert.True(t, report1.Students[0].AtRisk)
+	assert.Equal(t, 2, report1.Students[0].TotalSessions)
+	assert.Equal(t, 1, report1.Students[0].AttendedSessions)
+	assert.InDelta(t, 0.5, report1.Students[0].AttendanceRate, 0.001)
+	assert.False(t, report1.Students[0].AtRisk, "1 absence < threshold=2 → NOT at-risk")
 
-	// threshold=0.50 → NOT at-risk (0.5 is not < 0.50)
-	report2 := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.50)
+	// threshold=1 → at-risk (1 absence >= 1 → at-risk)
+	report2 := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 1)
 	require.Len(t, report2.Students, 1)
-	assert.False(t, report2.Students[0].AtRisk)
+	assert.True(t, report2.Students[0].AtRisk, "1 absence >= threshold=1 → at-risk")
 }
 
 func TestCompute_EmptySession(t *testing.T) {
@@ -219,15 +223,15 @@ func TestCompute_EmptySession(t *testing.T) {
 	}), nil)
 	fetcher.set("sess-2", makeDetail([]domain.StudentCheckin{}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
-	// Both students attended 1 done session out of 2 total. Rate = 1/2 = 0.5.
+	// Students only appeared in 1 done session. Rate = 1/1 = 1.0.
 	require.Len(t, report.Students, 2)
 	for _, st := range report.Students {
-		assert.Equal(t, 2, st.TotalSessions, "total = all sessions in course")
+		assert.Equal(t, 1, st.TotalSessions, "only appeared in 1 done session")
 		assert.Equal(t, 1, st.AttendedSessions)
-		assert.Equal(t, 0.5, st.AttendanceRate)
-		assert.True(t, st.AtRisk, "0.5 < 0.8 → at-risk")
+		assert.Equal(t, 1.0, st.AttendanceRate)
+		assert.False(t, st.AtRisk)
 	}
 }
 
@@ -247,25 +251,25 @@ func TestCompute_ErroredSession(t *testing.T) {
 		makeStudent("s2", "Bob", true),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
-	// Alice: 2 done attended / 3 total = 0.667, at-risk
-	// Bob: 1 done attended / 3 total = 0.333, at-risk
-	// sess-2 errored so excluded from attended, but still counts in total.
+	// Alice: 2/2 done = 1.0, not at-risk
+	// Bob: 1/2 done = 0.5, 1 absence. threshold=2 → NOT at-risk (1 < 2)
+	// sess-2 errored so excluded from both attended and total.
 	require.Len(t, report.Students, 2)
 	alice := findStudent(report.Students, "s1")
 	require.NotNil(t, alice)
-	assert.Equal(t, 3, alice.TotalSessions, "total = all 3 sessions in course")
+	assert.Equal(t, 2, alice.TotalSessions, "only succeeded done sessions count")
 	assert.Equal(t, 2, alice.AttendedSessions)
-	assert.InDelta(t, 0.667, alice.AttendanceRate, 0.001)
-	assert.True(t, alice.AtRisk)
+	assert.Equal(t, 1.0, alice.AttendanceRate)
+	assert.False(t, alice.AtRisk)
 
 	bob := findStudent(report.Students, "s2")
 	require.NotNil(t, bob)
-	assert.Equal(t, 3, bob.TotalSessions)
+	assert.Equal(t, 2, bob.TotalSessions)
 	assert.Equal(t, 1, bob.AttendedSessions)
-	assert.InDelta(t, 0.333, bob.AttendanceRate, 0.001)
-	assert.True(t, bob.AtRisk)
+	assert.Equal(t, 0.5, bob.AttendanceRate)
+	assert.False(t, bob.AtRisk, "1 absence < threshold=2 → NOT at-risk")
 
 	require.Len(t, report.Errors, 1)
 	assert.Equal(t, "sess-2", report.Errors[0].SessionID)
@@ -317,7 +321,7 @@ func TestCompute_429SingleRetry(t *testing.T) {
 		},
 	})
 
-	report := ComputeCourseAttendanceReport(context.Background(), customFetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), customFetcher, course, 2)
 
 	require.Len(t, report.Students, 2)
 	require.Empty(t, report.Errors, "429 should be retried and succeed")
@@ -345,7 +349,7 @@ func TestCompute_StudentNeverAppeared(t *testing.T) {
 		makeStudent("s1", "Alice", true),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
 	// s2 should not be in the output at all.
 	require.Len(t, report.Students, 1)
@@ -373,7 +377,7 @@ func TestCompute_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	report := ComputeCourseAttendanceReport(ctx, cf, course, 0.80)
+	report := ComputeCourseAttendanceReport(ctx, cf, course, 2)
 
 	// Report should still be valid even if truncated.
 	assert.False(t, report.CourseID == "")
@@ -398,23 +402,23 @@ func TestCompute_SortOrder(t *testing.T) {
 		makeStudent("s3", "Charlie", true),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
 	require.Len(t, report.Students, 3)
 
-	// All have TotalSessions = 2 (all sessions in course).
+	// All have TotalSessions = 2 (both are done sessions).
 	for _, st := range report.Students {
-		assert.Equal(t, 2, st.TotalSessions, "total = all sessions in course")
+		assert.Equal(t, 2, st.TotalSessions, "both sessions are done")
 	}
 
-	// At-risk first: Bob (0.0), Charlie (0.5), then Alice (1.0).
+	// At-risk first: Bob (2 absences >= 2), then Charlie (1 absence < 2), then Alice (0 absences).
 	assert.Equal(t, "s2", report.Students[0].StudentID) // Bob
 	assert.Equal(t, "s3", report.Students[1].StudentID) // Charlie
 	assert.Equal(t, "s1", report.Students[2].StudentID) // Alice
 
-	assert.True(t, report.Students[0].AtRisk)
-	assert.True(t, report.Students[1].AtRisk)
-	assert.False(t, report.Students[2].AtRisk)
+	assert.True(t, report.Students[0].AtRisk, "Bob: 2 absences >= threshold=2")
+	assert.False(t, report.Students[1].AtRisk, "Charlie: 1 absence < threshold=2")
+	assert.False(t, report.Students[2].AtRisk, "Alice: 0 absences")
 }
 
 func TestCompute_PerSessionCells(t *testing.T) {
@@ -429,7 +433,7 @@ func TestCompute_PerSessionCells(t *testing.T) {
 		makeStudent("s1", "Alice", false),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
 	require.Len(t, report.Students, 1)
 	alice := report.Students[0]
@@ -588,7 +592,7 @@ func TestCompute_429RetryUsesFreshContext(t *testing.T) {
 	sessions := []domain.SessionSummary{sess(1, 1, "Wk 1"), sess(2, 2, "Wk 2")}
 	course := makeCourse("c1", "Test", sessions)
 
-	report := ComputeCourseAttendanceReport(context.Background(), sf, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), sf, course, 2)
 
 	// The 429 should be retried and succeed. No errors expected.
 	require.Empty(t, report.Errors, "429 retry should succeed; got errors: %v", report.Errors)
@@ -626,7 +630,7 @@ func TestCompute_429RetryContextExpiredDuringBackoff(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	report := ComputeCourseAttendanceReport(ctx, sf, course, 0.80)
+	report := ComputeCourseAttendanceReport(ctx, sf, course, 2)
 
 	// BUG: The retry uses sessCtx which has ~0s left after 8s fetch + 2s backoff.
 	// The retry fails with context.DeadlineExceeded, which is NOT a 429,
@@ -651,7 +655,7 @@ func TestCompute_NoErrorsReturnsEmptySlice(t *testing.T) {
 		makeStudent("s1", "Alice", true),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
 	// Errors should be a non-nil empty slice, not nil.
 	// This ensures JSON marshaling produces "errors": [] not "errors": null.
@@ -684,21 +688,16 @@ func TestCompute_NilDetailWithoutError(t *testing.T) {
 		makeStudent("s1", "Alice", true),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
-	// sess-1 returned nil without error. Currently treated as "empty" —
-	// no error recorded and student only appears in sess-2.
+	// sess-1 returned nil without error. Treated as "empty" — student only
+	// appears in sess-2.
 	require.Len(t, report.Students, 1)
-
-	// TotalSessions = 2 (all sessions in course), attended = 1 (from sess-2).
-	assert.Equal(t, 2, report.Students[0].TotalSessions,
-		"total = all sessions in course")
+	assert.Equal(t, 1, report.Students[0].TotalSessions, "only sess-2 counts")
 	assert.Equal(t, 1, report.Students[0].AttendedSessions)
-	assert.Equal(t, 0.5, report.Students[0].AttendanceRate,
-		"1/2 = 0.5")
+	assert.Equal(t, 1.0, report.Students[0].AttendanceRate)
 
-	// BUG: nil detail without error should be recorded as an error so the
-	// user knows sess-1 data is missing. Currently 0 errors are returned.
+	// BUG: nil detail without error should be recorded as an error.
 	// This assertion WILL FAIL until the bug is fixed.
 	require.Len(t, report.Errors, 1,
 		"nil detail without error should produce an error entry for sess-1")
@@ -721,7 +720,7 @@ func TestCompute_DuplicateSessionIDs(t *testing.T) {
 		makeStudent("s1", "Alice", true),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
 	require.Len(t, report.Students, 1)
 	alice := report.Students[0]
@@ -752,7 +751,7 @@ func TestCompute_AllSessionsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	report := ComputeCourseAttendanceReport(ctx, fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(ctx, fetcher, course, 2)
 
 	// Report should indicate truncation.
 	assert.True(t, report.Truncated, "should be truncated when context is pre-cancelled")
@@ -818,8 +817,7 @@ func (f *slowFetcher) FetchSessionDetailLive(ctx context.Context, sessionID stri
 // ============================================================================
 
 // TestCompute_OnlyDoneSessionsCount tests that active/not_started sessions
-// do NOT count toward attended, but totalSessions is the full course count.
-// Absence rate = absences / total_sessions_in_course.
+// do NOT count toward attended or total. Rate = attended_done / total_done.
 func TestCompute_OnlyDoneSessionsCount(t *testing.T) {
 	fetcher := newMockFetcher()
 	sessions := []domain.SessionSummary{
@@ -830,8 +828,8 @@ func TestCompute_OnlyDoneSessionsCount(t *testing.T) {
 	}
 	course := makeCourse("c1", "Test", sessions)
 
-	// s1: attended 2/2 done sessions, missed active → rate = 2/4 = 0.5 → at-risk
-	// s2: attended 1/2 done sessions, missed active → rate = 1/4 = 0.25 → at-risk
+	// s1: attended 2/2 done sessions → rate = 1.0 → NOT at-risk
+	// s2: attended 1/2 done sessions → rate = 0.5 → at-risk
 	fetcher.set("sess-1", makeDetail([]domain.StudentCheckin{
 		makeStudent("s1", "Alice", true),
 		makeStudent("s2", "Bob", true),
@@ -841,37 +839,37 @@ func TestCompute_OnlyDoneSessionsCount(t *testing.T) {
 		makeStudent("s2", "Bob", false),
 	}), nil)
 	fetcher.set("sess-3", makeDetail([]domain.StudentCheckin{
-		makeStudent("s1", "Alice", false), // active session — not counted as absence
+		makeStudent("s1", "Alice", false),
 		makeStudent("s2", "Bob", false),
 	}), nil)
 	fetcher.set("sess-4", makeDetail([]domain.StudentCheckin{
-		makeStudent("s1", "Alice", false), // not_started — not counted as absence
+		makeStudent("s1", "Alice", false),
 		makeStudent("s2", "Bob", false),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
 	require.Len(t, report.Students, 2)
 
-	// Alice: 2 done attended / 4 total = 0.5 → at-risk
+	// Alice: 2/2 done = 1.0 → NOT at-risk
 	alice := findStudent(report.Students, "s1")
 	require.NotNil(t, alice)
-	assert.Equal(t, 4, alice.TotalSessions, "total sessions = all sessions in course")
+	assert.Equal(t, 2, alice.TotalSessions, "only done sessions count")
 	assert.Equal(t, 2, alice.AttendedSessions)
-	assert.Equal(t, 0.5, alice.AttendanceRate)
-	assert.True(t, alice.AtRisk, "2/4 = 50% < 80% threshold")
+	assert.Equal(t, 1.0, alice.AttendanceRate)
+	assert.False(t, alice.AtRisk)
 
-	// Bob: 1 done attended / 4 total = 0.25 → at-risk
+	// Bob: 1/2 done = 0.5 → 1 absence. threshold=2 → NOT at-risk (1 < 2).
 	bob := findStudent(report.Students, "s2")
 	require.NotNil(t, bob)
-	assert.Equal(t, 4, bob.TotalSessions)
+	assert.Equal(t, 2, bob.TotalSessions, "only done sessions count")
 	assert.Equal(t, 1, bob.AttendedSessions)
-	assert.Equal(t, 0.25, bob.AttendanceRate)
-	assert.True(t, bob.AtRisk)
+	assert.Equal(t, 0.5, bob.AttendanceRate)
+	assert.False(t, bob.AtRisk, "1 absence < threshold=2 → NOT at-risk")
 }
 
 // TestCompute_AllActiveSessions tests that when ALL sessions are active/not_started,
-// no student is at-risk (no done sessions = rate defaults to 1.0).
+// no student appears in the output (no done sessions to judge on).
 func TestCompute_AllActiveSessions(t *testing.T) {
 	fetcher := newMockFetcher()
 	sessions := []domain.SessionSummary{
@@ -889,18 +887,10 @@ func TestCompute_AllActiveSessions(t *testing.T) {
 		makeStudent("s2", "Bob", false),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
-	require.Len(t, report.Students, 2)
-
-	// No done sessions → 0 attended / 2 total = 0.0, but no done sessions
-	// means no basis to determine risk. Rate defaults to 1.0.
-	for _, st := range report.Students {
-		assert.Equal(t, 2, st.TotalSessions, "total = all sessions in course")
-		assert.Equal(t, 0, st.AttendedSessions)
-		assert.Equal(t, 1.0, st.AttendanceRate, "no done sessions → rate defaults to 1.0")
-		assert.False(t, st.AtRisk, "no done sessions → not at-risk")
-	}
+	// No done sessions → no students in output.
+	assert.Empty(t, report.Students, "no done sessions → no students")
 }
 
 // TestCompute_MixedStatusWithDoneOnly tests a realistic mix: some done, some active.
@@ -915,7 +905,7 @@ func TestCompute_MixedStatusWithDoneOnly(t *testing.T) {
 	}
 	course := makeCourse("c1", "Test", sessions)
 
-	// Alice: 3/3 done sessions attended, 2 active not counted → 3/5 = 0.6 → at-risk
+	// Alice: 3/3 done sessions attended → rate = 1.0 → NOT at-risk
 	fetcher.set("sess-1", makeDetail([]domain.StudentCheckin{
 		makeStudent("s1", "Alice", true),
 	}), nil)
@@ -932,14 +922,14 @@ func TestCompute_MixedStatusWithDoneOnly(t *testing.T) {
 		makeStudent("s1", "Alice", false),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
 	require.Len(t, report.Students, 1)
 	alice := report.Students[0]
-	assert.Equal(t, 5, alice.TotalSessions, "total = all 5 sessions in course")
+	assert.Equal(t, 3, alice.TotalSessions, "only 3 done sessions count")
 	assert.Equal(t, 3, alice.AttendedSessions)
-	assert.Equal(t, 0.6, alice.AttendanceRate, "3/5 = 0.6")
-	assert.True(t, alice.AtRisk, "0.6 < 0.8 → at-risk")
+	assert.Equal(t, 1.0, alice.AttendanceRate)
+	assert.False(t, alice.AtRisk, "100% in done sessions → not at-risk")
 
 	// Per-session cells should still show ALL 5 sessions.
 	require.Len(t, alice.PerSession, 5)
@@ -955,7 +945,7 @@ func TestCompute_DoneSessionsOnlyWithThreshold(t *testing.T) {
 	}
 	course := makeCourse("c1", "Test", sessions)
 
-	// s1: 1/2 done attended, 3 total → 1/3 = 0.333
+	// s1: 1/2 done = 0.5
 	fetcher.set("sess-1", makeDetail([]domain.StudentCheckin{
 		makeStudent("s1", "Alice", true),
 	}), nil)
@@ -963,26 +953,25 @@ func TestCompute_DoneSessionsOnlyWithThreshold(t *testing.T) {
 		makeStudent("s1", "Alice", false),
 	}), nil)
 	fetcher.set("sess-3", makeDetail([]domain.StudentCheckin{
-		makeStudent("s1", "Alice", false), // active — not counted as absence
+		makeStudent("s1", "Alice", false),
 	}), nil)
 
-	// threshold=0.80 → at-risk (0.333 < 0.80)
-	report1 := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	// threshold=2 → at-risk (1 absence < 2 → NOT at-risk)
+	report1 := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 	require.Len(t, report1.Students, 1)
-	assert.Equal(t, 3, report1.Students[0].TotalSessions)
+	assert.Equal(t, 2, report1.Students[0].TotalSessions, "only done sessions")
 	assert.Equal(t, 1, report1.Students[0].AttendedSessions)
-	assert.InDelta(t, 0.333, report1.Students[0].AttendanceRate, 0.001)
-	assert.True(t, report1.Students[0].AtRisk)
+	assert.InDelta(t, 0.5, report1.Students[0].AttendanceRate, 0.001)
+	assert.False(t, report1.Students[0].AtRisk, "1 absence < threshold=2 → NOT at-risk")
 
-	// threshold=0.20 → NOT at-risk (0.333 is not < 0.20)
-	report2 := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.20)
+	// threshold=1 → at-risk (1 absence >= 1 → at-risk)
+	report2 := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 1)
 	require.Len(t, report2.Students, 1)
-	assert.False(t, report2.Students[0].AtRisk)
+	assert.True(t, report2.Students[0].AtRisk, "1 absence >= threshold=1 → at-risk")
 }
 
 // TestCompute_StudentOnlyInActiveSessions tests that a student who only appears
-// in active sessions has 0 attended / N total = 0.0, but since no done sessions
-// exist, rate defaults to 1.0 and not at-risk.
+// in active sessions is excluded (no done sessions).
 func TestCompute_StudentOnlyInActiveSessions(t *testing.T) {
 	fetcher := newMockFetcher()
 	sessions := []domain.SessionSummary{
@@ -999,26 +988,17 @@ func TestCompute_StudentOnlyInActiveSessions(t *testing.T) {
 		makeStudent("s2", "Bob", true),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
-	require.Len(t, report.Students, 2)
-
-	// Alice: only in active session → 0 done attended / 2 total = 0.0
-	// But no done sessions for her → rate defaults to 1.0, not at-risk
-	alice := findStudent(report.Students, "s1")
-	require.NotNil(t, alice)
-	assert.Equal(t, 2, alice.TotalSessions)
-	assert.Equal(t, 0, alice.AttendedSessions)
-	assert.Equal(t, 1.0, alice.AttendanceRate)
-	assert.False(t, alice.AtRisk)
-
-	// Bob: 1 done attended / 2 total = 0.5 → at-risk
-	bob := findStudent(report.Students, "s2")
-	require.NotNil(t, bob)
-	assert.Equal(t, 2, bob.TotalSessions)
+	// Alice: only in active session → no done sessions → excluded
+	// Bob: 1/1 done = 1.0 → not at-risk
+	require.Len(t, report.Students, 1)
+	bob := report.Students[0]
+	assert.Equal(t, "s2", bob.StudentID)
+	assert.Equal(t, 1, bob.TotalSessions)
 	assert.Equal(t, 1, bob.AttendedSessions)
-	assert.Equal(t, 0.5, bob.AttendanceRate)
-	assert.True(t, bob.AtRisk)
+	assert.Equal(t, 1.0, bob.AttendanceRate)
+	assert.False(t, bob.AtRisk)
 }
 
 // TestCompute_PerSessionCellSessionStatus verifies that each cell carries
@@ -1043,7 +1023,7 @@ func TestCompute_PerSessionCellSessionStatus(t *testing.T) {
 		makeStudent("s1", "Alice", false),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
 	require.Len(t, report.Students, 1)
 	alice := report.Students[0]
@@ -1068,13 +1048,76 @@ func TestCompute_DoneSessionWithAuthError(t *testing.T) {
 		makeStudent("s1", "Alice", true),
 	}), nil)
 
-	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
 
 	require.Len(t, report.Students, 1)
 	alice := report.Students[0]
-	// 1 done attended / 2 total = 0.5
-	assert.Equal(t, 2, alice.TotalSessions)
+	// Only 1 done session counts (auth_error excluded)
+	assert.Equal(t, 1, alice.TotalSessions)
 	assert.Equal(t, 1, alice.AttendedSessions)
-	assert.Equal(t, 0.5, alice.AttendanceRate)
-	assert.True(t, alice.AtRisk, "0.5 < 0.8 → at-risk")
+	assert.Equal(t, 1.0, alice.AttendanceRate)
+	assert.False(t, alice.AtRisk)
+}
+
+// TestCompute_SingleAbsentSessionNotAtRisk tests the user's requested case:
+// 1 done session, student absent → 1 absence. threshold=2 → NOT at-risk.
+func TestCompute_SingleAbsentSessionNotAtRisk(t *testing.T) {
+	fetcher := newMockFetcher()
+	sessions := []domain.SessionSummary{
+		sessWithStatus(1, 1, "Wk 1", domain.SessionStatusDone),
+	}
+	course := makeCourse("c1", "Test", sessions)
+
+	// Alice: absent from the only done session
+	fetcher.set("sess-1", makeDetail([]domain.StudentCheckin{
+		makeStudent("s1", "Alice", false),
+	}), nil)
+
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
+
+	require.Len(t, report.Students, 1)
+	alice := report.Students[0]
+	assert.Equal(t, 1, alice.TotalSessions, "1 done session")
+	assert.Equal(t, 0, alice.AttendedSessions, "did not attend")
+	assert.Equal(t, 0.0, alice.AttendanceRate)
+	assert.False(t, alice.AtRisk, "1 absence < threshold=2 → NOT at-risk (user requirement)")
+}
+
+// TestCompute_ThresholdDefaultsTo20Percent tests that threshold=0 calculates
+// 20% of total sessions (rounded up).
+func TestCompute_ThresholdDefaultsTo20Percent(t *testing.T) {
+	fetcher := newMockFetcher()
+
+	// 10 sessions → 20% = 2 threshold
+	sessions := make([]domain.SessionSummary, 10)
+	for i := 0; i < 10; i++ {
+		sessions[i] = sessWithStatus(i+1, i+1, fmt.Sprintf("Wk %d", i+1), domain.SessionStatusDone)
+	}
+	course := makeCourse("c1", "Test", sessions)
+
+	// Alice: absent from 1 session (1 absence, threshold=2 → NOT at-risk)
+	// Bob: absent from 3 sessions (3 absences, threshold=2 → at-risk)
+	for i := 1; i <= 10; i++ {
+		fetcher.set(fmt.Sprintf("sess-%d", i), makeDetail([]domain.StudentCheckin{
+			makeStudent("s1", "Alice", i > 1),    // absent session 1 only
+			makeStudent("s2", "Bob", i > 3),       // absent first 3
+		}), nil)
+	}
+
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0)
+
+	// Threshold should be 20% of 10 = 2
+	assert.Equal(t, 2, report.Threshold, "20% of 10 sessions = 2")
+
+	alice := findStudent(report.Students, "s1")
+	require.NotNil(t, alice)
+	assert.Equal(t, 9, alice.AttendedSessions)
+	assert.Equal(t, 10, alice.TotalSessions)
+	assert.False(t, alice.AtRisk, "1 absence < threshold=2 → NOT at-risk")
+
+	bob := findStudent(report.Students, "s2")
+	require.NotNil(t, bob)
+	assert.Equal(t, 7, bob.AttendedSessions)
+	assert.Equal(t, 10, bob.TotalSessions)
+	assert.True(t, bob.AtRisk, "3 absences >= threshold=2 → at-risk")
 }

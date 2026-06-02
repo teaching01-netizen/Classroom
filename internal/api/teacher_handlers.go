@@ -169,12 +169,13 @@ func getCourseAttendanceReportHandler(cc *warwick.ClassroomClient) http.HandlerF
 			return
 		}
 
-		// Parse threshold query param.
-		threshold := 0.80
+		// Parse threshold query param (number of absences allowed).
+		// 0 or empty = default (20% of total sessions).
+		threshold := 0
 		if t := r.URL.Query().Get("threshold"); t != "" {
-			val, err := strconv.ParseFloat(t, 64)
-			if err != nil || val <= 0 || val >= 1 {
-				writeJSON(w, http.StatusBadRequest, errorResponse("threshold must be between 0 and 1"))
+			val, err := strconv.Atoi(t)
+			if err != nil || val < 0 {
+				writeJSON(w, http.StatusBadRequest, errorResponse("threshold must be a non-negative integer"))
 				return
 			}
 			threshold = val

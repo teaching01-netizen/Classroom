@@ -1093,7 +1093,7 @@ func (c *ClassroomClient) FetchSessionDetailLive(ctx context.Context, sessionID 
 
 // GetCourseAttendanceReport returns a cached or freshly computed attendance report.
 // Uses singleflight to deduplicate concurrent requests for the same course.
-func (c *ClassroomClient) GetCourseAttendanceReport(ctx context.Context, courseID, courseName string, sessions []domain.SessionSummary, threshold float64) (*domain.CourseAttendanceReport, error) {
+func (c *ClassroomClient) GetCourseAttendanceReport(ctx context.Context, courseID, courseName string, sessions []domain.SessionSummary, threshold int) (*domain.CourseAttendanceReport, error) {
 	cacheKey := "report:" + courseID
 
 	// Check report cache first.

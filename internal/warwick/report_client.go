@@ -30,7 +30,7 @@ func ComputeCourseAttendanceReport(
 	ctx context.Context,
 	fetcher SessionFetcher,
 	course *domain.CourseDetail,
-	threshold float64,
+	threshold int,
 ) *domain.CourseAttendanceReport {
 	start := time.Now()
 
@@ -46,6 +46,11 @@ func ComputeCourseAttendanceReport(
 			ComputedAt: start,
 			DurationMs: 0,
 		}
+	}
+
+	// If threshold <= 0, calculate as 20% of total sessions (rounded up).
+	if threshold <= 0 {
+		threshold = (len(sessions) + 4) / 5 // ceiling division for 20%
 	}
 
 	// Deduplicate sessions by ID to prevent inflated counts.
@@ -140,16 +145,12 @@ func ComputeCourseAttendanceReport(
 	}
 
 	// Aggregate per-student data.
-	// Only done sessions count toward attended count. The denominator for
-	// attendance rate is total sessions in the course (all statuses).
-	// This way: absence_rate = absences / total_sessions_in_course.
-	// A student is at-risk when absence_rate >= 20% (i.e. rate < 80%).
-	totalSessions := len(sessions)
-
+	// Only done sessions count toward both attended and total.
+	// Rate = attended_done / total_done. At-risk when rate < threshold.
 	type studentAccum struct {
-		attended   int    // done sessions where this student checked in
-		hasDone    bool   // whether this student appeared in any done session
-		detail     domain.StudentCheckin
+		attended int    // done sessions where this student checked in
+		total    int    // done sessions where this student appeared
+		detail   domain.StudentCheckin
 	}
 
 	accum := make(map[string]*studentAccum)
@@ -169,9 +170,7 @@ func ComputeCourseAttendanceReport(
 		case "empty":
 			// Session fetched but no students — don't count for anyone.
 		case "ok":
-			// Only count done sessions toward attended.
-			// Active/not_started sessions haven't occurred yet, so a missed
-			// active session should NOT count as an absence.
+			// Only count done sessions.
 			isDone := sess.Status == domain.SessionStatusDone
 			for _, s := range r.detail.Students {
 				acc, ok := accum[s.StudentID]
@@ -180,7 +179,7 @@ func ComputeCourseAttendanceReport(
 					accum[s.StudentID] = acc
 				}
 				if isDone {
-					acc.hasDone = true
+					acc.total++
 					if s.CheckedIn {
 						acc.attended++
 					}
@@ -189,19 +188,16 @@ func ComputeCourseAttendanceReport(
 		}
 	}
 
-	// Build student list, excluding those who never appeared in any session.
-	// AttendanceRate = attended_done_sessions / total_sessions_in_course.
-	// AtRisk when rate < threshold (default 0.80, i.e. >= 20% absence).
-	// Students with no done sessions get rate=1.0 and are not at-risk,
-	// since there's no completed data to judge them on.
+	// Build student list, excluding those who never appeared in any done session.
+	// AttendanceRate = attended_done / total_done.
+	// AtRisk when absences >= threshold (number of absences allowed).
 	students := make([]domain.StudentAttendance, 0, len(accum))
 	for _, acc := range accum {
-		var rate float64
-		if !acc.hasDone || totalSessions == 0 {
-			rate = 1.0
-		} else {
-			rate = float64(acc.attended) / float64(totalSessions)
+		if acc.total == 0 {
+			continue
 		}
+		rate := float64(acc.attended) / float64(acc.total)
+		absences := acc.total - acc.attended
 		students = append(students, domain.StudentAttendance{
 			StudentID:        acc.detail.StudentID,
 			Name:             acc.detail.Name,
@@ -209,9 +205,9 @@ func ComputeCourseAttendanceReport(
 			AvatarURL:        acc.detail.AvatarURL,
 			School:           acc.detail.School,
 			AttendedSessions: acc.attended,
-			TotalSessions:    totalSessions,
+			TotalSessions:    acc.total,
 			AttendanceRate:   rate,
-			AtRisk:           rate < threshold,
+			AtRisk:           absences >= threshold,
 		})
 	}
 
