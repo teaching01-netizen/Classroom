@@ -86,12 +86,13 @@ type ToggleCheckinResponse struct {
 // SessionCell represents a single session's attendance status for one student
 // in the course-level attendance report.
 type SessionCell struct {
-	SessionID     string `json:"sessionId"`
-	SessionNumber int    `json:"sessionNumber"`
-	SessionName   string `json:"sessionName"`
-	SessionDate   string `json:"sessionDate"` // YYYY-MM-DD, "" if unknown
-	CheckedIn     bool   `json:"checkedIn"`
-	Status        string `json:"status"` // "ok" | "error" | "empty"
+	SessionID     string        `json:"sessionId"`
+	SessionNumber int           `json:"sessionNumber"`
+	SessionName   string        `json:"sessionName"`
+	SessionDate   string        `json:"sessionDate"` // YYYY-MM-DD, "" if unknown
+	SessionStatus SessionStatus `json:"sessionStatus"` // "done" | "active" | "not_started" | "auth_error"
+	CheckedIn     bool          `json:"checkedIn"`
+	Status        string        `json:"status"` // "ok" | "error" | "empty"
 }
 
 // StudentAttendance is a single student's aggregated attendance across all sessions

@@ -92,8 +92,13 @@ export function AttendanceRow({ student, sessions }) {
         const cell = student.perSession?.[idx];
         let symbol = '—';
         let cellColor = 'var(--color-text-disabled, #B8BCC4)';
+        let title = '';
 
-        if (cell?.status === 'ok') {
+        if (cell?.sessionStatus === 'active' || cell?.sessionStatus === 'not_started') {
+          symbol = '—';
+          cellColor = 'var(--color-text-disabled, #B8BCC4)';
+          title = 'Not started yet';
+        } else if (cell?.status === 'ok') {
           if (cell.checkedIn) {
             symbol = '✓';
             cellColor = 'var(--color-success, #257348)';
@@ -109,6 +114,7 @@ export function AttendanceRow({ student, sessions }) {
         return (
           <td
             key={sess.sessionId || idx}
+            title={title}
             style={{
               textAlign: 'center',
               padding: '10px 8px',

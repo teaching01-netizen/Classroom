@@ -223,6 +223,7 @@ func ComputeCourseAttendanceReport(
 				SessionID:     sess.SessionID,
 				SessionNumber: sess.SessionNumber,
 				SessionName:   sess.Name,
+				SessionStatus: sess.Status,
 				Status:        "error",
 			}
 		}

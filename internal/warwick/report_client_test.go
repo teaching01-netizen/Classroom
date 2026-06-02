@@ -1021,8 +1021,38 @@ func TestCompute_StudentOnlyInActiveSessions(t *testing.T) {
 	assert.True(t, bob.AtRisk)
 }
 
-// TestCompute_DoneSessionWithAuthError tests that auth_error sessions are
-// excluded from attended count. Only "done" status counts.
+// TestCompute_PerSessionCellSessionStatus verifies that each cell carries
+// the session's status (done/active/not_started) so the frontend can
+// display "not started yet" for non-done sessions.
+func TestCompute_PerSessionCellSessionStatus(t *testing.T) {
+	fetcher := newMockFetcher()
+	sessions := []domain.SessionSummary{
+		sessWithStatus(1, 1, "Wk 1", domain.SessionStatusDone),
+		sessWithStatus(2, 2, "Wk 2", domain.SessionStatusActive),
+		sessWithStatus(3, 3, "Wk 3", domain.SessionStatusNotStarted),
+	}
+	course := makeCourse("c1", "Test", sessions)
+
+	fetcher.set("sess-1", makeDetail([]domain.StudentCheckin{
+		makeStudent("s1", "Alice", true),
+	}), nil)
+	fetcher.set("sess-2", makeDetail([]domain.StudentCheckin{
+		makeStudent("s1", "Alice", false),
+	}), nil)
+	fetcher.set("sess-3", makeDetail([]domain.StudentCheckin{
+		makeStudent("s1", "Alice", false),
+	}), nil)
+
+	report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 0.80)
+
+	require.Len(t, report.Students, 1)
+	alice := report.Students[0]
+	require.Len(t, alice.PerSession, 3)
+
+	assert.Equal(t, domain.SessionStatusDone, alice.PerSession[0].SessionStatus)
+	assert.Equal(t, domain.SessionStatusActive, alice.PerSession[1].SessionStatus)
+	assert.Equal(t, domain.SessionStatusNotStarted, alice.PerSession[2].SessionStatus)
+}
 func TestCompute_DoneSessionWithAuthError(t *testing.T) {
 	fetcher := newMockFetcher()
 	sessions := []domain.SessionSummary{
