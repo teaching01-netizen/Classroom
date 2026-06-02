@@ -981,20 +981,22 @@ func (c *ClassroomClient) effectiveUserID() string {
 	return defaultUserID
 }
 
-// uuidRegex matches UUID v4 strings commonly used as Warwick UserIDs.
-var uuidRegex = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+// userIDFromJSRegex matches the Warwick UserID embedded in DataTables JS code.
+// The frontend JavaScript hardcodes: d.UserID = 'f21992ca-e6d2-424d-a188-90e37018ab38'
+// This regex captures the UUID value from that pattern.
+var userIDFromJSRegex = regexp.MustCompile(`d\.UserID\s*=\s*['"]([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})['"]`)
 
-// detectUserIDFromPage tries multiple Warwick admin pages to extract the
-// authenticated user's GUID from the HTML. It uses a redirect-following
-// client because /admin/ returns 302 → the actual dashboard page.
+// detectUserIDFromPage fetches the ClassAttendance page and extracts the
+// UserID from the JavaScript code (where it's hardcoded in the DataTables config).
+// Uses a redirect-following client because /admin/ returns 302 → the actual page.
 // Returns empty string on any failure (non-fatal).
 func (c *ClassroomClient) detectUserIDFromPage(cookie string) string {
 	detector := &http.Client{
 		Timeout: 15 * time.Second,
 	}
 
-	// Try pages that are likely to contain the UserID.
-	paths := []string{"/admin/", "/admin/ClassAttendance", "/admin/ClassAttendance/Index"}
+	// The ClassAttendance page contains the DataTables JS with d.UserID hardcoded.
+	paths := []string{"/admin/ClassAttendance", "/admin/ClassAttendance/Index", "/admin/"}
 	for _, path := range paths {
 		if uid := c.tryDetectUserID(detector, cookie, path); uid != "" {
 			return uid
@@ -1034,13 +1036,16 @@ func (c *ClassroomClient) tryDetectUserID(client *http.Client, cookie, path stri
 		"body_bytes", len(body),
 	)
 
-	matches := uuidRegex.FindAllString(string(body), -1)
-	if len(matches) == 0 {
-		return ""
+	// Extract UserID from the JavaScript DataTables config: d.UserID = '...'
+	// This is more reliable than generic UUID scanning which picks up student IDs.
+	bodyStr := string(body)
+	if matches := userIDFromJSRegex.FindStringSubmatch(bodyStr); len(matches) > 1 {
+		slog.Info("warwick_userid_detected", "path", path, "user_id", matches[1])
+		return matches[1]
 	}
 
-	slog.Info("warwick_userid_detected", "path", path, "user_id", matches[0], "total_uuids", len(matches))
-	return matches[0]
+	slog.Debug("warwick_userid_not_found_in_js", "path", path, "body_bytes", len(body))
+	return ""
 }
 
 // InvalidateReportCache removes any cached attendance report for the given course.
