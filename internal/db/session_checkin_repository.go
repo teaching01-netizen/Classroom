@@ -58,7 +58,9 @@ func (r *PgSessionCheckinRepository) UpsertFromWarwick(ctx context.Context, sess
 	if err != nil {
 		return fmt.Errorf("upsert from warwick begin tx: %w", err)
 	}
-	defer tx.Rollback(context.Background())
+	defer func() {
+		_ = tx.Rollback(ctx) // no-op after Commit; uses request ctx for timeout
+	}()
 
 	for _, student := range students {
 		_, err := tx.Exec(ctx,

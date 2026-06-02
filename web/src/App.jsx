@@ -7,6 +7,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { CourseDashboard } from './pages/CourseDashboard';
 import { SessionList } from './pages/SessionList';
 import { CheckinDetail } from './pages/CheckinDetail';
+import { CourseAttendance } from './pages/CourseAttendance';
 
 import './styles/tokens.css';
 
@@ -233,6 +234,7 @@ function App() {
             <Route path="/" element={<HomePage />} />
             <Route path="/courses" element={<CourseDashboard />} />
             <Route path="/courses/:courseId/sessions" element={<SessionList />} />
+            <Route path="/courses/:courseId/attendance" element={<CourseAttendance />} />
             <Route path="/courses/:courseId/sessions/:sessionId" element={<CheckinDetail />} />
           </Routes>
         </ErrorBoundary>

@@ -26,9 +26,10 @@ type RoomManagerEvent struct {
 }
 
 type RoomState struct {
-	room   domain.Room
-	ctx    context.Context
-	cancel context.CancelFunc
+	room       domain.Room
+	ctx        context.Context
+	cancel     context.CancelFunc
+	lastQrTime uint64 // actual QrTime from last successful fetch (seconds)
 }
 
 type RoomManager struct {
@@ -179,8 +180,8 @@ func (rm *RoomManager) StartRoom(roomID string) error {
 		return nil
 	}
 
-	// Reset stale state when transitioning from Stopped
-	if state.room.Status == domain.Stopped {
+	// Reset stale state when starting from a non-Running state
+	if state.room.Status != domain.Running {
 		state.room.QRURL = nil
 		state.room.ExpiresAt = nil
 		state.room.WarningMessage = nil
@@ -290,7 +291,10 @@ roomLoop:
 			expiresAt := state.room.ExpiresAt
 			classID := state.room.ClassID
 			rm.mu.RUnlock()
-			defaultTTL := uint64(60)
+			defaultTTL := state.lastQrTime
+			if defaultTTL == 0 {
+				defaultTTL = 60
+			}
 			shouldFetch := expiresAt == nil || now.After(expiresAt.Add(-time.Duration(domain.CalculateNextFetchDelay(defaultTTL))*time.Second))
 
 			if shouldFetch {
@@ -306,8 +310,8 @@ roomLoop:
 				resp, err := rm.qrClient.FetchQR(classID)
 				if err != nil {
 					rm.mu.Lock()
-					fetchErr, ok := err.(*domain.FetchError)
-					if ok {
+					var fetchErr *domain.FetchError
+					if errors.As(err, &fetchErr) {
 						if err := state.room.TransitionTo(fetchErr.ToRoomStatus()); err != nil {
 							slog.Warn("invalid transition", "error", err)
 						}
@@ -355,6 +359,7 @@ roomLoop:
 									state.room.ExpiresAt = &expiresAt
 									state.room.LastUpdatedAt = &now
 									state.room.LastFetchAt = &now
+									state.lastQrTime = uint64(resp.QrTime)
 									state.room.WarningMessage = nil
 									state.room.ErrorMessage = nil
 									if err := state.room.TransitionTo(domain.Fetching); err != nil {
@@ -406,7 +411,8 @@ roomLoop:
 								}
 
 								// Check for invalid payload — will never succeed on retry
-								if fetchErr, ok := err.(*domain.FetchError); ok && fetchErr.Kind == domain.ErrKindInvalidPayload {
+								var fetchErr *domain.FetchError
+								if errors.As(err, &fetchErr) && fetchErr.Kind == domain.ErrKindInvalidPayload {
 									rm.mu.Lock()
 									msg := fmt.Sprintf("Invalid QR response: %s", fetchErr.Message)
 									state.room.ErrorMessage = &msg
@@ -473,6 +479,7 @@ roomLoop:
 				state.room.ExpiresAt = &expiresAt
 				state.room.LastUpdatedAt = &now
 				state.room.LastFetchAt = &now
+				state.lastQrTime = uint64(resp.QrTime)
 				if err := state.room.TransitionTo(domain.Running); err != nil {
 					slog.Warn("invalid transition", "error", err)
 				}

@@ -1,9 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -148,5 +151,64 @@ func toggleCheckinHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 			CheckedIn: req.Checked,
 			NewCount:  0,
 		}))
+
+		// Invalidate the attendance report cache for this course.
+		cc.InvalidateReportCache(courseID)
+	}
+}
+
+func getCourseAttendanceReportHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if cc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
+			return
+		}
+		courseID := chi.URLParam(r, "courseId")
+		if courseID == "" {
+			writeJSON(w, http.StatusBadRequest, errorResponse("courseId is required"))
+			return
+		}
+
+		// Parse threshold query param.
+		threshold := 0.80
+		if t := r.URL.Query().Get("threshold"); t != "" {
+			val, err := strconv.ParseFloat(t, 64)
+			if err != nil || val <= 0 || val >= 1 {
+				writeJSON(w, http.StatusBadRequest, errorResponse("threshold must be between 0 and 1"))
+				return
+			}
+			threshold = val
+		}
+
+		// Fetch course detail for the session list.
+		courseDetail, err := cc.GetCourseDetail(courseID)
+		if err != nil {
+			if errors.Is(err, domain.ErrAuthExpired) {
+				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
+				return
+			}
+			if errors.Is(err, domain.ErrPoolExhausted) {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
+				return
+			}
+			if errors.Is(err, domain.ErrAuthConflict) {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
+			return
+		}
+
+		// Compute report with a generous timeout (live fetch of all sessions).
+		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+		defer cancel()
+
+		report, err := cc.GetCourseAttendanceReport(ctx, courseID, courseDetail.Name, courseDetail.Sessions, threshold)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
+			return
+		}
+
+		writeJSON(w, http.StatusOK, successResponse(report))
 	}
 }

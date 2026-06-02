@@ -83,6 +83,53 @@ type ToggleCheckinResponse struct {
 	NewCount   int    `json:"new_count"`
 }
 
+// SessionCell represents a single session's attendance status for one student
+// in the course-level attendance report.
+type SessionCell struct {
+	SessionID     string `json:"sessionId"`
+	SessionNumber int    `json:"sessionNumber"`
+	SessionName   string `json:"sessionName"`
+	SessionDate   string `json:"sessionDate"` // YYYY-MM-DD, "" if unknown
+	CheckedIn     bool   `json:"checkedIn"`
+	Status        string `json:"status"` // "ok" | "error" | "empty"
+}
+
+// StudentAttendance is a single student's aggregated attendance across all sessions
+// in a course.
+type StudentAttendance struct {
+	StudentID        string        `json:"studentId"`
+	Name             string        `json:"name"`
+	Nickname         string        `json:"nickname"`
+	AvatarURL        string        `json:"avatarUrl"`
+	School           string        `json:"school"`
+	AttendedSessions int           `json:"attendedSessions"`
+	TotalSessions    int           `json:"totalSessions"`
+	AttendanceRate   float64       `json:"attendanceRate"`
+	AtRisk           bool          `json:"atRisk"`
+	PerSession       []SessionCell `json:"perSession"`
+}
+
+// ReportError records a single session that could not be fetched during
+// report computation.
+type ReportError struct {
+	SessionID string `json:"sessionId"`
+	Reason    string `json:"reason"`
+}
+
+// CourseAttendanceReport is the response payload for
+// GET /api/teacher/courses/:courseId/attendance-report.
+type CourseAttendanceReport struct {
+	CourseID   string              `json:"courseId"`
+	CourseName string              `json:"courseName"`
+	Sessions   []SessionSummary    `json:"sessions"`
+	Students   []StudentAttendance `json:"students"`
+	Errors     []ReportError       `json:"errors"`
+	Truncated  bool                `json:"truncated"`
+	Threshold  float64             `json:"threshold"`
+	ComputedAt time.Time           `json:"computedAt"`
+	DurationMs int64               `json:"durationMs"`
+}
+
 func GetCourseStatus(startDate, endDate string) CourseStatus {
 	now := time.Now()
 	const layout = "2006-01-02"

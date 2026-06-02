@@ -1,5 +1,5 @@
-import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useMemo } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
 import { usePinnedCoursesStore, selectIsPinned } from '../store/usePinnedCoursesStore';
 
 const getStatusColor = (status) => {
@@ -13,7 +13,8 @@ const getStatusColor = (status) => {
 
 export const CourseCard = ({ course }) => {
   const navigate = useNavigate();
-  const isPinned = usePinnedCoursesStore(selectIsPinned(course.course_id));
+  const isPinnedSelector = useMemo(() => selectIsPinned(course.course_id), [course.course_id]);
+  const isPinned = usePinnedCoursesStore(isPinnedSelector);
   const toggleCourse = usePinnedCoursesStore((state) => state.toggleCourse);
 
   const handleClick = () => {
@@ -122,6 +123,28 @@ export const CourseCard = ({ course }) => {
       }}>
         {attendancePercent > 0 ? `${attendancePercent}% attendance` : '— attendance'}
       </div>
+
+      <Link
+        to={`/courses/${course.course_id}/attendance`}
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          display: 'block',
+          marginTop: 'var(--space-3, 12px)',
+          padding: '6px 12px',
+          fontSize: '12px',
+          fontWeight: '500',
+          color: 'var(--color-primary-600, #276BF0)',
+          background: 'var(--color-primary-soft, #EAF0FE)',
+          borderRadius: 'var(--radius-sm, 6px)',
+          textAlign: 'center',
+          textDecoration: 'none',
+          transition: 'background 0.2s',
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--color-primary-soft-2, #E6EBFE)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--color-primary-soft, #EAF0FE)'; }}
+      >
+        View Attendance Report
+      </Link>
     </div>
   );
 };

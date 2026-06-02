@@ -13,6 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+	"golang.org/x/time/rate"
+
 	"qr-command-center/internal/cache"
 	"qr-command-center/internal/db"
 	"qr-command-center/internal/domain"
@@ -44,6 +47,15 @@ type ClassroomClient struct {
 	// refreshing tracks in-flight async cache refreshes keyed by cache key.
 	// Prevents thundering-herd goroutine creation on stale cache hits.
 	refreshing sync.Map
+
+	// rateLimiter gates live session-detail fetches (e.g. from the attendance
+	// report) to protect upstream Warwick from fan-out storms. nil = no limiting.
+	rateLimiter *rate.Limiter
+
+	// ReportCache caches computed attendance reports keyed by "report:<courseID>".
+	ReportCache *cache.Cache
+	// ReportFlight deduplicates concurrent report computations for the same course.
+	ReportFlight singleflight.Group
 }
 
 // NewClassroomClient creates a ClassroomClient with the given auth instance.
@@ -150,7 +162,8 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 			return courses, nil
 		}
 
-		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
+		var fe *domain.FetchError
+		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
 			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
 				return nil, domain.ErrAuthExpired
@@ -216,7 +229,8 @@ func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
 		if err == nil {
 			return courses, nil
 		}
-		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
+		var fe *domain.FetchError
+		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
 			if attempt == 0 {
 				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
@@ -328,13 +342,15 @@ func (c *ClassroomClient) GetCourseDetail(courseID string) (*domain.CourseDetail
 
 		detail, err := c.fetchCourseDetail(cookie, courseID)
 		if err == nil {
+			c.populateCourseName(detail)
 			if c.cache != nil {
 				c.cache.Set(key, detail, 30*time.Second)
 			}
 			return detail, nil
 		}
 
-		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
+		var fe *domain.FetchError
+		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
 			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
 				return nil, domain.ErrAuthExpired
@@ -398,12 +414,14 @@ func (c *ClassroomClient) fetchCourseDetailWithPool(key, courseID string) (*doma
 	for attempt := 0; attempt < 2; attempt++ {
 		detail, err := c.fetchCourseDetail(ref.Cookie, courseID)
 		if err == nil {
+			c.populateCourseName(detail)
 			if c.cache != nil {
 				c.cache.Set(key, detail, 30*time.Second)
 			}
 			return detail, nil
 		}
-		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
+		var fe *domain.FetchError
+		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
 			if attempt == 0 {
 				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
@@ -494,7 +512,8 @@ func (c *ClassroomClient) GetSessionDetail(courseID, sessionID string) (*domain.
 			return detail, nil
 		}
 
-		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
+		var fe *domain.FetchError
+		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
 			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
 				return nil, domain.ErrAuthExpired
@@ -684,7 +703,8 @@ func (c *ClassroomClient) fetchSessionDetailWithPool(key, sessionID string) (*do
 			}
 			return detail, nil
 		}
-		if fe, ok := err.(*domain.FetchError); ok && fe.Kind == domain.ErrKindAuthExpired {
+		var fe *domain.FetchError
+		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
 			if attempt == 0 {
 				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
@@ -908,6 +928,89 @@ func (c *ClassroomClient) checkAuth(resp *http.Response) error {
 	return nil
 }
 
+// SetRateLimiter sets the rate limiter for live session-detail fetches.
+// Must be called before the client is used if rate limiting is desired.
+func (c *ClassroomClient) SetRateLimiter(l *rate.Limiter) {
+	c.rateLimiter = l
+}
+
+// InvalidateReportCache removes any cached attendance report for the given course.
+func (c *ClassroomClient) InvalidateReportCache(courseID string) {
+	if c.ReportCache != nil {
+		c.ReportCache.Invalidate("report:" + courseID)
+	}
+}
+
+// FetchSessionDetailLive fetches a session's student list directly from Warwick,
+// bypassing the local cache, DB, and singleflight deduplication. Used by the
+// attendance report to get a pure live snapshot.
+// Satisfies the SessionFetcher interface used by ComputeCourseAttendanceReport.
+func (c *ClassroomClient) FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error) {
+	if c.pool == nil {
+		return nil, fmt.Errorf("FetchSessionDetailLive requires a session pool")
+	}
+
+	// Rate-limit live fetches if a limiter is configured.
+	if c.rateLimiter != nil {
+		if err := c.rateLimiter.Wait(ctx); err != nil {
+			return nil, domain.ErrRateLimited
+		}
+	}
+
+	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
+	if err != nil {
+		if errors.Is(err, ErrAuthConflict) {
+			return nil, domain.ErrAuthConflict
+		}
+		if errors.Is(err, ErrNoAvailableSessions) {
+			return nil, domain.ErrPoolExhausted
+		}
+		return nil, domain.ErrAuthExpired
+	}
+	defer c.pool.Release(ref)
+
+	detail, err := c.fetchSessionDetail(ref.Cookie, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return detail, nil
+}
+
+// GetCourseAttendanceReport returns a cached or freshly computed attendance report.
+// Uses singleflight to deduplicate concurrent requests for the same course.
+func (c *ClassroomClient) GetCourseAttendanceReport(ctx context.Context, courseID, courseName string, sessions []domain.SessionSummary, threshold float64) (*domain.CourseAttendanceReport, error) {
+	cacheKey := "report:" + courseID
+
+	// Check report cache first.
+	if c.ReportCache != nil {
+		if cached, ok := c.ReportCache.Get(cacheKey); ok {
+			return cached.(*domain.CourseAttendanceReport), nil
+		}
+	}
+
+	// Use singleflight to deduplicate concurrent requests.
+	v, err, _ := c.ReportFlight.Do(courseID, func() (interface{}, error) {
+		course := &domain.CourseDetail{
+			CourseSummary: domain.CourseSummary{
+				CourseID: courseID,
+				Name:     courseName,
+			},
+			Sessions: sessions,
+		}
+		report := ComputeCourseAttendanceReport(ctx, c, course, threshold)
+
+		// Cache the result.
+		if c.ReportCache != nil {
+			c.ReportCache.Set(cacheKey, report, 30*time.Second)
+		}
+		return report, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*domain.CourseAttendanceReport), nil
+}
+
 // equalTimePtr compares two *time.Time pointers for equality.
 // Both nil is considered equal; one nil is not.
 func equalTimePtr(a, b *time.Time) bool {
@@ -918,4 +1021,27 @@ func equalTimePtr(a, b *time.Time) bool {
 		return false
 	}
 	return a.Equal(*b)
+}
+
+// populateCourseName fills in the empty Name field of a CourseDetail by
+// looking it up in the cached courses list. The ClassAttendanceDetailSearch
+// endpoint only returns session-level data, so the course name must come
+// from the courses list (ClassAttendanceSearch). This is a no-op when the
+// Name is already set or the courses cache is unavailable.
+func (c *ClassroomClient) populateCourseName(detail *domain.CourseDetail) {
+	if detail.Name != "" || c.cache == nil {
+		return
+	}
+	if cached, ok := c.cache.Get("courses"); ok {
+		courses, ok := cached.([]domain.CourseSummary)
+		if !ok {
+			return
+		}
+		for _, course := range courses {
+			if course.CourseID == detail.CourseID {
+				detail.Name = course.Name
+				return
+			}
+		}
+	}
 }

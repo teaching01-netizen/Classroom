@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"golang.org/x/time/rate"
 
 	"qr-command-center/internal/api"
 	"qr-command-center/internal/cache"
@@ -94,6 +95,10 @@ func main() {
 	if sessionPool != nil {
 		sessionCheckinRepo := db.NewPgSessionCheckinRepository(pool)
 		classroomClient = warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher, sharedCache, sessionCheckinRepo)
+		// Rate limit live session-detail fetches used by the attendance report
+		// to 2 req/s with a burst of 2. Protects the upstream from fan-out storms.
+		classroomClient.SetRateLimiter(rate.NewLimiter(rate.Limit(2), 2))
+		classroomClient.ReportCache = cache.New()
 		refresher = service.NewDataRefresher(classroomClient, cacheInterval)
 
 		// Sync warmup at startup — pre-fetches course list + active course details.

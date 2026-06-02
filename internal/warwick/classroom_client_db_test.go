@@ -425,3 +425,135 @@ func TestClassroomClient_GetSessionDetail_StaleCache_DBSame_ServesStale(t *testi
 	// An async refresh goroutine was spawned — it will update the cache eventually
 	// but we don't synchronize with it. Just verify synchronous path is correct.
 }
+
+// --- BUG: GetCourseDetail returns empty Name field ---
+//
+// The ClassAttendanceDetailSearch endpoint only returns session-level data
+// (dName, dStatus). The course name is only available from ClassAttendanceSearch.
+// fetchCourseDetail never populates CourseSummary.Name, so:
+//   - GET /api/teacher/courses/:courseId returns {"name": ""}
+//   - GET /api/teacher/courses/:courseId/attendance-report has courseName=""
+//
+// The fix: populate Name from the cached courses list when it's available.
+
+func TestClassroomClient_GetCourseDetail_PopulatesNameFromCoursesCache(t *testing.T) {
+	mc := cache.New()
+
+	// Pre-populate the courses cache with a known course name.
+	mc.Set("courses", []domain.CourseSummary{
+		{CourseID: "course-1", Name: "Advanced Mathematics", StartDate: "2026-01-15", EndDate: "2026-05-30"},
+		{CourseID: "course-2", Name: "Intro to Physics", StartDate: "2026-01-15", EndDate: "2026-05-30"},
+	}, 5*time.Minute)
+
+	// Mock Warwick ClassAttendanceDetailSearch endpoint — returns session data only (no course name).
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"draw": 1,
+			"recordsTotal": 2,
+			"recordsFiltered": 2,
+			"data": [
+				{"dID": "sess-1", "dName": "Week 1", "dStatus": "Finished"},
+				{"dID": "sess-2", "dName": "Week 2", "dStatus": "Active"}
+			]
+		}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	detail, err := client.GetCourseDetail("course-1")
+	require.NoError(t, err)
+	require.NotNil(t, detail)
+
+	// BUG: Name is empty because fetchCourseDetail doesn't populate it.
+	// After fix, this should be "Advanced Mathematics" from the courses cache.
+	assert.Equal(t, "Advanced Mathematics", detail.Name,
+		"GetCourseDetail should populate Name from courses cache")
+	assert.Equal(t, 2, detail.TotalSessions)
+	assert.Equal(t, 1, detail.CompletedSessions)
+}
+
+func TestClassroomClient_GetCourseDetail_EmptyNameWhenCoursesCacheUnavailable(t *testing.T) {
+	mc := cache.New() // empty cache — no courses list available
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"draw": 1,
+			"recordsTotal": 1,
+			"recordsFiltered": 1,
+			"data": [
+				{"dID": "sess-1", "dName": "Week 1", "dStatus": "Active"}
+			]
+		}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	detail, err := client.GetCourseDetail("course-1")
+	require.NoError(t, err)
+	require.NotNil(t, detail)
+
+	// When courses cache is unavailable, Name stays empty (graceful degradation).
+	// This is acceptable — the caller should handle empty names.
+	assert.Equal(t, "", detail.Name,
+		"Name should be empty when courses cache is not available")
+	assert.Equal(t, 1, detail.TotalSessions)
+}
+
+func TestClassroomClient_GetCourseDetail_CachesDetailWithName(t *testing.T) {
+	mc := cache.New()
+
+	mc.Set("courses", []domain.CourseSummary{
+		{CourseID: "course-1", Name: "Linear Algebra"},
+	}, 5*time.Minute)
+
+	callCount := 0
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"draw": 1,
+			"recordsTotal": 1,
+			"recordsFiltered": 1,
+			"data": [
+				{"dID": "sess-1", "dName": "Lecture 1", "dStatus": "Finished"}
+			]
+		}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	// First call: fetches from Warwick and populates Name from courses cache.
+	detail1, err := client.GetCourseDetail("course-1")
+	require.NoError(t, err)
+	assert.Equal(t, "Linear Algebra", detail1.Name)
+	assert.Equal(t, 1, callCount)
+
+	// Second call: should hit the course detail cache (which has the Name).
+	detail2, err := client.GetCourseDetail("course-1")
+	require.NoError(t, err)
+	assert.Equal(t, "Linear Algebra", detail2.Name)
+	assert.Equal(t, 1, callCount, "should not call Warwick again")
+}

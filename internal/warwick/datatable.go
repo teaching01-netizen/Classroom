@@ -112,7 +112,7 @@ func DefaultDataTablesRequest(columns []string) DataTablesRequest {
 	return DataTablesRequest{
 		Draw:    1,
 		Start:   0,
-		Length:  100,
+		Length:  -1, // fetch all records — avoids silent truncation for large result sets
 		Search:  DataTablesSearch{Value: "", Regex: false},
 		Order:   []DataTablesOrder{{Column: 0, Dir: "asc"}},
 		Columns: cols,

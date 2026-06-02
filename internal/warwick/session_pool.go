@@ -174,12 +174,13 @@ func NewSessionPool(email, password, loginURL string, qrSessions, teacherSession
 			password: password,
 			loginURL: loginURL,
 		}
-		// Spread session TTL expiry across a 5-minute window to prevent
-		// synchronized re-login when all sessions cross the refresh threshold
-		// at the same time (T+55min from startup).
+		// Start with zero obtainedAt so isKickCandidate() returns false until
+		// the first successful login. This prevents first-login failures from
+		// being misclassified as admin kicks. Stagger expiresAt to spread
+		// synchronized re-login across a 5-minute window.
+		sessions[i].obtainedAt = time.Time{}
 		stagger := time.Duration(rand.Intn(300)) * time.Second
-		sessions[i].obtainedAt = time.Now().Add(-stagger)
-		sessions[i].expiresAt = sessions[i].obtainedAt.Add(sessionTTL)
+		sessions[i].expiresAt = time.Now().Add(-stagger)
 	}
 
 	p := &SessionPool{
@@ -220,12 +221,14 @@ func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 			tier, start, end, len(p.sessions))
 	}
 
-	// Round-robin within the tier
-	next := int(atomic.AddUint64(&p.qrNext, 1) - 1)
-	if tier == TierTeacher {
+	// Round-robin within the tier — only the relevant tier's counter is incremented.
+	var next int
+	switch tier {
+	case TierQR:
+		next = int(atomic.AddUint64(&p.qrNext, 1) - 1)
+	case TierTeacher:
 		next = int(atomic.AddUint64(&p.teacherNext, 1) - 1)
-	}
-	if tier == TierInteractive {
+	case TierInteractive:
 		next = int(atomic.AddUint64(&p.interactiveNext, 1) - 1)
 	}
 
@@ -305,12 +308,14 @@ func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration
 	}()
 
 	for {
-		// Round-robin within the tier
-		next := int(atomic.AddUint64(&p.qrNext, 1) - 1)
-		if tier == TierTeacher {
+		// Round-robin within the tier — only the relevant tier's counter is incremented.
+		var next int
+		switch tier {
+		case TierQR:
+			next = int(atomic.AddUint64(&p.qrNext, 1) - 1)
+		case TierTeacher:
 			next = int(atomic.AddUint64(&p.teacherNext, 1) - 1)
-		}
-		if tier == TierInteractive {
+		case TierInteractive:
 			next = int(atomic.AddUint64(&p.interactiveNext, 1) - 1)
 		}
 

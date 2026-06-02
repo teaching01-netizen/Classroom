@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { useSessions } from '../hooks/useSessions';
 import { StatsBar } from '../components/StatsBar';
 import { SessionTable } from '../components/SessionTable';
@@ -60,8 +60,25 @@ export function SessionList() {
       )}
       <BackBreadcrumb to="/" label="Back to Dashboard" />
 
-      <h2 style={{ fontSize: '1.5rem', fontWeight: '600', color: 'var(--color-text-primary, #111113)', marginBottom: 'var(--space-6, 24px)' }}>
+      <h2 style={{ fontSize: '1.5rem', fontWeight: '600', color: 'var(--color-text-primary, #111113)', marginBottom: 'var(--space-6, 24px)', display: 'flex', alignItems: 'center', gap: 'var(--space-4, 16px)', flexWrap: 'wrap' }}>
         {courseName}
+        <Link
+          to={`/courses/${courseId}/attendance`}
+          style={{
+            fontSize: '0.8125rem',
+            fontWeight: '500',
+            color: 'var(--color-primary-600, #276BF0)',
+            background: 'var(--color-primary-soft, #EAF0FE)',
+            padding: '4px 12px',
+            borderRadius: 'var(--radius-sm, 6px)',
+            textDecoration: 'none',
+            transition: 'background 0.2s',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--color-primary-soft-2, #E6EBFE)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--color-primary-soft, #EAF0FE)'; }}
+        >
+          View Attendance Report
+        </Link>
       </h2>
 
       <StatsBar stats={stats} />
