@@ -1282,7 +1282,7 @@ func (c *ClassroomClient) fetchStudentProfilesWithPool() ([]domain.StudentProfil
 }
 
 func (c *ClassroomClient) fetchStudentProfiles(cookie string) ([]domain.StudentProfile, error) {
-	body := EncodeDataTablesBody(DefaultDataTablesRequest([]string{"StudentID", "FullName", "School"}), map[string]string{
+	body := EncodeDataTablesBody(DefaultDataTablesRequest([]string{"StudentID", "StudentGuid", "FullName", "School"}), map[string]string{
 		"keyword":  "",
 		"IsActive": "",
 	})
@@ -1309,6 +1309,14 @@ func (c *ClassroomClient) fetchStudentProfiles(cookie string) ([]domain.StudentP
 		"records_filtered", data.RecordsFiltered,
 		"data_count", len(data.Data),
 	)
+
+	if len(data.Data) > 0 {
+		slog.Info("warwick_student_profiles_sample",
+			"first_id", data.Data[0].StudentID,
+			"first_guid", data.Data[0].StudentGuid,
+			"first_name", data.Data[0].FullName,
+		)
+	}
 
 	if len(data.Data) == 0 {
 		slog.Warn("warwick_student_profiles_empty",

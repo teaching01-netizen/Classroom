@@ -760,6 +760,7 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 					guidToStudentID[p.StudentGuid] = p.StudentID
 				}
 			}
+			slog.Info("absence_dashboard_student_profiles_loaded", "profiles", len(profiles), "mappings", len(guidToStudentID))
 		} else {
 			slog.Warn("absence_dashboard_student_profiles_fetch_failed", "error", err)
 		}
@@ -787,7 +788,7 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 							status = "absent"
 						}
 					} else {
-						status = "no_data"
+						status = "not_started"
 					}
 				} else if sess.Status == "active" {
 					if hasData {
@@ -820,12 +821,6 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 				isAtRisk = absences >= defaultThreshold
 			}
 
-			if isAtRisk {
-				totalAtRisk++
-			}
-			totalAttended += agg.attended
-			totalSessions += agg.total
-
 			// Deduplicate students across courses.
 			key := agg.name
 			if studentSet[key] {
@@ -833,8 +828,13 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			}
 			studentSet[key] = true
 
+			studentID := guidToStudentID[agg.studentGUID]
+			if len(students) == 0 {
+				slog.Info("absence_dashboard_student_sample", "name", agg.name, "guid", agg.studentGUID, "studentID", studentID, "has_mapping", studentID != "")
+			}
+
 			students = append(students, domain.StudentAbsence{
-				StudentID:        guidToStudentID[agg.studentGUID],
+				StudentID:        studentID,
 				Name:             agg.name,
 				Nickname:         agg.nickname,
 				School:           agg.school,
