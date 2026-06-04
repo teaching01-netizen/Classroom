@@ -453,17 +453,41 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 		defer cancel()
 
 		results := make([]courseResult, len(courses))
-		sem := make(chan struct{}, 3) // bounded concurrency
+		sem := make(chan struct{}, 2) // match teacher tier capacity (default 2 sessions)
 
 		for i, course := range courses {
 			sem <- struct{}{}
 			go func(idx int, c domain.CourseSummary) {
 				defer func() { <-sem }()
 
-				detail, err := cc.GetCourseDetail(c.CourseID)
-				if err != nil {
-					slog.Warn("dashboard_course_detail_failed", "course_id", c.CourseID, "error", err)
-					results[idx] = courseResult{courseID: c.CourseID, courseName: c.Name, err: err}
+				// Retry with backoff on pool exhaustion (other goroutines hold sessions).
+				var detail *domain.CourseDetail
+				var lastErr error
+				for attempt := 0; attempt < 3; attempt++ {
+					var err error
+					detail, err = cc.GetCourseDetail(c.CourseID)
+					if err == nil {
+						lastErr = nil
+						break
+					}
+					lastErr = err
+					if errors.Is(err, domain.ErrPoolExhausted) {
+						backoff := time.Duration(500*(1<<uint(attempt))) * time.Millisecond
+						slog.Warn("dashboard_course_detail_pool_retry", "course_id", c.CourseID, "attempt", attempt+1, "backoff", backoff)
+						select {
+						case <-time.After(backoff):
+							continue
+						case <-ctx.Done():
+							results[idx] = courseResult{courseID: c.CourseID, courseName: c.Name, err: ctx.Err()}
+							return
+						}
+					}
+					// Non-pool errors (auth, etc.) — don't retry.
+					break
+				}
+				if lastErr != nil {
+					slog.Warn("dashboard_course_detail_failed", "course_id", c.CourseID, "error", lastErr)
+					results[idx] = courseResult{courseID: c.CourseID, courseName: c.Name, err: lastErr}
 					return
 				}
 
