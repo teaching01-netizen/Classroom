@@ -71,6 +71,9 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.
 		r.With(toggleLimiter.Middleware).Post("/courses/{courseId}/sessions/{sessionId}/toggle-checkin", toggleCheckinHandler(cc))
 		r.Get("/courses/{courseId}/attendance-report", getCourseAttendanceReportHandler(cc, checkinRepo, persister))
 
+		// Cross-course absence dashboard
+		r.Get("/absence-dashboard", getAbsenceDashboardHandler(cc, checkinRepo))
+
 		r.Get("/favourites", getFavouritesHandler(favRepo))
 		r.Post("/favourites", addFavouriteHandler(favRepo))
 		r.Delete("/favourites/{courseId}", removeFavouriteHandler(favRepo))

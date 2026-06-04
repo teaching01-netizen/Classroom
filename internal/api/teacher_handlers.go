@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -355,6 +357,374 @@ func getCourseAttendanceReportHandler(cc *warwick.ClassroomClient, checkinRepo d
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
+		}
+
+		writeJSON(w, http.StatusOK, successResponse(report))
+	}
+}
+
+// getAbsenceDashboardHandler returns a cross-course absence dashboard.
+// It aggregates attendance data across all (or filtered) courses.
+func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.SessionCheckinRepository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if cc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
+			return
+		}
+
+		// Parse filters from query param.
+		filters := domain.DefaultDashboardFilters()
+		if f := r.URL.Query().Get("filters"); f != "" {
+			decoded, err := domain.UnmarshalDashboardFilters([]byte(f))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, errorResponse("invalid filters parameter"))
+				return
+			}
+			filters = decoded
+		}
+
+		// Determine threshold: use filter value or default to 20% (0 = auto).
+		threshold := filters.Threshold
+
+		// Build data source (DB pre-warmed with Warwick live fallback).
+		var dataSource warwick.SessionDataSource
+		if checkinRepo != nil {
+			dataSource = warwick.NewFallbackSessionDataSource(
+				warwick.NewDBSessionDataSource(checkinRepo),
+				warwick.NewLiveSessionDataSource(cc),
+			)
+		} else {
+			dataSource = warwick.NewLiveSessionDataSource(cc)
+		}
+
+		// Fetch all courses from Warwick.
+		allCourses, err := cc.GetCourses()
+		if err != nil {
+			if errors.Is(err, domain.ErrAuthExpired) {
+				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
+				return
+			}
+			if errors.Is(err, domain.ErrPoolExhausted) {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
+				return
+			}
+			if errors.Is(err, domain.ErrAuthConflict) {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
+			return
+		}
+
+		// Filter to requested course IDs if specified.
+		courses := allCourses
+		if len(filters.CourseIds) > 0 {
+			idSet := make(map[string]bool, len(filters.CourseIds))
+			for _, id := range filters.CourseIds {
+				idSet[id] = true
+			}
+			courses = make([]domain.CourseSummary, 0)
+			for _, c := range allCourses {
+				if idSet[c.CourseID] {
+					courses = append(courses, c)
+				}
+			}
+		}
+
+		if len(courses) == 0 {
+			writeJSON(w, http.StatusOK, successResponse(domain.DashboardReport{
+				GeneratedAt: time.Now(),
+				Students:    []domain.StudentAbsence{},
+				TopAtRisk:   []domain.StudentRisk{},
+				Sessions:    []domain.DashboardSessionSummary{},
+			}))
+			return
+		}
+
+		// Compute attendance reports for each course in parallel.
+		type courseResult struct {
+			courseID   string
+			courseName string
+			report     *domain.CourseAttendanceReport
+			err        error
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		defer cancel()
+
+		results := make([]courseResult, len(courses))
+		sem := make(chan struct{}, 3) // bounded concurrency
+
+		for i, course := range courses {
+			sem <- struct{}{}
+			go func(idx int, c domain.CourseSummary) {
+				defer func() { <-sem }()
+
+				detail, err := cc.GetCourseDetail(c.CourseID)
+				if err != nil {
+					slog.Warn("dashboard_course_detail_failed", "course_id", c.CourseID, "error", err)
+					results[idx] = courseResult{courseID: c.CourseID, courseName: c.Name, err: err}
+					return
+				}
+
+				report := warwick.ComputeCourseAttendanceReport(ctx, dataSource, detail, threshold)
+				results[idx] = courseResult{courseID: c.CourseID, courseName: c.Name, report: report}
+			}(i, course)
+		}
+
+		// Drain semaphore.
+		for i := 0; i < cap(sem); i++ {
+			sem <- struct{}{}
+		}
+
+		if ctx.Err() != nil {
+			writeJSON(w, http.StatusGatewayTimeout, errorResponse("dashboard computation timed out"))
+			return
+		}
+
+		// Aggregate across courses.
+		// Track per-student data across courses.
+		type studentAgg struct {
+			name        string
+			nickname    string
+			school      string
+			avatarURL   string
+			attended    int
+			total       int
+			courses     []domain.CourseAbsence
+			perSession  map[string]bool // sessionID → checkedIn
+		}
+
+		studentMap := make(map[string]*studentAgg)
+		allSessions := make(map[string]*domain.DashboardSessionSummary)
+		totalStudents := 0
+		totalAtRisk := 0
+		totalAttended := 0
+		totalSessions := 0
+
+		for _, res := range results {
+			if res.err != nil || res.report == nil {
+				continue
+			}
+
+			courseSessions := make(map[string]bool)
+			for _, sess := range res.report.Sessions {
+				courseSessions[sess.SessionID] = true
+				if _, exists := allSessions[sess.SessionID]; !exists {
+				allSessions[sess.SessionID] = &domain.DashboardSessionSummary{
+					SessionID:     sess.SessionID,
+					SessionNumber: sess.SessionNumber,
+					Name:          sess.Name,
+					CourseID:      res.courseID,
+					CourseName:    res.courseName,
+					Status:        string(sess.Status),
+				}
+				}
+			}
+
+			// Count checked-in per session for session summaries.
+			for _, s := range res.report.Students {
+				for _, ps := range s.PerSession {
+					if sess, ok := allSessions[ps.SessionID]; ok {
+						if ps.CheckedIn {
+							sess.CheckedInCount++
+						}
+					}
+				}
+			}
+
+			for _, s := range res.report.Students {
+				agg, ok := studentMap[s.StudentID]
+				if !ok {
+					agg = &studentAgg{
+						name:      s.Name,
+						nickname:  s.Nickname,
+						school:    s.School,
+						avatarURL: s.AvatarURL,
+						perSession: make(map[string]bool),
+					}
+					studentMap[s.StudentID] = agg
+				}
+
+				agg.attended += s.AttendedSessions
+				agg.total += s.TotalSessions
+				agg.courses = append(agg.courses, domain.CourseAbsence{
+					CourseID:         res.courseID,
+					CourseName:       res.courseName,
+					TotalSessions:    s.TotalSessions,
+					AttendedSessions: s.AttendedSessions,
+					Rate:             s.AttendanceRate,
+					Absences:         s.TotalSessions - s.AttendedSessions,
+					AtRisk:           s.AtRisk,
+				})
+
+				for _, ps := range s.PerSession {
+					agg.perSession[ps.SessionID] = ps.CheckedIn
+				}
+			}
+
+			// Count total students from the first report (approximate).
+			if totalStudents == 0 {
+				totalStudents = len(res.report.Students)
+			} else {
+				// Approximate: max students across courses
+				if len(res.report.Students) > totalStudents {
+					totalStudents = len(res.report.Students)
+				}
+			}
+		}
+
+		// Build session list sorted by course then session number.
+		sessions := make([]domain.DashboardSessionSummary, 0, len(allSessions))
+		for _, s := range allSessions {
+			sessions = append(sessions, *s)
+		}
+		sort.Slice(sessions, func(i, j int) bool {
+			if sessions[i].CourseID != sessions[j].CourseID {
+				return sessions[i].CourseID < sessions[j].CourseID
+			}
+			return sessions[i].SessionNumber < sessions[j].SessionNumber
+		})
+
+		// Set total students per session.
+		for i := range sessions {
+			sessions[i].TotalStudents = totalStudents
+		}
+
+		// Build student absence list.
+		students := make([]domain.StudentAbsence, 0, len(studentMap))
+		studentSet := make(map[string]bool)
+		for _, agg := range studentMap {
+			absences := agg.total - agg.attended
+			var rate float64
+			if agg.total > 0 {
+				rate = float64(agg.attended) / float64(agg.total)
+			}
+
+			// Build per-session checkin status for this student.
+			perSession := make([]domain.SessionCheckin, 0, len(sessions))
+			for _, sess := range sessions {
+				checked, hasData := agg.perSession[sess.SessionID]
+				status := "not_started"
+				if sess.Status == "done" {
+					if hasData {
+						if checked {
+							status = "checked_in"
+						} else {
+							status = "absent"
+						}
+					} else {
+						status = "no_data"
+					}
+				} else if sess.Status == "active" {
+					if hasData {
+						if checked {
+							status = "checked_in"
+						} else {
+							status = "present"
+						}
+					}
+				}
+
+				perSession = append(perSession, domain.SessionCheckin{
+					SessionID:     sess.SessionID,
+					SessionNumber: sess.SessionNumber,
+					SessionName:   sess.Name,
+					SessionStatus: sess.Status,
+					CheckedIn:     checked,
+					Status:        status,
+				})
+			}
+
+			// Apply threshold: at-risk if absences >= threshold.
+			isAtRisk := false
+			if threshold > 0 {
+				isAtRisk = absences >= threshold
+			} else {
+				// Default: 20% of total sessions
+				defaultThreshold := (agg.total + 4) / 5
+				isAtRisk = absences >= defaultThreshold
+			}
+
+			if isAtRisk {
+				totalAtRisk++
+			}
+			totalAttended += agg.attended
+			totalSessions += agg.total
+
+			// Deduplicate students across courses.
+			key := agg.name
+			if studentSet[key] {
+				continue
+			}
+			studentSet[key] = true
+
+			students = append(students, domain.StudentAbsence{
+				StudentID:        "", // no universal student ID across courses
+				Name:             agg.name,
+				Nickname:         agg.nickname,
+				School:           agg.school,
+				AvatarURL:        agg.avatarURL,
+				AttendedSessions: agg.attended,
+				TotalSessions:    agg.total,
+				AttendanceRate:   rate,
+				AtRisk:           isAtRisk,
+				Courses:          agg.courses,
+				PerSession:       perSession,
+			})
+		}
+
+		// Sort students: at-risk first, then by rate asc, then by name.
+		sort.Slice(students, func(i, j int) bool {
+			if students[i].AtRisk != students[j].AtRisk {
+				return students[i].AtRisk
+			}
+			if students[i].AttendanceRate != students[j].AttendanceRate {
+				return students[i].AttendanceRate < students[j].AttendanceRate
+			}
+			return students[i].Name < students[j].Name
+		})
+
+		// Build top-N at-risk students.
+		topAtRisk := make([]domain.StudentRisk, 0)
+		for _, s := range students {
+			if len(topAtRisk) >= 5 {
+				break
+			}
+			if !s.AtRisk {
+				break
+			}
+			courseName := ""
+			if len(s.Courses) > 0 {
+				courseName = s.Courses[0].CourseName
+			}
+			topAtRisk = append(topAtRisk, domain.StudentRisk{
+				StudentID:      s.StudentID,
+				Name:           s.Name,
+				Nickname:       s.Nickname,
+				School:         s.School,
+				AvatarURL:      s.AvatarURL,
+				AttendanceRate: s.AttendanceRate,
+				Absences:       s.TotalSessions - s.AttendedSessions,
+				TotalSessions:  s.TotalSessions,
+				CourseName:     courseName,
+			})
+		}
+
+		var avgRate float64
+		if totalSessions > 0 {
+			avgRate = float64(totalAttended) / float64(totalSessions)
+		}
+
+		report := domain.DashboardReport{
+			GeneratedAt:       time.Now(),
+			TotalStudents:     totalStudents,
+			TotalCourses:      len(courses),
+			AvgAttendanceRate: avgRate,
+			AtRiskCount:       totalAtRisk,
+			TopAtRisk:         topAtRisk,
+			Students:          students,
+			Sessions:          sessions,
 		}
 
 		writeJSON(w, http.StatusOK, successResponse(report))
