@@ -643,6 +643,7 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 		// Aggregate across courses.
 		// Track per-student data across courses.
 		type studentAgg struct {
+			studentID   string
 			name        string
 			nickname    string
 			school      string
@@ -694,13 +695,14 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			for _, s := range res.report.Students {
 				agg, ok := studentMap[s.StudentID]
 				if !ok {
-					agg = &studentAgg{
-						name:      s.Name,
-						nickname:  s.Nickname,
-						school:    s.School,
-						avatarURL: s.AvatarURL,
-						perSession: make(map[string]bool),
-					}
+				agg = &studentAgg{
+					studentID:   s.StudentID,
+					name:        s.Name,
+					nickname:    s.Nickname,
+					school:      s.School,
+					avatarURL:   s.AvatarURL,
+					perSession: make(map[string]bool),
+				}
 					studentMap[s.StudentID] = agg
 				}
 
@@ -747,19 +749,6 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 		// Set total students per session.
 		for i := range sessions {
 			sessions[i].TotalStudents = totalStudents
-		}
-
-		// Enrich with Warwick StudentID from UserGroup profile list.
-		// Graceful degradation: if fetch fails, studentId stays empty.
-		nameToStudentID := make(map[string]string)
-		if profiles, err := cc.FetchStudentProfiles(); err == nil {
-			for _, p := range profiles {
-				if p.StudentID != "" {
-					nameToStudentID[p.FullName] = p.StudentID
-				}
-			}
-		} else {
-			slog.Warn("absence_dashboard_student_profiles_fetch_failed", "error", err)
 		}
 
 		// Build student absence list.
@@ -832,7 +821,7 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			studentSet[key] = true
 
 			students = append(students, domain.StudentAbsence{
-				StudentID:        nameToStudentID[agg.name], // enriched from Warwick UserGroup
+				StudentID:        agg.studentID,
 				Name:             agg.name,
 				Nickname:         agg.nickname,
 				School:           agg.school,
