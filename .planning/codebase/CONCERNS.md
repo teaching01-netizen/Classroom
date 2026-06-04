@@ -1,167 +1,135 @@
 # Codebase Concerns
 
-**Analysis Date:** 2026-06-02
+**Analysis Date:** 2026-06-04
 
 ## Tech Debt
 
-**Hardcoded Warwick UserID in Course Fetch:**
-- Issue: `fetchCourses()` sends a hardcoded `UserID` of `f21992ca-e6d2-424d-a188-90e37018ab38` to Warwick
-- Files: `internal/warwick/classroom_client.go:272`
-- Impact: Breaks multi-user scenarios; any user-specific filtering would be wrong
-- Fix approach: Make configurable via env var or derive from authenticated session
+**Student Identity Across Courses:**
+- Issue: Students are identified by name (`agg.name`) across courses, not by a universal student ID
+- Files: `internal/api/teacher_handlers.go:723-728`
+- Impact: If a student has different names in different courses, they'll be treated as separate students in the absence dashboard
+- Fix approach: Implement a student mapping table or use a consistent identifier from Warwick (StudentID exists but isn't universal)
 
-**Session Date Always `time.Now()`:**
-- Issue: When persisting Warwick session data to DB, `session_date` is always `time.Now()`
-- Files: `internal/warwick/classroom_client.go:662`
-- Impact: Historical session data gets wrong date in `session_checkins` table
-- Fix approach: Extract date from Warwick API response or CourseSummary when available
+**Session Date Assignment:**
+- Issue: Session date is set to `time.Now()` when persisting checkins from Warwick, not the actual session date
+- Files: `internal/warwick/classroom_client.go:696-697`
+- Impact: Session dates in the database may not match actual session dates, affecting date-range filters
+- Fix approach: Extract session date from Warwick API response or course detail
 
-**`avg_attendance_rate` Always Zero in Course List:**
-- Issue: The Warwick `ClassAttendanceSearch` endpoint does not return attendance rate; `CourseSummary.AvgAttendanceRate` is never populated from the API
-- Files: `internal/warwick/classroom_client.go:290-319`, `internal/domain/classroom.go:34`
-- Impact: Frontend shows "— attendance" for all courses in the dashboard; the field is always 0.0
-- Fix approach: Either compute from session data (expensive) or remove from the list view and only show on attendance report
-
-**No Server-Side Authentication:**
-- Issue: The Go server has zero authentication — anyone who can reach port 3000 can manage rooms and toggle check-ins
-- Files: `internal/api/routes.go:41-81`
-- Impact: Security risk in any non-localhost deployment; anyone can toggle student attendance
-- Fix approach: Add auth middleware (API key, session token, or reverse proxy auth)
-
-**`FetchError` Sentinel Comparison Inconsistency:**
-- Issue: Some error checks use `errors.Is(err, domain.ErrAuthExpired)` (pointer identity) while the codebase also creates `&FetchError{Kind: ErrKindAuthExpired}` inline
-- Files: `internal/api/teacher_handlers.go:25-36` vs `internal/warwick/classroom_client.go:153-163`
-- Impact: Inline-created FetchErrors won't match sentinel checks; some error paths may return 500 instead of 401
-- Fix approach: Standardize on `errors.As` with `*FetchError` variable everywhere
+**Report Computation Timeout:**
+- Issue: Attendance report computation can take up to 90 seconds for large courses
+- Files: `internal/api/teacher_handlers.go:354`
+- Impact: User experience degradation; frontend shows loading spinner for extended periods
+- Fix approach: Consider background computation with polling, or pre-compute reports periodically
 
 ## Known Bugs
 
-**CourseDetail.Name Empty on Direct Access:**
-- Symptoms: `GET /api/teacher/courses/:courseId` returns `{"name": ""}` when courses cache is not yet warm
-- Files: `internal/warwick/classroom_client.go:442-495` (fixed in `populateCourseName`)
-- Trigger: First request before DataRefresher completes initial warmup
-- Workaround: `populateCourseName()` reads from cached courses list; if courses cache is cold, name stays empty
+**Course Name Population Race Condition:**
+- Symptoms: CourseDetail may have empty Name field if courses cache hasn't been populated yet
+- Files: `internal/warwick/classroom_client.go:1215-1231`
+- Trigger: Requesting course detail immediately after server startup before courses list is cached
+- Workaround: Retry request after a brief delay
+
+**Stale Cache Serving:**
+- Symptoms: Frontend may display outdated data during cache refresh
+- Files: `internal/warwick/classroom_client.go:1129-1141`
+- Trigger: High traffic causing multiple concurrent cache refreshes
+- Workaround: None - this is by design (stale-while-revalidate pattern)
 
 ## Security Considerations
 
-**No Authentication on API Endpoints:**
-- Risk: Unauthenticated access to all endpoints including toggle-checkin (can modify student attendance)
-- Files: `internal/api/routes.go:41-81`
-- Current mitigation: None
-- Recommendations: Add auth middleware; at minimum, API key or reverse proxy auth
+**Warwick Credentials in Environment:**
+- Risk: Warwick session credentials exposed in environment variables
+- Files: `cmd/server/main.go:41-42`
+- Current mitigation: Credentials loaded from env vars, not hardcoded
+- Recommendations: Use secret management service (Vault, AWS Secrets Manager) for production
 
-**Hardcoded Dev Credentials in docker-compose.yml:**
-- Risk: PostgreSQL credentials (`qruser`/`qrpassword`) are committed in plaintext
-- Files: `docker-compose.yml:9-10`
-- Current mitigation: Only for local development
-- Recommendations: Use `.env` file for docker-compose credentials; document that these are dev-only
-
-**CORS Misconfiguration Risk:**
-- Risk: If `CORS_ORIGIN=*` is set, any origin can make authenticated requests
-- Files: `internal/api/routes.go:83-109`
-- Current mitigation: Origin checking when `CORS_ORIGIN` is set to specific domain
-- Recommendations: Default to same-origin; warn if `*` is used in production
+**Rate Limiting Configuration:**
+- Risk: Insufficient rate limiting could overwhelm Warwick API
+- Files: `internal/api/routes.go:23-25`, `cmd/server/main.go:106`
+- Current mitigation: IP-based rate limiting (5 req/s for courses, 2 req/s for toggles)
+- Recommendations: Add per-user rate limiting if multiple users access the system
 
 ## Performance Bottlenecks
 
-**Course Enrichment Fan-Out:**
-- Problem: `GetCourses()` triggers concurrent `GetCourseDetail()` for every non-finished course to populate session counts
-- Files: `internal/warwick/classroom_client.go:181-211`
-- Cause: Each enrichment call acquires a pool session and makes a Warwick API call; bounded to 5 concurrent but still N API calls
-- Improvement path: Cache course details independently; the DataRefresher already calls GetCourses() periodically which triggers enrichment
+**Course Enrichment on List:**
+- Problem: GetCourses enriches each course with session details, making N API calls
+- Files: `internal/warwick/classroom_client.go:191-221`
+- Cause: Each course requires a separate API call to get session counts
+- Improvement path: Batch session count queries or cache enriched course data longer
 
-**Attendance Report Computation:**
-- Problem: `GetCourseAttendanceReport` fetches every session live from Warwick with 2 concurrent goroutines
-- Files: `internal/warwick/report_client.go:29-251`
-- Cause: Each session requires a pool acquisition + Warwick API call; 90s timeout for large courses
-- Improvement path: Use DB-cached session data when available; only fetch live for sessions not in DB
+**Dashboard Computation:**
+- Problem: Absence dashboard computes reports for all courses in parallel
+- Files: `internal/api/teacher_handlers.go:464-527`
+- Cause: Each course requires fetching course detail + computing attendance report
+- Improvement path: Pre-compute dashboard data periodically, use WebSocket for live updates
 
 ## Fragile Areas
 
-**Session Pool Auth Conflict Detection:**
-- Files: `internal/warwick/session_pool.go:82-120`
-- Why fragile: Heuristic-based — uses session age (< 2min = kick, > 55min = normal expiry) to distinguish admin login from TTL expiry; could misclassify under clock skew or slow responses
-- Safe modification: Test with mock login servers; the existing test suite in `session_pool_test.go` covers basic scenarios
+**Warwick API Integration:**
+- Files: `internal/warwick/classroom_client.go`, `internal/warwick/auth.go`
+- Why fragile: Depends on external Warwick API which may change; session-based auth can expire
+- Safe modification: Add comprehensive error handling for API changes; implement circuit breaker pattern
+- Test coverage: Good coverage in `internal/warwick/*_test.go`
 
-**Room Worker Recovery Loop:**
-- Files: `internal/service/room_manager.go:338-457`
-- Why fragile: Complex state machine with exponential backoff, pool exhaustion retry, auth conflict detection, and context cancellation checks — all within a single 120-line block
-- Safe modification: Add targeted tests for each recovery path; current tests cover happy path only
-
-**Frontend WebSocket Reconnect:**
-- Files: `web/src/hooks/useWebSocket.js:52-58`
-- Why fragile: Fixed 3-second retry delay, max 10 attempts, no exponential backoff; stale room state after reconnect
-- Safe modification: Add backoff and verify state sync after reconnect
+**Session Pool Management:**
+- Files: `internal/warwick/session_pool.go`
+- Why fragile: Complex state machine for session lifecycle; concurrent access patterns
+- Safe modification: Add more logging for pool exhaustion scenarios
+- Test coverage: `internal/warwick/session_pool_test.go` covers main scenarios
 
 ## Scaling Limits
 
-**Session Pool Capacity:**
-- Current capacity: 6 total sessions (2 QR + 2 Teacher + 2 Interactive by default)
-- Limit: All sessions in use → `ErrNoAvailableSessions` → 503 for teachers, retry-with-backoff for room workers
-- Scaling path: Increase `WARWICK_*_SESSIONS` env vars; each additional session requires its own Warwick login
+**Database Connection Pool:**
+- Current capacity: Configurable via `pgxpool` settings
+- Limit: Default pool size may be insufficient for high concurrent dashboard requests
+- Scaling path: Monitor connection pool metrics, increase pool size if needed
 
-**In-Memory Cache:**
-- Current capacity: Unbounded map (no eviction beyond TTL expiry)
-- Limit: Under high cardinality (many sessions), memory grows without bound between GC cycles
-- Scaling path: Add max-size LRU eviction or use external cache (Redis)
-
-**WebSocket Connections:**
-- Current capacity: 500 concurrent (configurable via `WARWICK_MAX_CONCURRENT_WS`)
-- Limit: Each connection holds a goroutine and a channel
-- Scaling path: For >500 concurrent users, use external WebSocket service
+**Memory Cache:**
+- Current capacity: In-memory cache with 30s TTL for courses, 10s for sessions
+- Limit: Cache size grows with number of courses/sessions; no eviction policy
+- Scaling path: Implement LRU eviction or use Redis for distributed caching
 
 ## Dependencies at Risk
 
-**Warwick Humantix API:**
-- Risk: Unofficial/undocumented API — endpoints, response format, and rate limits could change without notice
-- Impact: All course/session/student data and QR code functionality breaks
-- Migration plan: No alternative; the entire application depends on this single external API
+**Warwick External API:**
+- Risk: API endpoints may change without notice
+- Impact: Course fetching, session details, and check-in toggles would break
+- Migration plan: Monitor Warwick API changes; implement adapter pattern for easy swapping
 
-**`nhooyr.io/websocket`:**
-- Risk: Library is maintained but less popular than `gorilla/websocket`; API is stable
-- Impact: WebSocket functionality breaks if library becomes unmaintained
-- Migration plan: Switch to `gorilla/websocket` (well-established alternative)
+**PostgreSQL:**
+- Risk: Database schema changes require migrations
+- Impact: Data access layer would break
+- Migration plan: Use migration tool (already in place); maintain backward compatibility
 
 ## Missing Critical Features
 
-**No Authentication:**
-- Problem: No user auth means the app is wide open on any non-localhost deployment
-- Blocks: Any production use beyond single-user localhost
+**Student Search Across Courses:**
+- Problem: No way to search for a student across all courses
+- Blocks: Teacher cannot quickly find a student's attendance across multiple courses
 
-**No Error Boundaries on Backend:**
-- Problem: Panic recovery exists in room workers and refresher, but not in HTTP handlers
-- Blocks: A panic in a handler crashes the entire server process
+**Bulk Operations:**
+- Problem: Cannot toggle check-in status for multiple students at once
+- Blocks: Teachers must click each student individually for large classes
 
-**No Health Check for Warwick Connectivity:**
-- Problem: `/api` health endpoint reports cache warmth but not Warwick session validity
-- Blocks: Monitoring/alerting on Warwick auth expiry
+**Historical Data Retention:**
+- Problem: No data retention policy; session_checkins table grows indefinitely
+- Blocks: Database size will grow unbounded over time
 
 ## Test Coverage Gaps
 
-**Room Worker Recovery Paths:**
-- What's not tested: Auth conflict recovery, pool exhaustion retry, invalid payload handling, context cancellation during recovery
-- Files: `internal/service/room_manager.go:260-501`
-- Risk: Regression in error handling paths goes unnoticed
-- Priority: High
-
-**HTTP Handler Error Mapping:**
-- What's not tested: Handler-level error → HTTP status code mapping for all Warwick error types
-- Files: `internal/api/teacher_handlers.go:17-214`
-- Risk: Wrong HTTP status returned for auth expiry, pool exhaustion, etc.
+**End-to-End Course Flow:**
+- What's not tested: Full course lifecycle from creation to attendance report
+- Files: `internal/api/teacher_handlers.go`
+- Risk: Integration issues between Warwick API, database, and cache layers
 - Priority: Medium
 
-**Frontend Hook Integration:**
-- What's not tested: Full fetch → store → render cycle for useCourses, useSessions, useCheckins
-- Files: `web/src/hooks/useCourses.js`, `web/src/hooks/useCheckins.js`, `web/src/hooks/useSessions.js`
-- Risk: Hook bugs only caught in manual testing
-- Priority: Medium
-
-**DataRefresher Background Loop:**
-- What's not tested: Long-running refresh loop behavior, panic recovery, interval accuracy
-- Files: `internal/service/data_refresher.go:32-47`
-- Risk: Refresher silently stops working
+**Dashboard Edge Cases:**
+- What's not tested: Dashboard with 0 courses, courses with 0 sessions, all students at risk
+- Files: `internal/api/teacher_handlers.go:367-810`
+- Risk: Unexpected behavior in edge cases
 - Priority: Low
 
 ---
 
-*Concerns audit: 2026-06-02*
+*Concerns audit: 2026-06-04*

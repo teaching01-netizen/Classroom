@@ -366,6 +366,96 @@ func getCourseAttendanceReportHandler(cc *warwick.ClassroomClient, checkinRepo d
 
 // getAbsenceDashboardHandler returns a cross-course absence dashboard.
 // It aggregates attendance data across all (or filtered) courses.
+// getBatchAttendanceHandler returns attendance reports for multiple courses in a single request.
+// POST /api/teacher/courses/attendance-batch
+// Body: { "course_ids": ["CS101", "CS102"], "threshold": 0 }
+// Response: { "courses": { "CS101": <CourseAttendanceReport>, "CS102": <CourseAttendanceReport> } }
+func getBatchAttendanceHandler(cc *warwick.ClassroomClient, checkinRepo db.SessionCheckinRepository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if cc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
+			return
+		}
+
+		var req struct {
+			CourseIds  []string `json:"course_ids"`
+			Threshold  int      `json:"threshold"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))
+			return
+		}
+		if len(req.CourseIds) == 0 {
+			writeJSON(w, http.StatusBadRequest, errorResponse("course_ids is required"))
+			return
+		}
+
+		// Build data source (DB pre-warmed with Warwick live fallback).
+		var dataSource warwick.SessionDataSource
+		if checkinRepo != nil {
+			dataSource = warwick.NewFallbackSessionDataSource(
+				warwick.NewDBSessionDataSource(checkinRepo),
+				warwick.NewLiveSessionDataSource(cc),
+			)
+		} else {
+			dataSource = warwick.NewLiveSessionDataSource(cc)
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		defer cancel()
+
+		type courseResult struct {
+			report *domain.CourseAttendanceReport
+			err    error
+		}
+
+		results := make(map[string]courseResult, len(req.CourseIds))
+		sem := make(chan struct{}, 2) // match teacher tier capacity
+
+		for _, courseID := range req.CourseIds {
+			sem <- struct{}{}
+			go func(cid string) {
+				defer func() { <-sem }()
+
+				detail, err := cc.GetCourseDetail(cid)
+				if err != nil {
+					results[cid] = courseResult{err: err}
+					return
+				}
+
+				report := warwick.ComputeCourseAttendanceReport(ctx, dataSource, detail, req.Threshold)
+				results[cid] = courseResult{report: report}
+			}(courseID)
+		}
+
+		// Drain semaphore.
+		for i := 0; i < cap(sem); i++ {
+			sem <- struct{}{}
+		}
+
+		if ctx.Err() != nil {
+			writeJSON(w, http.StatusGatewayTimeout, errorResponse("batch computation timed out"))
+			return
+		}
+
+		// Build response: map course_id → report.
+		courses := make(map[string]interface{}, len(results))
+		for cid, res := range results {
+			if res.err != nil {
+				courses[cid] = map[string]interface{}{
+					"error": res.err.Error(),
+				}
+			} else {
+				courses[cid] = res.report
+			}
+		}
+
+		writeJSON(w, http.StatusOK, successResponse(map[string]interface{}{
+			"courses": courses,
+		}))
+	}
+}
+
 func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.SessionCheckinRepository) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()

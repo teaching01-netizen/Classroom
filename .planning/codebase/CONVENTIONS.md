@@ -1,142 +1,180 @@
 # Coding Conventions
 
-**Analysis Date:** 2026-06-02
+**Analysis Date:** 2026-06-04
 
 ## Naming Patterns
 
-**Go Files:**
-- `snake_case.go` — e.g., `session_checkin_repository.go`, `classroom_client.go`, `room_manager.go`
-- Test files co-located: `*_test.go` in same package
+**Files:**
+- Go: snake_case.go (e.g., `classroom_client.go`, `session_checkin_repository.go`)
+- React: PascalCase.jsx (e.g., `CourseCard.jsx`, `AttendanceTable.jsx`)
+- Tests: `*_test.go` (Go), `*.test.js` or `*.test.jsx` (React)
 
-**Frontend Files:**
-- Hooks: `use<PascalCase>.js` — e.g., `useCourses.js`, `useCheckins.js`, `useWebSocket.js`
-- Stores: `use<PascalCase>Store.js` — e.g., `useCourseStore.js`, `useSessionStore.js`
-- Components: `PascalCase.jsx` — e.g., `CourseCard.jsx`, `StatsBar.jsx`, `QRModal.jsx`
-- Pages: `PascalCase.jsx` — e.g., `CourseDashboard.jsx`, `SessionList.jsx`, `CheckinDetail.jsx`
+**Functions:**
+- Go: PascalCase for exported, camelCase for unexported (e.g., `GetCourses`, `fetchCourses`)
+- React: camelCase for hooks and functions (e.g., `useCourses`, `fetchSessions`)
 
-**Go Functions:**
-- Exported: `PascalCase` — e.g., `GetCourses()`, `FetchQR()`, `NewSessionPool()`
-- Unexported: `camelCase` — e.g., `fetchCourses()`, `doLoginLocked()`, `scanRoom()`
-- Handler factories: `<verb><Noun>Handler` — e.g., `getCoursesHandler()`, `getRoomHandler()`
-- Constructor pattern: `New<Type>` — e.g., `NewClassroomClient()`, `NewPgRoomRepository()`
+**Variables:**
+- Go: camelCase (e.g., `courseID`, `sessionDetail`)
+- React: camelCase (e.g., `searchQuery`, `statusFilter`)
 
-**Go Types:**
-- Exported: `PascalCase` — e.g., `ClassroomClient`, `RoomStatus`, `CourseSummary`
-- Interfaces: Method-name-based — e.g., `RoomRepository`, `QrClient`, `SessionCheckinRepository`
-- Sentinel errors: `Err<Description>` — e.g., `ErrAuthExpired`, `ErrRateLimited`
-
-**JSON Fields:**
-- Backend API: `snake_case` — e.g., `course_id`, `total_sessions`, `enrolled_count`
-- Frontend (attendance report): `camelCase` — e.g., `courseId`, `sessionId`, `attendedSessions`, `atRisk`
+**Types:**
+- Go: PascalCase (e.g., `CourseSummary`, `SessionDetail`, `StudentCheckin`)
+- React: PascalCase for components (e.g., `CourseCard`, `AttendanceTable`)
 
 ## Code Style
 
-**Go Formatting:**
-- Tool: `gofmt` (standard)
-- No custom `.golangci-lint` or linter config detected
-
-**Frontend Formatting:**
-- No `.prettierrc` or formatter config detected
-- No ESLint config beyond `package.json` plugin declarations
+**Formatting:**
+- Go: `gofmt` (standard Go formatting)
+- React: Prettier (implied by consistent formatting)
 
 **Linting:**
-- Go: No linter config (no `.golangci.yml`)
-- Frontend: ESLint 8 with `eslint-plugin-react`, `eslint-plugin-react-hooks`, `eslint-plugin-react-refresh`
+- Go: Standard Go vet/lint
+- React: ESLint (implied by test structure)
 
 ## Import Organization
 
-**Go Import Order:**
+**Go:**
 1. Standard library
 2. Third-party packages
-3. Internal packages (`qr-command-center/internal/...`)
+3. Internal packages
 
-Example from `cmd/server/main.go`:
 ```go
 import (
     "context"
-    "log/slog"
-    // ... stdlib
-
-    "github.com/joho/godotenv"
-    "golang.org/x/time/rate"
-    // ... third-party
-
-    "qr-command-center/internal/api"
-    "qr-command-center/internal/cache"
-    // ... internal
+    "fmt"
+    
+    "github.com/go-chi/chi/v5"
+    "github.com/jackc/pgx/v5/pgxpool"
+    
+    "qr-command-center/internal/domain"
 )
 ```
 
-**Frontend Import Order:**
-1. React/React-DOM
-2. Third-party (react-router-dom, zustand)
-3. Local hooks/stores
-4. Local components
-5. Local styles
+**React:**
+1. React and React Router
+2. Third-party libraries
+3. Internal components/hooks/stores
+
+```javascript
+import React, { useState, useEffect } from 'react';
+import { useParams, Link } from 'react-router-dom';
+
+import { useCourseAttendance } from '../hooks/useCourseAttendance';
+import { AttendanceTable } from '../components/AttendanceTable';
+```
 
 **Path Aliases:**
-- None — all imports use relative paths (`../hooks/useCourses`, `../store/useCourseStore`)
+- None detected (relative imports used)
 
 ## Error Handling
 
 **Patterns:**
-- Handler layer: Check domain sentinel errors, map to HTTP status codes
-  ```go
-  if errors.Is(err, domain.ErrAuthExpired) {
-      writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
-      return
-  }
-  ```
-- Service/client layer: Return domain error types (`*FetchError` with `Kind` enum)
-- Panic recovery: `defer recover()` in goroutines (room workers, data refresher)
-- Frontend: `try/catch` with error state in hooks; `ErrorBoundary` component for render errors
+- Go: Return error as last value, wrap with context
+- React: Try-catch with state management
+
+```go
+// Go pattern
+courses, err := cc.GetCourses()
+if err != nil {
+    if errors.Is(err, domain.ErrAuthExpired) {
+        writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
+        return
+    }
+    writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
+    return
+}
+```
+
+```javascript
+// React pattern
+try {
+    const res = await fetch('/api/teacher/courses');
+    const result = await res.json();
+    if (result.success) {
+        setCourses(result.data.courses);
+    } else {
+        setError(result.error || 'Failed to fetch courses');
+    }
+} catch (err) {
+    setError(err.message || 'Network error');
+}
+```
 
 ## Logging
 
-**Framework:** `log/slog` (JSON handler)
+**Framework:** `slog` (structured logging)
 
 **Patterns:**
-- Info: Startup events, cache refresh completion, room state changes
-- Warn: Pool failures, cache refresh failures, slow subscribers
-- Debug: Individual API call failures, cache staleness, DB query failures
-- Error: Panics, failed DB writes, server errors
-- Always structured: `slog.Warn("msg", "key", value)`
+- Debug: Detailed technical information
+- Info: Significant events (startup, requests, completions)
+- Warn: Recoverable issues (cache misses, pool exhaustion)
+- Error: Unrecoverable failures (database errors, auth failures)
+
+```go
+slog.Info("warwick_courses_fetch",
+    "user_id", userID,
+    "http_status", resp.StatusCode,
+    "records_total", data.RecordsTotal,
+)
+```
 
 ## Comments
 
 **When to Comment:**
-- Package-level: Brief description of purpose (e.g., `// CachedSession wraps a SessionDetail...`)
-- Function-level: Doc comments on exported functions, especially complex ones
-- Inline: Explanatory comments for non-obvious logic (e.g., `// Skip straight to max backoff (15 min) to avoid ping-pong`)
+- Complex business logic (e.g., cache coherence patterns)
+- Non-obvious workarounds (e.g., Warwick API quirks)
+- TODO/FIXME for known issues
 
 **JSDoc/TSDoc:**
-- Not used — frontend has no JSDoc annotations
-- No TSDoc patterns (plain JSX, not TypeScript)
+- Go: Package and function comments (standard Go doc)
+- React: No JSDoc detected
 
 ## Function Design
 
 **Size:**
-- Handler functions: 20-40 lines (request parsing → business logic → response)
-- Client methods: 50-100 lines (cache check → pool acquire → API call → cache set)
-- Room worker: 400+ lines (complex state machine — this is an exception)
+- Go: Functions tend to be short (20-50 lines)
+- React: Components are focused (100-200 lines typical)
 
 **Parameters:**
-- Go: Explicit parameters, no options pattern (except variadic for optional args like `checkinRepo ...db.SessionCheckinRepository`)
-- Frontend: Single config object for hooks (e.g., `useCourseAttendance(courseId, { threshold = 0.8 })`)
+- Go: Context as first parameter for async operations
+- React: Destructured props, options objects for hooks
 
 **Return Values:**
-- Go: `(result, error)` tuple for all fallible operations
-- Frontend: Hook returns `{ data, isLoading, error, refetch }` pattern
+- Go: Multiple return values (value, error)
+- React: Arrays (for hooks) or JSX (for components)
 
 ## Module Design
 
 **Exports:**
-- Go: Exported types/functions via PascalCase; unexported for internal implementation
-- Frontend: Named exports for hooks/stores (`export const useCourses = ...`); default export for App
+- Go: Exported types/functions start with uppercase
+- React: Named exports for components, default export for pages
 
 **Barrel Files:**
-- None — no index.js re-exports
+- Not detected (explicit imports used)
+
+## React Patterns
+
+**Hooks:**
+- Custom hooks for data fetching (e.g., `useCourses`, `useSessions`)
+- State management via Zustand stores
+- Abort controllers for cleanup
+
+**Components:**
+- Functional components only (no class components)
+- Inline styles (no CSS modules or styled-components)
+- Props drilling avoided via stores
+
+## Go Patterns
+
+**Repository Pattern:**
+- Interface + PostgreSQL implementation
+- Example: `RoomRepository` + `PgRoomRepository`
+
+**Client Pattern:**
+- HTTP client with retry logic
+- Session pool for connection management
+- Cache-aside pattern for performance
 
 ---
 
-*Convention analysis: 2026-06-02*
+*Convention analysis: 2026-06-04*

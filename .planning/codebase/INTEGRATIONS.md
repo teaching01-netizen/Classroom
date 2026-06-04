@@ -1,104 +1,138 @@
 # External Integrations
 
-**Analysis Date:** 2026-06-02
+**Analysis Date:** 2026-06-04
 
 ## APIs & External Services
 
-**Warwick Humantix (External Attendance Platform):**
-- Purpose: Primary data source — courses, sessions, student check-ins, QR codes
+**Warwick HumanTix:**
+- Service: External attendance management system
 - Base URL: `https://warwick.humantix.cloud`
-- SDK/Client: Custom Go client (`internal/warwick/classroom_client.go`, `internal/warwick/client.go`)
-- Auth: ASP.NET_SessionId cookie obtained via email/password form login to `/admin/`
-- Protocol: DataTables server-side protocol — form-urlencoded POST requests
-- Rate limiting: Server-side 2 req/s (configurable `rate.Limiter` at `cmd/server/main.go:100`)
-- Endpoints consumed:
-  - `POST /admin/api/ClassAttendanceSearch` — list all courses
-  - `POST /admin/api/ClassAttendanceDetailSearch` — course sessions (by CouseID)
-  - `POST /admin/api/ClassAttendanceStudentCheckInSearch` — session student check-ins (by CourseCampaignID)
-  - `POST /admin/ClassAttendance/ToggleCheckin` — toggle student check-in
-  - `POST /admin/ClassAttendance/GetQRCode` — fetch QR code for room
-- Implementation: `internal/warwick/classroom_client.go` (1047 lines), `internal/warwick/client.go` (176 lines)
+- Endpoints Used:
+  - `POST /admin/api/ClassAttendanceSearch` - List courses
+  - `POST /admin/api/ClassAttendanceDetailSearch` - Course sessions
+  - `POST /admin/api/ClassAttendanceStudentCheckInSearch` - Session students
+  - `POST /admin/ClassAttendance/ToggleCheckin` - Toggle student check-in
+- SDK/Client: Custom implementation (`internal/warwick/classroom_client.go`)
+- Auth: Session cookies (`ASP.NET_SessionId`)
+- Session Management: Pool-based with traffic tiers (`internal/warwick/session_pool.go`)
 
 ## Data Storage
 
 **Databases:**
-- PostgreSQL 16 (via pgxpool)
-  - Connection: `DATABASE_URL` env var
-  - Client: `pgxpool.Pool` (pgx v5.9.2, SimpleProtocol mode for Supabase pooler compat)
-  - Connection pool: 5-25 connections, 30min max lifetime, 5min idle timeout (`internal/db/db.go:28-31`)
-  - Migrations: Embedded via `go:embed`, runner via `golang-migrate/v4`
+- PostgreSQL
+  - Connection: `DATABASE_URL` environment variable
+  - Client: pgx/v5 (`github.com/jackc/pgx/v5`)
+  - Connection Pool: `pgxpool` for concurrent access
+  - Migrations: `internal/db/migrations/` (6 migrations)
 
-- **Tables:**
-  - `rooms` — QR check-in room state (room_id, class_id, name, status enum, qr_url, timestamps)
-  - `teacher_favourites` — Pinned courses (course_id PK, created_at)
-  - `session_checkins` — Student check-in state cache (session_id + student_id composite PK, checked_in, toggled_at, refreshed_at, session_date)
+**Tables:**
+- `rooms` - QR code rooms
+- `session_checkins` - Student check-ins per session
+- `attendance_reports` - Cached computed reports (JSONB)
+- `saved_dashboard_views` - Dashboard filter configurations
+- `teacher_favourites` - Pinned courses
 
 **File Storage:**
-- Local filesystem only (no S3/blob storage)
+- Local filesystem only (no cloud storage)
 
 **Caching:**
-- In-memory TTL cache (`internal/cache/cache.go`) — key-value with stale-read support
-  - Used for: courses list (30s TTL), course details (30s TTL), session details (10s TTL), attendance reports (30s TTL)
-  - Shared between ClassroomClient, QRClient, and DataRefresher
-  - No distributed cache (Redis/Memcached)
+- In-memory TTL cache (`internal/cache/cache.go`)
+- Cache keys: `courses`, `course:{id}`, `session:{id}`, `report:{id}`
+- TTLs: 30s for courses/reports, 10s for sessions
+- Stale-while-revalidate pattern for background refresh
 
 ## Authentication & Identity
 
 **Auth Provider:**
-- None (the Go server itself has no user authentication)
-- Warwick session auth: Email/password login to Humantix admin panel
-  - Credentials: `WARWICK_EMAIL` / `WARWICK_PASSWORD` env vars
-  - Session management: Pool-based with per-session independent cookies
-  - Auth conflict detection: If session fails when < 2min old → human admin kicked us → exponential backoff
-  - Session TTL: ~55 minutes (staggered refresh)
+- Warwick Session-based Authentication
+- Implementation: Cookie-based sessions (`ASP.NET_SessionId`)
+- Session Pool: Isolated sessions for different traffic tiers
+  - QR tier: QR code generation
+  - Teacher tier: Course/session data fetching
+  - Interactive tier: Check-in toggles
+  - Pre-warm tier: Background data refresh
+
+**User Identification:**
+- Warwick UserID: `WARWICK_USER_ID` environment variable
+- Auto-detection: Extracts from Warwick admin page JavaScript (`internal/warwick/classroom_client.go:989-990`)
 
 ## Monitoring & Observability
 
 **Error Tracking:**
-- None (no Sentry, Datadog, etc.)
+- Structured JSON logging via `slog` (`cmd/server/main.go:28-30`)
+- Log levels: Debug, Info, Warn, Error
 
-**Logs:**
-- `log/slog` with JSON handler at Debug level → stdout
-- Structured logging with key-value pairs (e.g., `slog.Warn("cache_refresh_failed", "error", err)`)
+**Metrics:**
+- Prometheus metrics (`internal/metrics/metrics.go`)
+- Metrics endpoint: `GET /metrics`
+- Tracked: Request duration, cache hits, report computation time, queue depth
 
 ## CI/CD & Deployment
 
 **Hosting:**
-- Railway (via `railway.json`)
-- Docker (multi-stage build: Node → Go → Alpine)
+- Docker container
+- Railway (based on `railway.json`)
 
 **CI Pipeline:**
-- None detected (no `.github/workflows/`, no CI config files)
+- Not detected in codebase
+
+**Build Process:**
+- Frontend: `npm run build` in `web/` directory
+- Backend: `go build` in project root
+- Docker: `Dockerfile` for containerization
 
 ## Environment Configuration
 
 **Required env vars:**
-- `DATABASE_URL` — PostgreSQL connection string (server exits if missing)
-- `WARWICK_EMAIL` — Warwick admin login email
-- `WARWICK_PASSWORD` — Warwick admin login password
+- `DATABASE_URL` - PostgreSQL connection string
+- `WARWICK_EMAIL` - Warwick login email
+- `WARWICK_PASSWORD` - Warwick login password
+- `WARWICK_USER_ID` - Warwick user ID (optional, auto-detected)
+- `PORT` or `SERVER_ADDR` - Server listen port
+- `CORS_ORIGIN` - Allowed CORS origin
 
 **Optional env vars:**
-- `PORT` / `SERVER_ADDR` — Listen address (default: :3000)
-- `WARWICK_CACHE_INTERVAL` — Background refresh interval (default: 30s)
-- `WARWICK_QR_SESSIONS` / `WARWICK_TEACHER_SESSIONS` / `WARWICK_INTERACTIVE_SESSIONS` — Pool tier sizing
-- `WARWICK_CONNS_PER_HOST` — HTTP transport limit (default: 50)
-- `WARWICK_MAX_CONCURRENT_WS` — WebSocket limit (default: 500)
-- `CORS_ORIGIN` — Allowed CORS origin
-- `VITE_WS_URL` — Frontend WebSocket URL
+- `WARWICK_QR_SESSIONS` - QR session pool size (default: 2)
+- `WARWICK_TEACHER_SESSIONS` - Teacher session pool size (default: 2)
+- `WARWICK_INTERACTIVE_SESSIONS` - Interactive session pool size (default: 2)
+- `WARWICK_PREWARM_SESSIONS` - Pre-warm session pool size (default: 1)
+- `WARWICK_CONNS_PER_HOST` - Max connections per host (default: 50)
+- `WARWICK_CACHE_INTERVAL` - Cache refresh interval (default: 30s)
+- `WARWICK_PREWARM_INTERVAL` - Pre-warm refresh interval (default: 20s)
+- `WARWICK_MAX_CONCURRENT_WS` - Max WebSocket connections (default: 500)
 
 **Secrets location:**
-- `.env` file (gitignored, local development)
-- Railway environment variables (production)
-- `docker-compose.yml` contains hardcoded dev DB credentials (`qruser`/`qrpassword`)
+- Environment variables (not in code)
+- `.env` file for local development (not committed)
 
 ## Webhooks & Callbacks
 
 **Incoming:**
-- None
+- None detected
 
 **Outgoing:**
-- None (polling-based architecture — no webhooks to Warwick)
+- Warwick API calls (as described above)
+
+## Data Flow Patterns
+
+**Course Data:**
+1. Frontend requests courses via API
+2. Backend fetches from Warwick API (with cache)
+3. Response cached for 30s
+4. Stale data served with async refresh
+
+**Session Data:**
+1. Frontend requests session students
+2. Backend checks DB pre-warmed data first
+3. Falls back to live Warwick API if DB empty
+4. Data persisted to DB for future requests
+
+**Attendance Reports:**
+1. Frontend requests report for course
+2. Backend computes report using DB/live data
+3. Report cached for 30s
+4. Report persisted to DB asynchronously (non-blocking)
 
 ---
 
-*Integration audit: 2026-06-02*
+*Integration audit: 2026-06-04*

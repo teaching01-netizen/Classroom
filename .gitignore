@@ -1,5 +1,7 @@
 # secrets
 .env
+.env.*
+!.env.example
 
 # go build output
 server
@@ -8,10 +10,33 @@ server
 target/
 
 # js deps
+node_modules/
 web/node_modules/
 
 # vite build output
 web/dist/
 
+# web env files
+web/.env.local
+web/.env.*.local
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# temp files
+*.tmp
+*.temp
+*~
+
 # os metadata
 .DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

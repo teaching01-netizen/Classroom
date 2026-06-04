@@ -70,6 +70,7 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.
 		r.Get("/courses/{courseId}/sessions/{sessionId}", getSessionDetailHandler(cc))
 		r.With(toggleLimiter.Middleware).Post("/courses/{courseId}/sessions/{sessionId}/toggle-checkin", toggleCheckinHandler(cc))
 		r.Get("/courses/{courseId}/attendance-report", getCourseAttendanceReportHandler(cc, checkinRepo, persister))
+		r.Post("/courses/attendance-batch", getBatchAttendanceHandler(cc, checkinRepo))
 
 		// Cross-course absence dashboard
 		r.Get("/absence-dashboard", getAbsenceDashboardHandler(cc, checkinRepo))
