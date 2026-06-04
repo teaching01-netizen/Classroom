@@ -50,7 +50,11 @@ export function AbsenceDashboard() {
   }, [loadDashboard, filters]);
 
   return (
-    <div style={{ padding: 'var(--space-8, 32px)' }}>
+    <div style={{
+      maxWidth: '960px',
+      margin: '0 auto',
+      padding: 'var(--space-8, 32px)',
+    }}>
       <div style={{
         display: 'flex',
         alignItems: 'center',
