@@ -828,13 +828,8 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			}
 			studentSet[key] = true
 
-			studentID := guidToStudentID[agg.studentGUID]
-			if len(students) == 0 {
-				slog.Info("absence_dashboard_student_sample", "name", agg.name, "guid", agg.studentGUID, "studentID", studentID, "has_mapping", studentID != "")
-			}
-
 			students = append(students, domain.StudentAbsence{
-				StudentID:        studentID,
+				StudentID:        guidToStudentID[agg.studentGUID],
 				Name:             agg.name,
 				Nickname:         agg.nickname,
 				School:           agg.school,

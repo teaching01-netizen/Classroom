@@ -1282,7 +1282,13 @@ func (c *ClassroomClient) fetchStudentProfilesWithPool() ([]domain.StudentProfil
 }
 
 func (c *ClassroomClient) fetchStudentProfiles(cookie string) ([]domain.StudentProfile, error) {
-	body := EncodeDataTablesBody(DefaultDataTablesRequest([]string{"StudentID", "StudentGuid", "FullName", "School"}), map[string]string{
+	const pageSize = 500
+
+	// First request to get total count.
+	req := DefaultDataTablesRequest([]string{"StudentID", "StudentGuid", "FullName", "School"})
+	req.Start = 0
+	req.Length = pageSize
+	body := EncodeDataTablesBody(req, map[string]string{
 		"keyword":  "",
 		"IsActive": "",
 	})
@@ -1298,42 +1304,75 @@ func (c *ClassroomClient) fetchStudentProfiles(cookie string) ([]domain.StudentP
 	}
 
 	limited := io.LimitReader(resp.Body, maxBodySize)
-	var data UserGroupSearchResponse
-	if err := json.NewDecoder(limited).Decode(&data); err != nil {
+	var firstPage UserGroupSearchResponse
+	if err := json.NewDecoder(limited).Decode(&firstPage); err != nil {
 		return nil, domain.NewInvalidPayloadError(fmt.Sprintf("decode UserGroupSearch: %v", err))
 	}
 
-	slog.Debug("warwick_student_profiles_fetch",
+	total := firstPage.RecordsTotal
+	slog.Info("warwick_student_profiles_fetch",
 		"http_status", resp.StatusCode,
-		"records_total", data.RecordsTotal,
-		"records_filtered", data.RecordsFiltered,
-		"data_count", len(data.Data),
+		"records_total", total,
+		"data_count", len(firstPage.Data),
 	)
 
-	if len(data.Data) > 0 {
-		slog.Info("warwick_student_profiles_sample",
-			"first_id", data.Data[0].StudentID,
-			"first_guid", data.Data[0].StudentGuid,
-			"first_name", data.Data[0].FullName,
-		)
-	}
-
-	if len(data.Data) == 0 {
+	if len(firstPage.Data) == 0 {
 		slog.Warn("warwick_student_profiles_empty",
 			"hint", "UserGroupSearch returned 0 students; student IDs will not be available",
 		)
+		return nil, nil
 	}
 
-	profiles := make([]domain.StudentProfile, 0, len(data.Data))
-	for _, row := range data.Data {
-		profiles = append(profiles, domain.StudentProfile{
+	allProfiles := make([]domain.StudentProfile, 0, total)
+	for _, row := range firstPage.Data {
+		allProfiles = append(allProfiles, domain.StudentProfile{
 			StudentID:   row.StudentID,
 			StudentGuid: row.StudentGuid,
 			FullName:    row.FullName,
 			School:      row.School,
 		})
 	}
-	return profiles, nil
+
+	// Fetch remaining pages if there are more results.
+	for start := pageSize; start < total; start += pageSize {
+		req.Start = start
+		req.Length = pageSize
+		pageBody := EncodeDataTablesBody(req, map[string]string{
+			"keyword":  "",
+			"IsActive": "",
+		})
+
+		pageResp, err := c.doRequest("POST", "/admin/api/UserGroupSearch", cookie, strings.NewReader(pageBody))
+		if err != nil {
+			slog.Warn("warwick_student_profiles_page_failed", "start", start, "error", err)
+			break
+		}
+
+		limited := io.LimitReader(pageResp.Body, maxBodySize)
+		var page UserGroupSearchResponse
+		if err := json.NewDecoder(limited).Decode(&page); err != nil {
+			pageResp.Body.Close()
+			slog.Warn("warwick_student_profiles_page_decode_failed", "start", start, "error", err)
+			break
+		}
+		pageResp.Body.Close()
+
+		for _, row := range page.Data {
+			allProfiles = append(allProfiles, domain.StudentProfile{
+				StudentID:   row.StudentID,
+				StudentGuid: row.StudentGuid,
+				FullName:    row.FullName,
+				School:      row.School,
+			})
+		}
+
+		if len(page.Data) == 0 {
+			break
+		}
+	}
+
+	slog.Info("warwick_student_profiles_fetched_all", "total_profiles", len(allProfiles))
+	return allProfiles, nil
 }
 
 // populateCourseName fills in the empty Name field of a CourseDetail by

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -463,4 +464,77 @@ func TestFetchStudentProfiles_Empty(t *testing.T) {
 	profiles, err := client.FetchStudentProfiles()
 	require.NoError(t, err)
 	assert.Empty(t, profiles)
+}
+
+func TestFetchStudentProfiles_Pagination(t *testing.T) {
+	mc := cache.New()
+
+	var requestCount int
+	var requestedStarts []int
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "UserGroupSearch") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		r.ParseForm()
+		start, _ := strconv.Atoi(r.FormValue("start"))
+		requestedStarts = append(requestedStarts, start)
+		requestCount++
+
+		w.Header().Set("Content-Type", "application/json")
+
+		// Total is 1200, page size is 500, so we need 3 requests: start=0 (500), start=500 (500), start=1000 (200).
+		switch start {
+		case 0:
+			w.Write([]byte(`{
+				"draw": 1,
+				"recordsTotal": 1200,
+				"recordsFiltered": 1200,
+				"data": [
+					{"StudentID": "STU001", "StudentGuid": "guid-001", "FullName": "Student 1", "School": "A"},
+					{"StudentID": "STU002", "StudentGuid": "guid-002", "FullName": "Student 2", "School": "B"}
+				]
+			}`))
+		case 500:
+			w.Write([]byte(`{
+				"draw": 1,
+				"recordsTotal": 1200,
+				"recordsFiltered": 1200,
+				"data": [
+					{"StudentID": "STU501", "StudentGuid": "guid-501", "FullName": "Student 501", "School": "A"},
+					{"StudentID": "STU502", "StudentGuid": "guid-502", "FullName": "Student 502", "School": "B"}
+				]
+			}`))
+		case 1000:
+			w.Write([]byte(`{
+				"draw": 1,
+				"recordsTotal": 1200,
+				"recordsFiltered": 1200,
+				"data": [
+					{"StudentID": "STU1001", "StudentGuid": "guid-1001", "FullName": "Student 1001", "School": "A"}
+				]
+			}`))
+		}
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	profiles, err := client.FetchStudentProfiles()
+	require.NoError(t, err)
+	assert.Len(t, profiles, 5, "should fetch all 5 profiles across 3 pages")
+	assert.Equal(t, "STU001", profiles[0].StudentID)
+	assert.Equal(t, "STU002", profiles[1].StudentID)
+	assert.Equal(t, "STU501", profiles[2].StudentID)
+	assert.Equal(t, "STU502", profiles[3].StudentID)
+	assert.Equal(t, "STU1001", profiles[4].StudentID)
+	assert.Equal(t, 3, requestCount, "should make exactly 3 requests")
+	assert.Equal(t, []int{0, 500, 1000}, requestedStarts, "should request starts 0, 500, 1000")
 }
