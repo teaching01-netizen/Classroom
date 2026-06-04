@@ -87,6 +87,12 @@ func (p *ReportPersister) persist(job persistJob) {
 		return
 	}
 
+	if !json.Valid(payload) {
+		slog.Warn("report_persister_invalid_json",
+			"course_id", job.CourseID, "payload_len", len(payload))
+		return
+	}
+
 	rep := &db.AttendanceReport{
 		CourseID:   job.CourseID,
 		ComputedAt: job.Report.ComputedAt,

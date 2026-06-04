@@ -20,11 +20,20 @@ export function useAbsenceDashboard() {
 
     try {
       const filterParam = encodeURIComponent(JSON.stringify(filters));
+      console.log('[Dashboard] Fetching absence dashboard...', { filters, url: `/api/teacher/absence-dashboard?filters=${filterParam}` });
       const res = await fetch(
         `/api/teacher/absence-dashboard?filters=${filterParam}`,
         { signal: controller.signal }
       );
+      console.log('[Dashboard] Response status:', res.status, 'ok:', res.ok);
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        console.error('[Dashboard] HTTP error:', res.status, text);
+        setError(`HTTP ${res.status}: ${text || res.statusText}`);
+        return;
+      }
       const result = await res.json();
+      console.log('[Dashboard] Result:', { success: result.success, error: result.error, dataKeys: result.data ? Object.keys(result.data) : null });
       if (result.success) {
         setData(result.data);
       } else {
@@ -32,6 +41,7 @@ export function useAbsenceDashboard() {
       }
     } catch (err) {
       if (err.name !== 'AbortError') {
+        console.error('[Dashboard] Fetch error:', err);
         setError(err.message || 'Network error');
       }
     } finally {

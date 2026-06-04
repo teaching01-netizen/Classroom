@@ -52,6 +52,11 @@ func (r *PgAttendanceReportRepository) Upsert(ctx context.Context, rep *Attendan
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	// Validate payload is valid JSON before sending to Postgres.
+	if !json.Valid(rep.Payload) {
+		return fmt.Errorf("attendance_reports upsert %s: payload is not valid JSON", rep.CourseID)
+	}
+
 	// Cast to ::jsonb so pgx encodes the byte slice as JSONB rather than
 	// bytea. Returning the row gives us the server-side computed_at and
 	// updated_at, which lets callers (Phase 4 persister) use the canonical
@@ -70,7 +75,8 @@ func (r *PgAttendanceReportRepository) Upsert(ctx context.Context, rep *Attendan
 	`, rep.CourseID, rep.Threshold, rep.DurationMs, []byte(rep.Payload))
 
 	if err := row.Scan(&rep.ComputedAt); err != nil {
-		return fmt.Errorf("attendance_reports upsert %s: %w", rep.CourseID, err)
+		return fmt.Errorf("attendance_reports upsert %s (threshold=%d, duration_ms=%d, payload_len=%d): %w",
+			rep.CourseID, rep.Threshold, rep.DurationMs, len(rep.Payload), err)
 	}
 	return nil
 }

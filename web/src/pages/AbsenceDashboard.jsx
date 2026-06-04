@@ -9,7 +9,7 @@ import { AbsenceMatrix } from '../components/dashboard/AbsenceMatrix';
 
 export function AbsenceDashboard() {
   const { data, loading, error, refetch } = useAbsenceDashboard();
-  const { views, createView, updateView, deleteView, touchView } = useDashboardViews();
+  const { views, isLoading: viewsLoading, error: viewsError, createView, updateView, deleteView, touchView } = useDashboardViews();
   const loadView = useDashboardFiltersStore((s) => s.loadView);
   const filters = useDashboardFiltersStore((s) => s.filters);
   const [activeViewId, setActiveViewId] = useState(null);
@@ -29,7 +29,7 @@ export function AbsenceDashboard() {
         setActiveViewId(created.id);
       }
     } catch (err) {
-      console.error('Failed to save view:', err);
+      console.error('[Dashboard] Failed to save view:', err);
     }
   }, [activeViewId, filters, createView, updateView]);
 
@@ -40,7 +40,7 @@ export function AbsenceDashboard() {
         setActiveViewId(null);
       }
     } catch (err) {
-      console.error('Failed to delete view:', err);
+      console.error('[Dashboard] Failed to delete view:', err);
     }
   }, [activeViewId, deleteView]);
 
@@ -57,6 +57,9 @@ export function AbsenceDashboard() {
           margin: '0 auto var(--space-4, 16px)',
         }} />
         <p style={{ color: 'var(--color-text-secondary, #4F5056)' }}>Loading dashboard...</p>
+        <p style={{ fontSize: '0.75rem', color: 'var(--color-text-muted, #696A6C)', marginTop: '8px' }}>
+          Fetching courses and attendance data from Warwick...
+        </p>
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
     );
@@ -72,7 +75,7 @@ export function AbsenceDashboard() {
           borderRadius: 'var(--radius-md, 8px)',
         }}>
           <p style={{ fontWeight: '500', marginBottom: '8px' }}>Failed to load dashboard</p>
-          <p style={{ fontSize: '0.875rem', marginBottom: '16px' }}>{error}</p>
+          <p style={{ fontSize: '0.875rem', marginBottom: '16px', fontFamily: 'monospace', wordBreak: 'break-all' }}>{error}</p>
           <button
             onClick={refetch}
             style={{
@@ -95,6 +98,19 @@ export function AbsenceDashboard() {
 
   return (
     <div style={{ padding: 'var(--space-8, 32px)' }}>
+      {viewsError && (
+        <div style={{
+          padding: 'var(--space-3, 12px) var(--space-4, 16px)',
+          background: 'color-mix(in srgb, var(--color-warning, #7A631C) 10%, transparent)',
+          color: 'var(--color-warning, #7A631C)',
+          borderRadius: 'var(--radius-md, 8px)',
+          marginBottom: 'var(--space-4, 16px)',
+          fontSize: '0.8125rem',
+        }}>
+          Saved views unavailable: {viewsError}
+        </div>
+      )}
+
       <div style={{
         display: 'flex',
         alignItems: 'center',
@@ -117,6 +133,11 @@ export function AbsenceDashboard() {
             color: 'var(--color-text-secondary, #4F5056)',
           }}>
             Cross-course view of at-risk students
+            {data?.generatedAt && (
+              <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted, #696A6C)', marginLeft: '8px' }}>
+                Generated {new Date(data.generatedAt).toLocaleTimeString()}
+              </span>
+            )}
           </p>
         </div>
 
@@ -140,6 +161,19 @@ export function AbsenceDashboard() {
         </button>
       </div>
 
+      {!data && (
+        <div style={{
+          padding: 'var(--space-4, 16px)',
+          background: 'color-mix(in srgb, var(--color-warning, #7A6D1C) 10%, transparent)',
+          color: 'var(--color-warning, #7A631C)',
+          borderRadius: 'var(--radius-md, 8px)',
+          marginBottom: 'var(--space-6, 24px)',
+          fontSize: '0.875rem',
+        }}>
+          No data returned from server. Check the browser console (F12) and server logs for details.
+        </div>
+      )}
+
       <DashboardKPIRow data={data} />
 
       <AtRiskCallout students={data?.topAtRisk} />
@@ -153,6 +187,19 @@ export function AbsenceDashboard() {
       />
 
       <AbsenceMatrix students={data?.students} sessions={data?.sessions} />
+
+      {/* Debug info */}
+      <div style={{
+        marginTop: 'var(--space-8, 32px)',
+        padding: 'var(--space-4, 16px)',
+        background: 'var(--color-bg-subtle, #F5F5F5)',
+        borderRadius: 'var(--radius-md, 8px)',
+        fontSize: '0.75rem',
+        color: 'var(--color-text-muted, #696A6C)',
+        fontFamily: 'monospace',
+      }}>
+        <div>Students: {data?.students?.length ?? 0} | Sessions: {data?.sessions?.length ?? 0} | Courses: {data?.totalCourses ?? 0} | At Risk: {data?.atRiskCount ?? 0}</div>
+      </div>
     </div>
   );
 }

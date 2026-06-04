@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -367,7 +368,9 @@ func getCourseAttendanceReportHandler(cc *warwick.ClassroomClient, checkinRepo d
 // It aggregates attendance data across all (or filtered) courses.
 func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.SessionCheckinRepository) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		if cc == nil {
+			slog.Error("absence_dashboard_client_nil")
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
 			return
 		}
@@ -377,11 +380,19 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 		if f := r.URL.Query().Get("filters"); f != "" {
 			decoded, err := domain.UnmarshalDashboardFilters([]byte(f))
 			if err != nil {
+				slog.Error("absence_dashboard_invalid_filters", "filters", f, "error", err)
 				writeJSON(w, http.StatusBadRequest, errorResponse("invalid filters parameter"))
 				return
 			}
 			filters = decoded
 		}
+
+		slog.Info("absence_dashboard_start",
+			"course_ids", filters.CourseIds,
+			"threshold", filters.Threshold,
+			"date_range", filters.DateRange,
+			"sort_by", filters.SortBy,
+		)
 
 		// Determine threshold: use filter value or default to 20% (0 = auto).
 		threshold := filters.Threshold
@@ -398,8 +409,12 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 		}
 
 		// Fetch all courses from Warwick.
+		slog.Info("absence_dashboard_fetching_courses")
+		coursesStart := time.Now()
 		allCourses, err := cc.GetCourses()
+		coursesDuration := time.Since(coursesStart)
 		if err != nil {
+			slog.Error("absence_dashboard_get_courses_failed", "error", err, "duration_ms", coursesDuration.Milliseconds())
 			if errors.Is(err, domain.ErrAuthExpired) {
 				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
 				return
@@ -415,6 +430,7 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
 		}
+		slog.Info("absence_dashboard_courses_fetched", "count", len(allCourses), "duration_ms", coursesDuration.Milliseconds())
 
 		// Filter to requested course IDs if specified.
 		courses := allCourses
@@ -429,9 +445,11 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 					courses = append(courses, c)
 				}
 			}
+			slog.Info("absence_dashboard_filtered_courses", "original", len(allCourses), "filtered", len(courses))
 		}
 
 		if len(courses) == 0 {
+			slog.Info("absence_dashboard_no_courses", "total_fetched", len(allCourses))
 			writeJSON(w, http.StatusOK, successResponse(domain.DashboardReport{
 				GeneratedAt: time.Now(),
 				Students:    []domain.StudentAbsence{},
@@ -440,6 +458,8 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			}))
 			return
 		}
+
+		slog.Info("absence_dashboard_computing_reports", "course_count", len(courses))
 
 		// Compute attendance reports for each course in parallel.
 		type courseResult struct {
@@ -459,6 +479,7 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			sem <- struct{}{}
 			go func(idx int, c domain.CourseSummary) {
 				defer func() { <-sem }()
+				courseStart := time.Now()
 
 				// Retry with backoff on pool exhaustion (other goroutines hold sessions).
 				var detail *domain.CourseDetail
@@ -478,6 +499,7 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 						case <-time.After(backoff):
 							continue
 						case <-ctx.Done():
+							slog.Error("dashboard_course_detail_timeout", "course_id", c.CourseID, "error", ctx.Err())
 							results[idx] = courseResult{courseID: c.CourseID, courseName: c.Name, err: ctx.Err()}
 							return
 						}
@@ -486,12 +508,20 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 					break
 				}
 				if lastErr != nil {
-					slog.Warn("dashboard_course_detail_failed", "course_id", c.CourseID, "error", lastErr)
+					slog.Error("dashboard_course_detail_failed", "course_id", c.CourseID, "course_name", c.Name, "error", lastErr, "duration_ms", time.Since(courseStart).Milliseconds())
 					results[idx] = courseResult{courseID: c.CourseID, courseName: c.Name, err: lastErr}
 					return
 				}
 
 				report := warwick.ComputeCourseAttendanceReport(ctx, dataSource, detail, threshold)
+				slog.Info("dashboard_course_report_done",
+					"course_id", c.CourseID,
+					"course_name", c.Name,
+					"students", len(report.Students),
+					"sessions", len(report.Sessions),
+					"errors", len(report.Errors),
+					"duration_ms", time.Since(courseStart).Milliseconds(),
+				)
 				results[idx] = courseResult{courseID: c.CourseID, courseName: c.Name, report: report}
 			}(i, course)
 		}
@@ -502,9 +532,23 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 		}
 
 		if ctx.Err() != nil {
+			slog.Error("absence_dashboard_timeout", "error", ctx.Err(), "elapsed_ms", time.Since(start).Milliseconds())
 			writeJSON(w, http.StatusGatewayTimeout, errorResponse("dashboard computation timed out"))
 			return
 		}
+
+		// Log per-course results summary.
+		succeeded := 0
+		failed := 0
+		for _, res := range results {
+			if res.err != nil {
+				failed++
+				slog.Warn("absence_dashboard_course_skipped", "course_id", res.courseID, "course_name", res.courseName, "error", res.err)
+			} else {
+				succeeded++
+			}
+		}
+		slog.Info("absence_dashboard_course_results", "succeeded", succeeded, "failed", failed)
 
 		// Aggregate across courses.
 		// Track per-student data across courses.
@@ -750,6 +794,16 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			Students:          students,
 			Sessions:          sessions,
 		}
+
+		slog.Info("absence_dashboard_done",
+			"total_students", totalStudents,
+			"total_courses", len(courses),
+			"at_risk_count", totalAtRisk,
+			"students_returned", len(students),
+			"sessions_returned", len(sessions),
+			"avg_rate", fmt.Sprintf("%.1f%%", avgRate*100),
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
 
 		writeJSON(w, http.StatusOK, successResponse(report))
 	}

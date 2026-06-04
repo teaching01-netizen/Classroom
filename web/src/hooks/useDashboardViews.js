@@ -19,6 +19,7 @@ export function useDashboardViews() {
         setError(result.error || 'Failed to load views');
       }
     } catch (err) {
+      console.error('[DashboardViews] Fetch error:', err);
       setError(err.message || 'Network error');
     } finally {
       setIsLoading(false);
