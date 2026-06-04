@@ -85,7 +85,7 @@ func (r *PgDashboardViewRepository) Create(ctx context.Context, name string, fil
 		INSERT INTO saved_dashboard_views (name, filters)
 		VALUES ($1, $2)
 		RETURNING id, name, filters, last_used_at, created_at, updated_at
-	`, name, filtersJSON).Scan(&v.ID, &v.Name, &filtersJSON, &v.LastUsedAt, &v.CreatedAt, &v.UpdatedAt)
+	`, name, string(filtersJSON)).Scan(&v.ID, &v.Name, &filtersJSON, &v.LastUsedAt, &v.CreatedAt, &v.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("create dashboard view: %w", err)
 	}
@@ -107,7 +107,7 @@ func (r *PgDashboardViewRepository) Update(ctx context.Context, id int64, name s
 		SET name = $2, filters = $3, updated_at = NOW()
 		WHERE id = $1
 		RETURNING id, name, filters, last_used_at, created_at, updated_at
-	`, id, name, filtersJSON).Scan(&v.ID, &v.Name, &filtersJSON, &v.LastUsedAt, &v.CreatedAt, &v.UpdatedAt)
+	`, id, name, string(filtersJSON)).Scan(&v.ID, &v.Name, &filtersJSON, &v.LastUsedAt, &v.CreatedAt, &v.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("update dashboard view: %w", err)
 	}
