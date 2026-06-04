@@ -123,14 +123,15 @@ func (p *SessionPreWarmer) Tick(ctx context.Context) error {
 func (p *SessionPreWarmer) tickCourse(ctx context.Context, courseID string) {
 	detail, err := p.cc.GetCourseDetail(courseID)
 	if err != nil {
-		slog.Debug("session_prewarmer_course_detail_failed",
+		p.errCount.Add(1)
+		slog.Warn("session_prewarmer_course_detail_failed",
 			"course_id", courseID, "error", err)
 		return
 	}
 	for _, sess := range detail.Sessions {
 		if err := p.PreWarmSession(ctx, sess.SessionID); err != nil {
 			p.errCount.Add(1)
-			slog.Debug("session_prewarmer_session_failed",
+			slog.Warn("session_prewarmer_session_failed",
 				"course_id", courseID, "session_id", sess.SessionID, "error", err)
 		}
 	}

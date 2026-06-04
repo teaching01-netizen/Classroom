@@ -185,6 +185,8 @@ func getCourseAttendanceReportHandler(cc *warwick.ClassroomClient, checkinRepo d
 
 		// Parse source query param. Default = "db" (pre-warmed data).
 		// "live" = fetch directly from Warwick API (slower, rate-limited).
+		// DB source uses fallback: if DB has 0 students for a session
+		// (prewarmer hasn't synced yet), it retries from Warwick live.
 		source := r.URL.Query().Get("source")
 		var dataSource warwick.SessionDataSource
 		if source == "live" {
@@ -194,7 +196,10 @@ func getCourseAttendanceReportHandler(cc *warwick.ClassroomClient, checkinRepo d
 				writeJSON(w, http.StatusServiceUnavailable, errorResponse("DB source not available; use ?source=live"))
 				return
 			}
-			dataSource = warwick.NewDBSessionDataSource(checkinRepo)
+			dataSource = warwick.NewFallbackSessionDataSource(
+				warwick.NewDBSessionDataSource(checkinRepo),
+				warwick.NewLiveSessionDataSource(cc),
+			)
 		}
 
 		// Fetch course detail for the session list.
