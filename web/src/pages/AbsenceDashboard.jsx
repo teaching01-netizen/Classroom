@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { useAbsenceDashboard } from '../hooks/useAbsenceDashboard';
 import { useDashboardViews } from '../hooks/useDashboardViews';
+import { useCourses } from '../hooks/useCourses';
 import { useDashboardFiltersStore } from '../store/useDashboardFiltersStore';
 import { DashboardKPIRow } from '../components/dashboard/DashboardKPIRow';
 import { AtRiskCallout } from '../components/dashboard/AtRiskCallout';
@@ -8,8 +9,9 @@ import { FilterBar } from '../components/dashboard/FilterBar';
 import { AbsenceMatrix } from '../components/dashboard/AbsenceMatrix';
 
 export function AbsenceDashboard() {
-  const { data, loading, error, refetch } = useAbsenceDashboard();
-  const { views, isLoading: viewsLoading, error: viewsError, createView, updateView, deleteView, touchView } = useDashboardViews();
+  const { data, loading, error, loadDashboard } = useAbsenceDashboard();
+  const { views, createView, updateView, deleteView, touchView } = useDashboardViews();
+  const { courses, isLoading: coursesLoading } = useCourses();
   const loadView = useDashboardFiltersStore((s) => s.loadView);
   const filters = useDashboardFiltersStore((s) => s.filters);
   const [activeViewId, setActiveViewId] = useState(null);
@@ -44,73 +46,12 @@ export function AbsenceDashboard() {
     }
   }, [activeViewId, deleteView]);
 
-  if (loading) {
-    return (
-      <div style={{ padding: 'var(--space-8, 32px)', textAlign: 'center' }}>
-        <div style={{
-          width: '32px',
-          height: '32px',
-          border: '3px solid var(--color-border, #DCDBDD)',
-          borderTopColor: 'var(--color-primary-600, #276BF0)',
-          borderRadius: '50%',
-          animation: 'spin 0.8s linear infinite',
-          margin: '0 auto var(--space-4, 16px)',
-        }} />
-        <p style={{ color: 'var(--color-text-secondary, #4F5056)' }}>Loading dashboard...</p>
-        <p style={{ fontSize: '0.75rem', color: 'var(--color-text-muted, #696A6C)', marginTop: '8px' }}>
-          Fetching courses and attendance data from Warwick...
-        </p>
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div style={{ padding: 'var(--space-8, 32px)' }}>
-        <div style={{
-          padding: 'var(--space-6, 24px)',
-          background: 'color-mix(in srgb, var(--color-danger, #9A3D4A) 12%, transparent)',
-          color: 'var(--color-danger, #9A3D4A)',
-          borderRadius: 'var(--radius-md, 8px)',
-        }}>
-          <p style={{ fontWeight: '500', marginBottom: '8px' }}>Failed to load dashboard</p>
-          <p style={{ fontSize: '0.875rem', marginBottom: '16px', fontFamily: 'monospace', wordBreak: 'break-all' }}>{error}</p>
-          <button
-            onClick={refetch}
-            style={{
-              padding: '8px 16px',
-              borderRadius: 'var(--radius-md, 8px)',
-              border: '1px solid var(--color-danger, #9A3D4A)',
-              background: 'transparent',
-              color: 'var(--color-danger, #9A3D4A)',
-              cursor: 'pointer',
-              fontWeight: '500',
-              fontSize: '0.875rem',
-            }}
-          >
-            Retry
-          </button>
-        </div>
-      </div>
-    );
-  }
+  const handleLoadDashboard = useCallback(() => {
+    loadDashboard(filters);
+  }, [loadDashboard, filters]);
 
   return (
     <div style={{ padding: 'var(--space-8, 32px)' }}>
-      {viewsError && (
-        <div style={{
-          padding: 'var(--space-3, 12px) var(--space-4, 16px)',
-          background: 'color-mix(in srgb, var(--color-warning, #7A631C) 10%, transparent)',
-          color: 'var(--color-warning, #7A631C)',
-          borderRadius: 'var(--radius-md, 8px)',
-          marginBottom: 'var(--space-4, 16px)',
-          fontSize: '0.8125rem',
-        }}>
-          Saved views unavailable: {viewsError}
-        </div>
-      )}
-
       <div style={{
         display: 'flex',
         alignItems: 'center',
@@ -132,74 +73,112 @@ export function AbsenceDashboard() {
             fontSize: '0.875rem',
             color: 'var(--color-text-secondary, #4F5056)',
           }}>
-            Cross-course view of at-risk students
-            {data?.generatedAt && (
-              <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted, #696A6C)', marginLeft: '8px' }}>
-                Generated {new Date(data.generatedAt).toLocaleTimeString()}
-              </span>
-            )}
+            Select courses and configure filters, then load the dashboard
           </p>
         </div>
-
-        <button
-          onClick={refetch}
-          style={{
-            padding: '8px 16px',
-            borderRadius: 'var(--radius-md, 8px)',
-            border: '1px solid var(--color-border, #DCDBDD)',
-            background: 'var(--color-bg, #FFFFFF)',
-            color: 'var(--color-text-secondary, #4F5056)',
-            cursor: 'pointer',
-            fontWeight: '500',
-            fontSize: '0.875rem',
-            transition: 'border-color 0.2s',
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--color-border-strong, #CFCFD9)'; }}
-          onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--color-border, #DCDBDD)'; }}
-        >
-          Refresh
-        </button>
       </div>
 
-      {!data && (
-        <div style={{
-          padding: 'var(--space-4, 16px)',
-          background: 'color-mix(in srgb, var(--color-warning, #7A6D1C) 10%, transparent)',
-          color: 'var(--color-warning, #7A631C)',
-          borderRadius: 'var(--radius-md, 8px)',
-          marginBottom: 'var(--space-6, 24px)',
-          fontSize: '0.875rem',
-        }}>
-          No data returned from server. Check the browser console (F12) and server logs for details.
-        </div>
-      )}
-
-      <DashboardKPIRow data={data} />
-
-      <AtRiskCallout students={data?.topAtRisk} />
-
       <FilterBar
+        courses={courses}
+        coursesLoading={coursesLoading}
         views={views}
         activeViewId={activeViewId}
         onLoadView={handleLoadView}
         onSaveView={handleSaveView}
         onDeleteView={handleDeleteView}
+        onLoadDashboard={handleLoadDashboard}
+        dashboardLoading={loading}
       />
 
-      <AbsenceMatrix students={data?.students} sessions={data?.sessions} />
+      {error && (
+        <div style={{
+          padding: 'var(--space-4, 16px) var(--space-5, 20px)',
+          background: 'color-mix(in srgb, var(--color-danger, #9A3D4A) 12%, transparent)',
+          color: 'var(--color-danger, #9A3D4A)',
+          borderRadius: 'var(--radius-md, 8px)',
+          marginBottom: 'var(--space-6, 24px)',
+          fontSize: '0.875rem',
+        }}>
+          <p style={{ fontWeight: '500', marginBottom: '4px' }}>Failed to load dashboard</p>
+          <p style={{ fontFamily: 'monospace', wordBreak: 'break-all', fontSize: '0.8125rem' }}>{error}</p>
+        </div>
+      )}
 
-      {/* Debug info */}
-      <div style={{
-        marginTop: 'var(--space-8, 32px)',
-        padding: 'var(--space-4, 16px)',
-        background: 'var(--color-bg-subtle, #F5F5F5)',
-        borderRadius: 'var(--radius-md, 8px)',
-        fontSize: '0.75rem',
-        color: 'var(--color-text-muted, #696A6C)',
-        fontFamily: 'monospace',
-      }}>
-        <div>Students: {data?.students?.length ?? 0} | Sessions: {data?.sessions?.length ?? 0} | Courses: {data?.totalCourses ?? 0} | At Risk: {data?.atRiskCount ?? 0}</div>
-      </div>
+      {loading && (
+        <div style={{
+          textAlign: 'center',
+          padding: 'var(--space-8, 32px)',
+          color: 'var(--color-text-secondary, #4F5056)',
+        }}>
+          <div style={{
+            width: '32px',
+            height: '32px',
+            border: '3px solid var(--color-border, #DCDBDD)',
+            borderTopColor: 'var(--color-primary-600, #276BF0)',
+            borderRadius: '50%',
+            animation: 'spin 0.8s linear infinite',
+            margin: '0 auto var(--space-4, 16px)',
+          }} />
+          <p>Loading dashboard data from Warwick...</p>
+          <p style={{ fontSize: '0.75rem', color: 'var(--color-text-muted, #696A6C)', marginTop: '4px' }}>
+            Fetching course details and computing attendance reports
+          </p>
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )}
+
+      {!loading && !error && data && (
+        <>
+          <DashboardKPIRow data={data} />
+          <AtRiskCallout students={data?.topAtRisk} />
+          <AbsenceMatrix students={data?.students} sessions={data?.sessions} />
+
+          <div style={{
+            marginTop: 'var(--space-8, 32px)',
+            padding: 'var(--space-3, 12px) var(--space-4, 16px)',
+            background: 'var(--color-bg-subtle, #F5F5F5)',
+            borderRadius: 'var(--radius-md, 8px)',
+            fontSize: '0.75rem',
+            color: 'var(--color-text-muted, #696A6C)',
+            fontFamily: 'monospace',
+          }}>
+            Students: {data?.students?.length ?? 0} | Sessions: {data?.sessions?.length ?? 0} | Courses: {data?.totalCourses ?? 0} | At Risk: {data?.atRiskCount ?? 0}
+            {data?.generatedAt && (
+              <span style={{ marginLeft: '12px' }}>
+                Generated {new Date(data.generatedAt).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
+        </>
+      )}
+
+      {!loading && !error && !data && (
+        <div style={{
+          textAlign: 'center',
+          padding: 'var(--space-12, 48px) var(--space-8, 32px)',
+          color: 'var(--color-text-muted, #696A6C)',
+        }}>
+          <div style={{
+            width: '48px',
+            height: '48px',
+            borderRadius: '50%',
+            background: 'var(--color-bg-hover, #F1F2F4)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            margin: '0 auto var(--space-4, 16px)',
+            fontSize: '1.5rem',
+          }}>
+            📊
+          </div>
+          <p style={{ fontSize: '1rem', fontWeight: '500', color: 'var(--color-text-secondary, #4F5056)', marginBottom: '8px' }}>
+            Configure your dashboard above
+          </p>
+          <p style={{ fontSize: '0.875rem' }}>
+            Select courses, set filters, then click <strong>Load Dashboard</strong>
+          </p>
+        </div>
+      )}
     </div>
   );
 }
