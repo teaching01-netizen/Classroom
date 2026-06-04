@@ -18,6 +18,11 @@ export function useAbsenceDashboard() {
     setLoading(true);
     setError(null);
 
+    const timeout = setTimeout(() => {
+      console.error('[Dashboard] Request timed out after 90s');
+      controller.abort();
+    }, 90000);
+
     try {
       const filterParam = encodeURIComponent(JSON.stringify(filters));
       console.log('[Dashboard] Fetching absence dashboard...', { filters, url: `/api/teacher/absence-dashboard?filters=${filterParam}` });
@@ -40,11 +45,14 @@ export function useAbsenceDashboard() {
         setError(result.error || 'Failed to fetch dashboard data');
       }
     } catch (err) {
-      if (err.name !== 'AbortError') {
+      if (err.name === 'AbortError') {
+        setError('Request timed out (90s). The server may be overloaded — check backend logs for pool exhaustion.');
+      } else {
         console.error('[Dashboard] Fetch error:', err);
         setError(err.message || 'Network error');
       }
     } finally {
+      clearTimeout(timeout);
       setLoading(false);
     }
   }, [filters]);
