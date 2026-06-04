@@ -17,7 +17,6 @@ export function DashboardCourseCard({ course, attendanceData, attendanceLoading,
   const loading = attendanceLoading ?? false;
   const error = attendanceError ?? null;
 
-  const atRiskStudents = data?.students?.filter((s) => s.atRisk) ?? [];
   const hasDoneSessions = data?.sessions?.length > 0;
 
   const attendancePercent = course.avg_attendance_rate != null
@@ -119,92 +118,6 @@ export function DashboardCourseCard({ course, attendanceData, attendanceLoading,
               background: attendancePercent >= 70 ? 'var(--color-success, #257348)' : attendancePercent >= 40 ? 'var(--color-warning, #7A631C)' : 'var(--color-danger, #9A3D4A)',
             }} />
           </div>
-        </div>
-      )}
-
-      {!loading && !error && data && hasDoneSessions && atRiskStudents.length > 0 && (
-        <div style={{ marginTop: 'var(--space-4, 16px)' }}>
-          <div style={{
-            padding: 'var(--space-3, 12px) var(--space-4, 16px)',
-            background: 'color-mix(in srgb, var(--color-warning, #7A631C) 8%, transparent)',
-            borderRadius: 'var(--radius-md, 8px)',
-            marginBottom: 'var(--space-3, 12px)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 'var(--space-2, 8px)',
-          }}>
-            <span style={{
-              width: '8px',
-              height: '8px',
-              borderRadius: '50%',
-              background: 'var(--color-warning, #7A631C)',
-              display: 'inline-block',
-              flexShrink: 0,
-            }} />
-            <span style={{
-              fontSize: '0.8125rem',
-              fontWeight: '600',
-              color: 'var(--color-warning, #7A631C)',
-            }}>
-              {atRiskStudents.length} student{atRiskStudents.length !== 1 ? 's' : ''} at risk
-            </span>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2, 8px)' }}>
-            {atRiskStudents.map((student) => {
-              const ratePercent = Math.round(student.attendanceRate * 100);
-              const absences = student.totalSessions - student.attendedSessions;
-              return (
-                <div
-                  key={student.studentId}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 'var(--space-3, 12px)',
-                    padding: 'var(--space-2, 8px) var(--space-3, 12px)',
-                    background: 'var(--color-bg, #FFFFFF)',
-                    border: '1px solid var(--color-border-subtle, #EEEFF1)',
-                    borderRadius: 'var(--radius-md, 8px)',
-                    fontSize: '0.8125rem',
-                  }}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <span style={{ fontWeight: '500', color: 'var(--color-text-primary, #111113)' }}>
-                      {student.name}
-                    </span>
-                  </div>
-                  <span style={{
-                    fontWeight: '600',
-                    color: ratePercent < 50 ? 'var(--color-danger, #9A3D4A)' : 'var(--color-warning, #7A631C)',
-                    flexShrink: 0,
-                  }}>
-                    {ratePercent}%
-                  </span>
-                  <span style={{
-                    color: 'var(--color-text-muted, #696A6C)',
-                    fontSize: '0.75rem',
-                    flexShrink: 0,
-                  }}>
-                    {absences}/{student.totalSessions} absences
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {!loading && !error && data && hasDoneSessions && atRiskStudents.length === 0 && (
-        <div style={{
-          marginTop: 'var(--space-4, 16px)',
-          padding: 'var(--space-3, 12px) var(--space-4, 16px)',
-          background: 'color-mix(in srgb, var(--color-success, #257348) 8%, transparent)',
-          borderRadius: 'var(--radius-md, 8px)',
-          color: 'var(--color-success, #257348)',
-          fontSize: '0.8125rem',
-          fontWeight: '500',
-        }}>
-          No students at risk — all attendance rates are above threshold.
         </div>
       )}
 

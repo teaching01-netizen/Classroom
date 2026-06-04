@@ -88,49 +88,6 @@ describe('DashboardCourseCard', () => {
     usePinnedCoursesStore.mockReturnValue({ unpinCourse: vi.fn() });
   });
 
-  it('shows at-risk student names when attendanceData is provided', () => {
-    renderWithRouter(
-      <DashboardCourseCard course={mockCourse} attendanceData={mockAttendanceData} />
-    );
-
-    expect(screen.getByText('Alice Wang')).toBeTruthy();
-    expect(screen.getByText('Bob Smith')).toBeTruthy();
-  });
-
-  it('does not show non-at-risk students in the at-risk list', () => {
-    renderWithRouter(
-      <DashboardCourseCard course={mockCourse} attendanceData={mockAttendanceData} />
-    );
-
-    expect(screen.queryByText('Carol Davis')).toBeNull();
-  });
-
-  it('shows at-risk count in the alert banner', () => {
-    renderWithRouter(
-      <DashboardCourseCard course={mockCourse} attendanceData={mockAttendanceData} />
-    );
-
-    expect(screen.getByText(/2 students at risk/)).toBeTruthy();
-  });
-
-  it('shows attendance rate percentage for each at-risk student', () => {
-    renderWithRouter(
-      <DashboardCourseCard course={mockCourse} attendanceData={mockAttendanceData} />
-    );
-
-    expect(screen.getByText('40%')).toBeTruthy();
-    expect(screen.getByText('60%')).toBeTruthy();
-  });
-
-  it('shows absence count for each at-risk student', () => {
-    renderWithRouter(
-      <DashboardCourseCard course={mockCourse} attendanceData={mockAttendanceData} />
-    );
-
-    expect(screen.getByText('3/5 absences')).toBeTruthy();
-    expect(screen.getByText('2/5 absences')).toBeTruthy();
-  });
-
   it('shows course info when attendanceData is null (loading)', () => {
     renderWithRouter(
       <DashboardCourseCard course={mockCourse} attendanceData={null} attendanceLoading={true} />
@@ -139,19 +96,6 @@ describe('DashboardCourseCard', () => {
     expect(screen.getByText('Computer Science 101')).toBeTruthy();
     expect(screen.getByText('CS101')).toBeTruthy();
     expect(screen.getByText('Loading attendance data...')).toBeTruthy();
-  });
-
-  it('shows success message when no students are at risk', () => {
-    const safeData = {
-      ...mockAttendanceData,
-      students: mockAttendanceData.students.map((s) => ({ ...s, atRisk: false })),
-    };
-
-    renderWithRouter(
-      <DashboardCourseCard course={mockCourse} attendanceData={safeData} />
-    );
-
-    expect(screen.getByText(/No students at risk/)).toBeTruthy();
   });
 
   it('shows "No completed sessions" when there are no done sessions', () => {
@@ -213,6 +157,17 @@ describe('DashboardCourseCard', () => {
     );
 
     expect(screen.queryByText('Expand')).toBeNull();
+  });
+
+  it('does not render at-risk summary section', () => {
+    renderWithRouter(
+      <DashboardCourseCard course={mockCourse} attendanceData={mockAttendanceData} />
+    );
+
+    expect(screen.queryByText(/at risk/)).toBeNull();
+    expect(screen.queryByText('Alice Wang')).toBeNull();
+    expect(screen.queryByText('Bob Smith')).toBeNull();
+    expect(screen.queryByText(/No students at risk/)).toBeNull();
   });
 
   it('shows error message when attendanceError is set', () => {
