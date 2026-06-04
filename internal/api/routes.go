@@ -39,7 +39,7 @@ func init() {
 	allowedOrigin = os.Getenv("CORS_ORIGIN")
 }
 
-func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.FavouriteRepository, c *cache.Cache, refresher *service.DataRefresher, wsMaxConns int64, checkinRepo db.SessionCheckinRepository, persister warwick.ReportEnqueuer) *chi.Mux {
+func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.FavouriteRepository, c *cache.Cache, refresher *service.DataRefresher, wsMaxConns int64, checkinRepo db.SessionCheckinRepository, persister warwick.ReportEnqueuer, viewRepo db.DashboardViewRepository) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(chimiddleware.Logger)
 	r.Use(corsMiddleware)
@@ -74,6 +74,14 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.
 		r.Get("/favourites", getFavouritesHandler(favRepo))
 		r.Post("/favourites", addFavouriteHandler(favRepo))
 		r.Delete("/favourites/{courseId}", removeFavouriteHandler(favRepo))
+
+		// Dashboard saved views
+		r.Get("/dashboard-views", listDashboardViewsHandler(viewRepo))
+		r.Post("/dashboard-views", createDashboardViewHandler(viewRepo))
+		r.Get("/dashboard-views/{id}", getDashboardViewHandler(viewRepo))
+		r.Put("/dashboard-views/{id}", updateDashboardViewHandler(viewRepo))
+		r.Delete("/dashboard-views/{id}", deleteDashboardViewHandler(viewRepo))
+		r.Post("/dashboard-views/{id}/use", touchDashboardViewHandler(viewRepo))
 	})
 
 	r.Get("/ws", wsHandler(rm, wsMaxConns))

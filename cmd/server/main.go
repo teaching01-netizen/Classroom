@@ -159,7 +159,8 @@ func main() {
 
 	wsMaxConns := getEnvInt("WARWICK_MAX_CONCURRENT_WS", 500)
 
-	router := api.NewRouter(rm, classroomClient, favRepo, sharedCache, refresher, int64(wsMaxConns), sessionCheckinRepo, reportPersister)
+	viewRepo := db.NewPgDashboardViewRepository(pool)
+	router := api.NewRouter(rm, classroomClient, favRepo, sharedCache, refresher, int64(wsMaxConns), sessionCheckinRepo, reportPersister, viewRepo)
 
 	addr := os.Getenv("PORT")
 	if addr == "" {

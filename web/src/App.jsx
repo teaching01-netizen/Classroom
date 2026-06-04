@@ -8,6 +8,7 @@ import { CourseDashboard } from './pages/CourseDashboard';
 import { SessionList } from './pages/SessionList';
 import { CheckinDetail } from './pages/CheckinDetail';
 import { CourseAttendance } from './pages/CourseAttendance';
+import { AbsenceDashboard } from './pages/AbsenceDashboard';
 
 import './styles/tokens.css';
 
@@ -208,6 +209,9 @@ function NavBar() {
       <Link to="/" style={{ color: 'var(--color-text-secondary, #4F5056)', textDecoration: 'none', fontWeight: '500' }}>
         Dashboard
       </Link>
+      <Link to="/absence-dashboard" style={{ color: 'var(--color-text-secondary, #4F5056)', textDecoration: 'none', fontWeight: '500' }}>
+        Absence Dashboard
+      </Link>
       <Link to="/courses" style={{ color: 'var(--color-text-secondary, #4F5056)', textDecoration: 'none', fontWeight: '500' }}>
         All Courses
       </Link>
@@ -235,6 +239,7 @@ function App() {
             <Route path="/courses" element={<CourseDashboard />} />
             <Route path="/courses/:courseId/sessions" element={<SessionList />} />
             <Route path="/courses/:courseId/attendance" element={<CourseAttendance />} />
+            <Route path="/absence-dashboard" element={<AbsenceDashboard />} />
             <Route path="/courses/:courseId/sessions/:sessionId" element={<CheckinDetail />} />
           </Routes>
         </ErrorBoundary>

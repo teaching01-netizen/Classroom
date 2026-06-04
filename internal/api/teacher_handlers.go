@@ -159,6 +159,132 @@ func toggleCheckinHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 	}
 }
 
+// listDashboardViewsHandler returns all saved dashboard views.
+func listDashboardViewsHandler(viewRepo db.DashboardViewRepository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		views, err := viewRepo.List(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
+			return
+		}
+		if views == nil {
+			views = []domain.SavedDashboardView{}
+		}
+		writeJSON(w, http.StatusOK, successResponse(views))
+	}
+}
+
+// getDashboardViewHandler returns a single saved dashboard view by ID.
+func getDashboardViewHandler(viewRepo db.DashboardViewRepository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := chi.URLParam(r, "id")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("invalid view id"))
+			return
+		}
+		view, err := viewRepo.GetByID(r.Context(), id)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, errorResponse("view not found"))
+			return
+		}
+		writeJSON(w, http.StatusOK, successResponse(view))
+	}
+}
+
+// createDashboardViewHandler creates a new saved dashboard view.
+func createDashboardViewHandler(viewRepo db.DashboardViewRepository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Name    string                `json:"name"`
+			Filters domain.DashboardFilters `json:"filters"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))
+			return
+		}
+		if req.Name == "" {
+			writeJSON(w, http.StatusBadRequest, errorResponse("name is required"))
+			return
+		}
+
+		view, err := viewRepo.Create(r.Context(), req.Name, req.Filters)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
+			return
+		}
+		writeJSON(w, http.StatusCreated, successResponse(view))
+	}
+}
+
+// updateDashboardViewHandler updates an existing saved dashboard view.
+func updateDashboardViewHandler(viewRepo db.DashboardViewRepository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := chi.URLParam(r, "id")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("invalid view id"))
+			return
+		}
+
+		var req struct {
+			Name    string                `json:"name"`
+			Filters domain.DashboardFilters `json:"filters"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))
+			return
+		}
+		if req.Name == "" {
+			writeJSON(w, http.StatusBadRequest, errorResponse("name is required"))
+			return
+		}
+
+		view, err := viewRepo.Update(r.Context(), id, req.Name, req.Filters)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
+			return
+		}
+		writeJSON(w, http.StatusOK, successResponse(view))
+	}
+}
+
+// deleteDashboardViewHandler deletes a saved dashboard view.
+func deleteDashboardViewHandler(viewRepo db.DashboardViewRepository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := chi.URLParam(r, "id")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("invalid view id"))
+			return
+		}
+
+		if err := viewRepo.Delete(r.Context(), id); err != nil {
+			writeJSON(w, http.StatusNotFound, errorResponse(err.Error()))
+			return
+		}
+		writeJSON(w, http.StatusOK, successResponse(nil))
+	}
+}
+
+// touchDashboardViewHandler updates the last_used_at timestamp for a view.
+func touchDashboardViewHandler(viewRepo db.DashboardViewRepository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := chi.URLParam(r, "id")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("invalid view id"))
+			return
+		}
+
+		if err := viewRepo.Touch(r.Context(), id); err != nil {
+			writeJSON(w, http.StatusNotFound, errorResponse(err.Error()))
+			return
+		}
+		writeJSON(w, http.StatusOK, successResponse(nil))
+	}
+}
+
 func getCourseAttendanceReportHandler(cc *warwick.ClassroomClient, checkinRepo db.SessionCheckinRepository, persister warwick.ReportEnqueuer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if cc == nil {
