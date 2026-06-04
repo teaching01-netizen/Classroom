@@ -85,6 +85,7 @@ type SessionCheckin struct {
 	SessionID       string `json:"sessionId"`
 	SessionNumber   int    `json:"sessionNumber"`
 	SessionName     string `json:"sessionName"`
+	SessionDate     string `json:"sessionDate"`
 	SessionStatus   string `json:"sessionStatus"`
 	CheckedIn       bool   `json:"checkedIn"`
 	Status          string `json:"status"`

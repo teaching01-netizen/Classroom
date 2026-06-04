@@ -784,14 +784,15 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 					}
 				}
 
-				perSession = append(perSession, domain.SessionCheckin{
-					SessionID:     sess.SessionID,
-					SessionNumber: sess.SessionNumber,
-					SessionName:   sess.Name,
-					SessionStatus: sess.Status,
-					CheckedIn:     checked,
-					Status:        status,
-				})
+			perSession = append(perSession, domain.SessionCheckin{
+				SessionID:     sess.SessionID,
+				SessionNumber: sess.SessionNumber,
+				SessionName:   sess.Name,
+				SessionDate:   sess.Date,
+				SessionStatus: sess.Status,
+				CheckedIn:     checked,
+				Status:        status,
+			})
 			}
 
 			// Apply threshold: at-risk if absences >= threshold.

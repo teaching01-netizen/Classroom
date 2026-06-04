@@ -6,7 +6,7 @@ import { useDashboardFiltersStore } from '../store/useDashboardFiltersStore';
 import { DashboardKPIRow } from '../components/dashboard/DashboardKPIRow';
 import { AtRiskCallout } from '../components/dashboard/AtRiskCallout';
 import { FilterBar } from '../components/dashboard/FilterBar';
-import { AbsenceMatrix } from '../components/dashboard/AbsenceMatrix';
+import { AbsenceList } from '../components/dashboard/AbsenceList';
 
 export function AbsenceDashboard() {
   const { data, loading, error, loadDashboard } = useAbsenceDashboard();
@@ -67,13 +67,13 @@ export function AbsenceDashboard() {
             color: 'var(--color-text-primary, #111113)',
             marginBottom: 'var(--space-1, 4px)',
           }}>
-            Absence Dashboard
+            Student Absence Alerts
           </h2>
           <p style={{
             fontSize: '0.875rem',
             color: 'var(--color-text-secondary, #4F5056)',
           }}>
-            Select courses and configure filters, then load the dashboard
+            View absences per student — filter by course, set thresholds, then load
           </p>
         </div>
       </div>
@@ -131,7 +131,7 @@ export function AbsenceDashboard() {
         <>
           <DashboardKPIRow data={data} />
           <AtRiskCallout students={data?.topAtRisk} />
-          <AbsenceMatrix students={data?.students} sessions={data?.sessions} />
+          <AbsenceList students={data?.students} sessions={data?.sessions} />
 
           <div style={{
             marginTop: 'var(--space-8, 32px)',
