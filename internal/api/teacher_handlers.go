@@ -749,6 +749,19 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			sessions[i].TotalStudents = totalStudents
 		}
 
+		// Enrich with Warwick StudentID from UserGroup profile list.
+		// Graceful degradation: if fetch fails, studentId stays empty.
+		nameToStudentID := make(map[string]string)
+		if profiles, err := cc.FetchStudentProfiles(); err == nil {
+			for _, p := range profiles {
+				if p.StudentID != "" {
+					nameToStudentID[p.FullName] = p.StudentID
+				}
+			}
+		} else {
+			slog.Warn("absence_dashboard_student_profiles_fetch_failed", "error", err)
+		}
+
 		// Build student absence list.
 		students := make([]domain.StudentAbsence, 0, len(studentMap))
 		studentSet := make(map[string]bool)
@@ -819,7 +832,7 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			studentSet[key] = true
 
 			students = append(students, domain.StudentAbsence{
-				StudentID:        "", // no universal student ID across courses
+				StudentID:        nameToStudentID[agg.name], // enriched from Warwick UserGroup
 				Name:             agg.name,
 				Nickname:         agg.nickname,
 				School:           agg.school,

@@ -404,3 +404,63 @@ func TestFetchCourses_UsesDefaultUserIDWhenNotConfigured(t *testing.T) {
 	assert.Equal(t, defaultUserID, vals.Get("UserID"),
 		"Warwick request should use defaultUserID when not configured")
 }
+
+func TestFetchStudentProfiles_Success(t *testing.T) {
+	mc := cache.New()
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "UserGroupSearch") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"draw": 1,
+			"recordsTotal": 2,
+			"recordsFiltered": 2,
+			"data": [
+				{"StudentID": "STU001", "StudentGuid": "guid-a", "FullName": "Alice", "School": "Science", "MobilePhone": "", "ParentPhone": "", "IsActive": true, "TerminateStatus": "", "ExpireDateStr": ""},
+				{"StudentID": "STU002", "StudentGuid": "guid-b", "FullName": "Bob", "School": "Math", "MobilePhone": "", "ParentPhone": "", "IsActive": true, "TerminateStatus": "", "ExpireDateStr": ""}
+			]
+		}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	profiles, err := client.FetchStudentProfiles()
+	require.NoError(t, err)
+	require.Len(t, profiles, 2)
+	assert.Equal(t, "STU001", profiles[0].StudentID)
+	assert.Equal(t, "Alice", profiles[0].FullName)
+	assert.Equal(t, "STU002", profiles[1].StudentID)
+	assert.Equal(t, "Bob", profiles[1].FullName)
+	assert.Equal(t, "guid-a", profiles[0].StudentGuid)
+	assert.Equal(t, "Science", profiles[0].School)
+}
+
+func TestFetchStudentProfiles_Empty(t *testing.T) {
+	mc := cache.New()
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"draw":1,"recordsTotal":0,"recordsFiltered":0,"data":[]}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	profiles, err := client.FetchStudentProfiles()
+	require.NoError(t, err)
+	assert.Empty(t, profiles)
+}

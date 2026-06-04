@@ -1,0 +1,1449 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WarWick</title>
+    <link rel="icon" href="/admin/Content/imgs/favicon.png" type="image/x-icon">
+    
+    
+
+<link href="/admin/Content/theme/css/bootstrap.min.css" rel="stylesheet">
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.8.2/css/all.min.css">
+<link href="/admin/Content/theme/css/animate.css" rel="stylesheet">
+<link href="/admin/Content/theme/css/style.css" rel="stylesheet">
+<link href="/admin/Content/theme/css/plugins/dataTables/datatables.min.css" rel="stylesheet">
+<link href="/admin/Content/theme/css/plugins/datapicker/datepicker3.css" rel="stylesheet">
+
+
+
+
+
+<link href="https://cdn.datatables.net/1.10.19/css/jquery.dataTables.min.css" rel="stylesheet">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.3/css/select2.min.css" rel="stylesheet" />
+<style>
+    .dataTables_filter {
+        float: left !important;
+    }
+
+    .table > thead:first-child > tr:first-child > th {
+        padding: 10px 8px !important;
+    }
+
+    .pure-material-checkbox {
+        z-index: 0;
+        position: relative;
+        display: inline-block;
+        color: rgba(var(--pure-material-onsurface-rgb, 0, 0, 0), 0.87);
+        font-size: 16px;
+        line-height: 1.5;
+    }
+
+        /* Input */
+        .pure-material-checkbox > input {
+            appearance: none;
+            -moz-appearance: none;
+            -webkit-appearance: none;
+            z-index: -1;
+            position: absolute;
+            left: -7px;
+            top: -2px;
+            display: block;
+            margin: 0;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            background-color: rgba(var(--pure-material-onsurface-rgb, 0, 0, 0), 0.6);
+            box-shadow: none;
+            outline: none;
+            opacity: 0;
+            transform: scale(1);
+            pointer-events: none;
+            transition: opacity 0.3s, transform 0.2s;
+        }
+
+        /* Span */
+        .pure-material-checkbox > span {
+            display: inline-block;
+            width: 100%;
+            cursor: pointer;
+            color: #6f7173;
+            font-size: 14px;
+        }
+
+            /* Box */
+            .pure-material-checkbox > span::before {
+                content: "";
+                display: inline-block;
+                box-sizing: border-box;
+                margin: 3px 11px 3px 1px;
+                border: solid 2px; /* Safari */
+                border-color: #2296f3;
+                border-radius: 2px;
+                width: 16px;
+                height: 16px;
+                vertical-align: top;
+                transition: border-color 0.2s, background-color 0.2s;
+            }
+
+            /* Checkmark */
+            .pure-material-checkbox > span::after {
+                content: "";
+                display: block;
+                position: absolute;
+                top: 3px;
+                left: 1px;
+                width: 10px;
+                height: 5px;
+                border: solid 2px transparent;
+                border-right: none;
+                border-top: none;
+                transform: translate(3px, 7px) rotate(-45deg);
+            }
+
+        /* Checked, Indeterminate */
+        .pure-material-checkbox > input:checked,
+        .pure-material-checkbox > input:indeterminate {
+            background-color: rgb(var(--pure-material-primary-rgb, 33, 150, 243));
+        }
+
+            .pure-material-checkbox > input:checked + span::before,
+            .pure-material-checkbox > input:indeterminate + span::before {
+                border-color: rgb(var(--pure-material-primary-rgb, 33, 150, 243));
+            }
+
+            .pure-material-checkbox > input:checked + span::after,
+            .pure-material-checkbox > input:indeterminate + span::after {
+                border-color: #2296f3;
+            }
+
+            .pure-material-checkbox > input:indeterminate + span::after {
+                border-left: none;
+                transform: translate(4px, 3px);
+            }
+
+        /* Hover, Focus */
+        .pure-material-checkbox:hover > input {
+            opacity: 0.04;
+        }
+
+        .pure-material-checkbox > input:focus {
+            opacity: 0.12;
+        }
+
+        .pure-material-checkbox:hover > input:focus {
+            opacity: 0.16;
+        }
+
+        /* Active */
+        .pure-material-checkbox > input:active {
+            opacity: 1;
+            transform: scale(0);
+            transition: transform 0s, opacity 0s;
+        }
+
+            .pure-material-checkbox > input:active + span::before {
+                border-color: rgb(var(--pure-material-primary-rgb, 33, 150, 243));
+            }
+
+        .pure-material-checkbox > input:checked:active + span::before {
+            border-color: transparent;
+            background-color: rgba(var(--pure-material-onsurface-rgb, 0, 0, 0), 0.6);
+        }
+
+        /* Disabled */
+        .pure-material-checkbox > input:disabled {
+            opacity: 0;
+        }
+
+            .pure-material-checkbox > input:disabled + span {
+                color: rgba(var(--pure-material-onsurface-rgb, 0, 0, 0), 0.38);
+                cursor: initial;
+            }
+
+                .pure-material-checkbox > input:disabled + span::before {
+                    border-color: currentColor;
+                }
+
+        .pure-material-checkbox > input:checked:disabled + span::before,
+        .pure-material-checkbox > input:indeterminate:disabled + span::before {
+            border-color: transparent;
+            background-color: currentColor;
+        }
+
+    .swal2-title {
+        font-size: 1.275em !important;
+    }
+
+    table.dataTable thead .sorting:after, table.dataTable thead .sorting_asc:after, table.dataTable thead .sorting_desc:after, table.dataTable thead .sorting_asc_disabled:after, table.dataTable thead .sorting_desc_disabled:after {
+        position: absolute;
+        bottom: 8px;
+        right: 8px;
+        display: block;
+        font-family: 'Glyphicons Halflings';
+        opacity: 0;
+    }
+
+    .keyword-icon {
+        font-size: 20px;
+        margin: 6px;
+        color: #767676;
+        transform: rotateZ(90deg)
+    }
+
+    #keyword {
+        border: 0;
+    }
+
+    .search-group {
+        border: solid 1px #e5e6e7;
+        width: fit-content;
+    }
+
+    .select2-container--default .select2-selection--single {
+        background-color: #FFFFFF;
+        background-image: none;
+        border: 1px solid #e5e6e7;
+        border-radius: 1px;
+        color: inherit;
+        display: block;
+        padding: 6px 12px;
+        height: 33px;
+        transition: border-color 0.15s ease-in-out 0s, box-shadow 0.15s ease-in-out 0s;
+        width: 100%;
+    }
+
+    .select2-dropdown {
+        border: 1px solid #ddd;
+    }
+
+    .select2-container--default .select2-search--dropdown .select2-search__field {
+        border: 1px solid #1ab394;
+        border-radius: 3px;
+    }
+
+    .select2-container--default .select2-results__option--highlighted[aria-selected] {
+        background-color: #1ab394;
+        color: white;
+        padding: 10px 5px;
+    }
+
+    .select2-container--default .select2-selection--single .select2-selection__rendered {
+        line-height: 20px;
+    }
+
+    .select2-container .select2-selection--single .select2-selection__rendered {
+        padding-left: 3px;
+        padding-right: 15px;
+    }
+
+    .img-circle {
+        width: 40px;
+        height: 40px;
+        border-radius: 40px;
+        background-color: #105bab;
+        background-image: url('../../Content/imgs/user.png');
+        background-repeat: no-repeat;
+        background-position: center;
+        background-size: cover;
+    }
+
+    .card-select {
+        border-color: rgba(26, 179, 148, 0.3);
+        background-color: rgba(26, 179, 148, 0.1);
+    }
+
+        .card-select .p-name {
+            color: rgba(26, 179, 148, 1);
+            margin: 0px;
+            font-weight: 500;
+        }
+
+        .card-select .btn-delete-times-circle {
+            cursor: pointer;
+            font-size: large;
+            color: gray;
+        }
+
+            .card-select .btn-delete-times-circle:hover {
+                cursor: pointer;
+                font-size: large;
+                color: red;
+            }
+
+    /*table.dataTable thead tr, table.dataTable thead tr {
+            padding: 10px 18px;
+            border-bottom: 1.18px solid #000000;
+        }
+
+        table.dataTable thead th, table.dataTable thead td {
+            padding: 10px 18px;
+            border-bottom: none;
+        }
+
+        table.dataTable thead .sorting:after, table.dataTable thead .sorting_asc:after, table.dataTable thead .sorting_desc:after, table.dataTable thead .sorting_asc_disabled:after, table.dataTable thead .sorting_desc_disabled:after {
+            display: none;
+        }*/
+
+    /*.btn {
+        padding: .35rem .75rem !important;
+        border: 0 !important;
+    }*/
+
+    .detail-multi-line {
+        white-space: pre-wrap;
+    }
+
+    .detail-collapsed {
+        max-height: 80px;
+        overflow-y: auto;
+    }
+
+    .page-content{
+        margin-bottom:3rem;
+    }
+</style>
+    
+</head>
+<body style="width: 100vw; height: 100vh; overflow: hidden;">
+    <div id="wrapper" style="overflow-y: hidden;">
+        
+
+
+<style>
+    .mini-title {
+        display: block !important;
+    }
+
+    .version-text {
+        opacity: 0.5;
+        text-align: center;
+        font-size: 10px;
+        color: white;
+        height: 38%;
+        max-height: 38%;
+    }
+
+    body.mini-navbar .profile-element, body.mini-navbar .nav-label, body.mini-navbar .navbar-default .nav {
+        height:;
+        overflow-y: initial;
+        overflow-x: initial;
+    }
+
+    .metismenu {
+        height: 100vh;
+        overflow-y: auto;
+        overflow-x: hidden;
+    }
+
+    ::-webkit-scrollbar {
+        width: 5px;
+    }
+    /* this targets the default scrollbar (compulsory) */
+    ::-webkit-scrollbar-track {
+        background-color: white;
+    }
+    /* the new scrollbar will have a flat appearance with the set background color */
+
+    ::-webkit-scrollbar-thumb {
+        background-color: rgba(0, 0, 0, 0.2);
+    }
+    /* this will style the thumb, ignoring the track */
+
+    .metismenu .arrow {
+        float: right;
+        line-height: 1.42857;
+    }
+
+    .nav {
+        display: block;
+    }
+
+    .version-text span {
+        position: absolute;
+        bottom: 5px;
+        left: 0;
+        right: 0;
+        margin: auto;
+    }
+</style>
+<nav class="navbar-default navbar-static-side" role="navigation" style="height:100%;     background: #404040">
+    <div class="sidebar-collapse">
+        <ul class="nav metismenu" id="side-menu">
+            <li class="nav-header">
+                <div class="dropdown profile-element text-center ">
+                    
+                    <a data-toggle="dropdown" class="dropdown-toggle" href="#">
+                        <span class="block m-t-xs font-bold mt-4 mb-2" style="color: #ffffff !important; font-weight: bold;">
+                            Adisak  Seesom
+                        </span>
+                        <span class="text-muted  " style="font-weight:100">
+                            Administrator
+
+                        </span>
+                    </a>
+                </div>
+            </li>
+                <li id="Home">
+                    <a href="/admin/Home">
+                        <i class="fa fa-home"></i>
+                        <span class="nav-label">Home</span>
+                    </a>
+                </li>
+                            <li id="ClassAttendance">
+                    <a href="/admin/ClassAttendance">
+                        <i class="fa fa-graduation-cap"></i>
+                        <span class="title">Class Attendance </span>
+                    </a>
+                </li>
+
+                <li id="nav_course">
+                    <a href="/admin/Course">
+                        <i class="fas fa-book-open"></i>
+                        <span class="title">Courses </span>
+                    </a>
+                </li>
+
+                <li id="nav_campaign">
+                    <a href="/admin/Campaign">
+                        <i class="fa fa-flag"></i>
+                        <span class="title">Campaigns </span>
+                    </a>
+                </li>
+
+                <li id="StudentProfile">
+                    <a href="/admin/UserGroup">
+                        <i class="fa fa-user-graduate"></i>
+                        <span class="title">Student Profile </span>
+                    </a>
+                </li>
+
+                <li id="Gamification">
+                    <a href="javascript:;">
+                        <i class="fa fa-gift"></i>
+                        <span class="title">Reward </span>
+                        <span class="fa arrow"></span>
+                    </a>
+                    <ul class=" nav nav-second-level collapse" id="Sub_Gamification">
+                            <li id="RewardStore">
+                                <a href="/admin/Reward">
+                                    <div class="title">Rewards</div>
+                                </a>
+                            </li>
+
+                            <li id="RewardRedemption">
+                                <a href="/admin/Redemption">
+                                    <div class="title">Redemption</div>
+                                </a>
+                            </li>
+
+
+
+                    </ul>
+
+                </li>
+
+                <li id="nav_point">
+                    <a href="/admin/Point">
+                        <i class="fa fa-star"></i>
+                        <span class="title">Points </span>
+                    </a>
+                </li>
+
+                <li id="Security">
+                    <a href="javascript:;">
+                        <i class="fa fa-shield-alt"></i>
+                        <span class="title">Security</span>
+                        <span class="fa arrow"></span>
+                    </a>
+                    <ul class=" nav nav-second-level collapse" id="Sub_Security">
+
+                            <li id="Permissions">
+                                <a href="/admin/RolePermission">
+                                    <div class="title mini-title">Role & Permission</div>
+                                </a>
+                            </li>
+
+                            <li id="UserPermissions">
+                                <a href="/admin/Administrator">
+                                    <div class="title mini-title">Administrator</div>
+                                </a>
+                            </li>
+
+                    </ul>
+                </li>
+
+            <li id="Dashboard2">
+                <a id="logout" style="color:white;">
+                    <i class="fa fa-power-off"></i>
+                    <span class="nav-label">Sign Out</span>
+                </a>
+            </li>
+            <li class="version-text text-light">
+                <span>V 1.0.0</span>
+            </li>
+        </ul>
+
+    </div>
+
+
+</nav>
+
+
+        <div id="page-wrapper" class="white-bg" style="    height: 100vh;overflow-y: scroll;">
+            <div class="row border-bottom">
+                <nav class="navbar navbar-static-top white-bg" role="navigation" style="margin-bottom: 0">
+                    <div class="navbar-header">
+                        <a class="navbar-minimalize minimalize-styl-2 btn  m-2" href="#" style="color: #a7a2a2;"><i class="fa fa-align-left"></i></a>
+                        <img src="/admin/Content/imgs/WarwickLogo.png" style="width: 100px; margin-top: 10px;margin-bottom:10px" />
+                    </div>
+                </nav>
+            </div>
+            <div class="wrapper  animated fadeIn">
+                <div class="row">
+                    
+
+
+
+<div class="page-content-wrapper col-12">
+    <div class="page-content">
+        <div class="page-head">
+            <div class="page-title">
+                <h1>Student Profile</h1>
+            </div>
+        </div>
+        <div class="row">
+            <div class="col-12">
+                <div class="portlet box">
+                    <div class="portlet-body">
+                        <div class="table-toolbar">
+                            <div class="row">
+                                <div class="col-md-12 pull-left text-left mb-2">
+                                    <div class="btn-group w-50">
+                                        <select class="form-control w-50" id="Status">
+                                            <option value="">Status</option>
+                                            <option value="true">Active</option>
+                                            <option value="false">Inactive</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="col-md-6 pull-left text-left">
+                                    <label>Search:</label>
+                                    <div class="col-md-6 pull-left text-left px-0">
+                                        <div class="d-flex search-group">
+                                            <i class="fa fa-search keyword-icon"></i>
+                                            <input type="text" class="search-custom" id="keyword" />
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6 pull-right text-right">
+                                    <div class="btn-group">
+                                        <a class="btn ml-2 btn-template mr-2" onclick="downloadTemplate();">
+                                            <i class="fa fa-file"></i> Template
+                                        </a>
+                                    </div>
+                                    <div class="btn-group">
+                                        <a class="btn btn-import" onclick="thisFileUpload();">
+                                            <i class="fa fa-download"></i> Import
+                                            <form enctype="multipart/form-data" id="fex">
+                                                <input type="file" id="file" style="display:none;" />
+                                            </form>
+                                        </a>
+                                    </div>
+                                    
+                                    <div class="btn-group ml-2">
+                                        <a class="btn btn-primary" href="/admin/UserGroup/Create">
+                                            <i class="fa fa-plus"></i> Create
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div>
+                            <table class="table table-hover datatables">
+                                <thead class="bg-purple-dark">
+                                    <tr>
+                                        <th>Student ID</th>
+                                        <th>FullName</th>
+                                        <th>School</th>
+                                        <th>Mobile Phone</th>
+                                        <th>Parent Phone</th>
+                                        
+                                        <th>Status</th>
+                                        <th>Terminate Status</th>
+                                        <th>Expired Date</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <!-- END EXAMPLE TABLE PORTLET-->
+            </div>
+        </div>
+        <!-- END PAGE CONTENT -->
+    </div>
+</div>
+
+
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Mainly scripts -->
+<script src="/admin/Content/theme/js/jquery-3.1.1.min.js"></script>
+<script src="/admin/Content/theme/js/popper.min.js"></script>
+<script src="/admin/Content/theme/js/bootstrap.js"></script>
+<script src="/admin/Content/theme/js/plugins/metisMenu/jquery.metisMenu.js"></script>
+<script src="/admin/Content/theme/js/plugins/slimscroll/jquery.slimscroll.min.js"></script>
+<!-- Flot -->
+<script src="/admin/Content/theme/js/plugins/flot/jquery.flot.js"></script>
+<script src="/admin/Content/theme/js/plugins/flot/jquery.flot.tooltip.min.js"></script>
+<script src="/admin/Content/theme/js/plugins/flot/jquery.flot.spline.js"></script>
+<script src="/admin/Content/theme/js/plugins/flot/jquery.flot.resize.js"></script>
+<script src="/admin/Content/theme/js/plugins/flot/jquery.flot.pie.js"></script>
+<script src="/admin/Content/theme/js/plugins/flot/jquery.flot.symbol.js"></script>
+<script src="/admin/Content/theme/js/plugins/flot/jquery.flot.time.js"></script>
+<!-- Custom and plugin javascript -->
+<script src="/admin/Content/theme/js/inspinia.js"></script>
+<script src="/admin/Content/theme/js/plugins/pace/pace.min.js"></script>
+<!-- Sparkline -->
+<script src="/admin/Content/theme/js/plugins/sparkline/jquery.sparkline.min.js"></script>
+<!-- Table -->
+<script src="/admin/Content/theme/js/plugins/dataTables/datatables.min.js"></script>
+<script src="/admin/Content/theme/js/plugins/dataTables/datatables.min.js"></script>
+<!-- Date -->
+<script src="/admin/Content/theme/js/plugins/datapicker/bootstrap-datepicker.js"></script>
+<!-- ChartJS-->
+<script src="/admin/Content/theme/js/plugins/chartJs/Chart.min.js"></script>
+<script src="/admin/Content/theme/js/demo/chartjs-demo.js"></script>
+
+<!-- ApexChartJS-->
+<script src="/admin/Content/js/dashboard.js"></script>
+<script src="/admin/Content/js/progressbar.js"></script>
+
+<!-- ApexChartCDN-->
+
+
+<!-- Progress-Bar By Progress.js-->
+<script src="https://cdn.rawgit.com/kimmobrunfeldt/progressbar.js/0.6.0/dist/progressbar.js"></script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.11.2/moment.js"></script>
+
+
+<script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/1.10.19/js/jquery.dataTables.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@8"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery.blockUI/2.70/jquery.blockUI.min.js"></script>
+
+
+<script src="/admin/Content/js/dashboard.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.8.0/Chart.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@3.10"></script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.0/js/select2.full.js"></script>
+
+<script src="/admin/Content/js/polyfill.min.js"></script>
+
+<script>
+    var svgLoading = '<svg version="1.1" id="loader-1"  x="0px" y="0px" width="70px" height="70px" viewBox="0 0 40 40" enable-background="new 0 0 40 40" xml:space="preserve"><path opacity="0.4" fill="#039085" d="M20.201,5.169c-8.254,0-14.946,6.692-14.946,14.946c0,8.255,6.692,14.946,14.946,14.946s14.946-6.691,14.946-14.946C35.146,11.861,28.455,5.169,20.201,5.169z M20.201,31.749c-6.425,0-11.634-5.208-11.634-11.634c0-6.425,5.209-11.634,11.634-11.634c6.425,0,11.633,5.209,11.633,11.634C31.834,26.541,26.626,31.749,20.201,31.749z"/><path fill="#12c5b7" d="M26.013,10.047l1.654-2.866c-2.198-1.272-4.743-2.012-7.466-2.012h0v3.312h0C22.32,8.481,24.301,9.057,26.013,10.047z">	<animateTransform attributeType="xml" attributeName="transform" type="rotate" from="0 20 20" to="360 20 20" dur="0.6s" repeatCount="indefinite"/></path></svg>';
+</script>
+
+<script>
+    $(function () {
+
+        $('form').on("submit", function (e) {
+                $.blockUI({
+                    message: $(svgLoading),
+                    css: {
+                        border: 'none',
+                        padding: '5px',
+                        'background-color': 'transparent',
+                        '-webkit-border-radius': '10px',
+                        '-moz-border-radius': '10px',
+                        opacity: .8,
+                        color: '#fff',
+                        cursor: 'wait'
+                    }
+                });
+        });
+        return false;
+    });
+
+        $("#keyword").attr("placeholder", "Type here to search");
+    //$('.table').DataTable({ "searching": true, "lengthChange": false, "ordering": true });
+    $("#logout").click(function () {
+        Swal.fire({
+            title : "",
+            text: "Are you sure to sign out",
+            type: 'warning',
+            showCancelButton: true,
+            confirmButtonColor: '#c3b778',
+          cancelButtonColor: '#999999',
+            confirmButtonText: 'Yes, sign out'
+        }).then(function(result) {
+            if (result.value) {
+                location.href = ' /admin/SignIn/SignOut';
+            }
+        })
+
+    });
+
+    var isMini = false
+    $(".navbar-minimalize").click(function () {
+        //if (!isMini) {
+        //    $(".navbar-default").addClass("mini-menu");
+        //     isMini = true;
+        //} else {
+        //    $(".navbar-default").removeClass("mini-menu");
+        //}
+        if ($("body").hasClass("mini-navbar")) { localStorage.setItem("isMini", false); $(".navbar-default").removeClass("mini-menu"); }
+        else {
+            localStorage.setItem("isMini", true); $(".navbar-default").addClass("mini-menu");
+
+        }
+    })
+     function displayError() {
+           console.log(this.src)
+         }
+     function _alert(title, message, status) {
+                return new Promise(function (resolve, reject) {
+                      Swal.fire({
+                                               title: title,
+                                               text: message,
+                                               type: status == true? "success" :"warning",
+                                               showCancelButton: false,
+                                               confirmButtonColor: '#c3b778',
+                                               cancelButtonColor: '#ff6e66',
+                                               showconfirmButton : false
+                                                }).then(function(result) {
+                                                    if (result.value) {
+                                                        resolve()
+                                                    } else {
+                                                        reject()
+                                                    }
+                                           });
+                        });
+                 }
+
+        function _confirm(title, message, status) {
+                    return new Promise(function (resolve, reject) {
+                          Swal.fire({
+                                    title: title,
+                                    text: message,
+                                    type: status == true? "success" :"warning",
+                                    showCancelButton: true,
+                                    confirmButtonColor: '#c3b778',
+                                    cancelButtonColor: '#999999',
+                                    showconfirmButton : true
+                                    }).then(function (result){
+                                        if (result.value) {
+                                            resolve()
+                                        } else {
+                                            reject()
+                                        }
+                                });
+                    });
+        }
+
+     function _confirmWithRemark(title, message, isRequire) {
+                return new Promise(function (resolve, reject) {
+                    Swal.fire({
+                        title: title,
+                        input: 'text',
+                        inputAttributes: { autocapitalize: 'off' },
+                        showCancelButton: true,
+                        confirmButtonColor: '#c3b778',
+                        cancelButtonColor: '#999999',
+                        showLoaderOnConfirm: true,
+                        preConfirm: function (login) {
+                            if (isRequire) {
+                                if (!login) {
+                                    return Swal.showValidationMessage(
+                                        'Require Field'
+                                    )
+                                }
+                            }
+                        },
+                    }).then(function (result) {
+                        if (result.value) {
+                            resolve(result.value)
+                        } else {
+                            reject()
+                        }
+                    });
+
+                });
+    }
+
+    function _confirmWithInt(title, message, isRequire) {
+        return new Promise(function (resolve, reject) {
+            Swal.fire({
+                title: title,
+                input: 'number',
+                inputAttributes: { autocapitalize: 'off' },
+                showCancelButton: true,
+                confirmButtonColor: '#c3b778',
+                cancelButtonColor: '#999999',
+                showLoaderOnConfirm: true,
+                preConfirm: function (login) {
+                    if (isRequire) {
+                        if (!login) {
+                            return Swal.showValidationMessage(
+                                'Require Field'
+                            )
+                        }
+                    }
+                },
+            }).then(function (result) {
+                if (result.value) {
+                    resolve(result.value)
+                } else {
+                    reject()
+                }
+            });
+
+        });
+    }
+
+
+
+         function _confirmWithRadio(title, message, option, isRequire) {
+                return new Promise(function (resolve, reject) {
+                    Swal.fire({
+                        title: title,
+                        input: 'radio',
+                        inputAttributes: { autocapitalize: 'off' },
+                        inputOptions: option,//{'1':'Small','2':'Large'},
+                        showCancelButton: true,
+                        confirmButtonColor: '#c3b778',
+                        cancelButtonColor: '#999999',
+                        showLoaderOnConfirm: true,
+                        preConfirm: function (login) {
+                            if (isRequire) {
+                                if (!login) {
+                                    return Swal.showValidationMessage(
+                                        'Require Field'
+                                    )
+                                }
+                            }
+                        },
+                    }).then(function (result) {
+                        if (result.value) {
+                            resolve(result.value)
+                        } else {
+                            reject()
+                        }
+                    });
+
+                });
+    }
+
+    function _confirmSelectWithdata(title, message, option,input, isRequire) {
+        return new Promise(function (resolve, reject) {
+            Swal.fire({
+                title: title,
+                input: 'select',
+                inputAttributes: { autocapitalize: 'off' },
+                inputOptions: option,
+                inputValue: input,
+                showCancelButton: true,
+                confirmButtonColor: '#c3b778',
+                cancelButtonColor: '#999999',
+                showLoaderOnConfirm: true,
+                preConfirm: function (login) {
+                    if (isRequire) {
+                        if (!login) {
+                            return Swal.showValidationMessage(
+                                'Require Field'
+                            )
+                        }
+                    }
+                },
+            }).then(function (result) {
+                if (result.value) {
+                    resolve(result.value)
+                } else {
+                    reject()
+                }
+            });
+
+        });
+    }
+    function _confirmWithRadiodata(title, message, option,input, isRequire) {
+        return new Promise(function (resolve, reject) {
+            Swal.fire({
+                title: title,
+                input: 'radio',
+                inputAttributes: { autocapitalize: 'off' },
+                inputOptions: option,
+                inputValue:input,
+                showCancelButton: true,
+                confirmButtonColor: '#c3b778',
+                cancelButtonColor: '#999999',
+                showLoaderOnConfirm: true,
+                preConfirm: function (login) {
+                    if (isRequire) {
+                        if (!login) {
+                            return Swal.showValidationMessage(
+                                'Require Field'
+                            )
+                        }
+                    }
+                },
+            }).then(function (result) {
+                if (result.value) {
+                    resolve(result.value)
+                } else {
+                    reject()
+                }
+            });
+
+        });
+    }
+
+    function _alertNewLine(title, status, newMsg) {
+        return new Promise(function (resolve, reject) {
+            Swal.fire({
+                html: '<pre>' + newMsg + '</pre>',
+                title: title,
+                type: status == true ? "success" : "warning",
+                showCancelButton: false,
+                confirmButtonColor: '#c3b778',
+                cancelButtonColor: '#999999',
+                showconfirmButton: false
+            }).then((result) => {
+                if (result.value) {
+                    resolve()
+                } else {
+                    reject()
+                }
+            });
+        });
+    }
+
+            var dontBlock = false;
+
+            $(document).ajaxStart(function(){
+                if (!dontBlock) {
+                 $.blockUI({
+                                message: $(svgLoading),
+                                css: {
+                                    border: 'none',
+                                    padding: '5px',
+                                    'background-color': 'transparent',
+                                    '-webkit-border-radius': '10px',
+                                    '-moz-border-radius': '10px',
+                                    opacity: .8,
+                                    color: '#fff',
+                                    cursor: 'wait'
+                                }
+                            });}
+            }).ajaxStop($.unblockUI);
+
+            // And in the ajax methods (to be excluded), set dontBlock accordingly
+
+            $('#autocomplete').keydown(function(){
+                dontBlock = true;
+                $.ajax({
+                    // url, data etc.
+                    success: function(){ dontBlock = false; }
+                });
+            });
+
+        function _(el) {
+            return document.getElementById(el);
+    }
+
+
+
+    function uploadFile(file) {
+        return new Promise(function (resolve, reject) {
+            if (typeof file === "undefined") {
+
+                _("status").innerHTML = "ERROR: Please browse for a file before clicking the upload button";
+                _("progressBar").value = 0;
+                return;
+            }
+
+                var formdata = new FormData();
+                formdata.append("file", file);
+                formdata.append("size", file.size);
+                var ajax = new XMLHttpRequest();
+                ajax.upload.addEventListener("progress", progressHandler, false);
+                ajax.addEventListener("load", completeHandler, false);
+                ajax.addEventListener("error", errorHandler, false);
+                ajax.addEventListener("abort", abortHandler, false);
+                ajax.open("POST", "/admin/Home/Upload");
+                  ajax.onreadystatechange = function() {
+                      if (ajax.readyState === 4) {
+                          console.log(ajax)
+                          var response = JSON.parse(ajax.responseText);
+                          resolve(response);
+                      }
+                    }
+                ajax.send(formdata);
+
+        });
+     }
+
+        function progressHandler(event) {
+            _("loaded_n_total").innerHTML = "Uploaded " + byteToMb(event.loaded) + " / " + byteToMb(event.total) + " MB.";
+            //var percent = (event.loaded / event.total) * 100;
+            //_("progressBar").value = Math.round(percent);
+            //_("status").innerHTML = Math.round(percent) + "% uploaded... please wait";
+        }
+        function completeHandler(event) {
+            _("status").innerHTML = '<i class="fa fa-check-circle" style="font-size: 22px; color: #4CAF50; transform: inherit; margin-left: 10px;"></i>';
+            //_("progressBar").value = 0;
+        }
+        function errorHandler(event) {
+            _("status").innerHTML = "Upload Failed";
+        }
+        function abortHandler(event) {
+            _("status").innerHTML = "Upload Aborted";
+    }
+    function stringToGuid(str) {
+
+        var parts = [];
+        parts.push(str.slice(0,8));
+        parts.push(str.slice(8,12));
+        parts.push(str.slice(12,16));
+        parts.push(str.slice(16,20));
+        parts.push(str.slice(20,32));
+        var GUID = parts.join('-');
+        return GUID;
+    }
+
+    function byteToMb(byte) {
+        return (byte / Math.pow(1024, 2)).toFixed(2)
+    }
+    $("#keyword").keyup(function () {
+        dontBlock = true;
+        setTimeout(function () {
+             oTable.draw();
+        },500)
+    });
+    $("#service").change(function () {
+        dontBlock = true;
+        setTimeout(function () {
+             oTable.draw();
+        },500)
+    });
+
+
+   function apexBarChart(id,raw,categories,series,activityID)
+        {
+            var Service;
+            var consumeRaw = raw;
+
+             var options = {
+                chart: {
+                    height: 387,
+                    type: 'bar',
+                    toolbar: {
+                        show: false
+                     },
+                      events: {
+                             dataPointSelection: function (event, chartContext, config) {
+                              var index = config.dataPointIndex;
+
+
+                                        var url = "";
+
+
+                                        if (id == "AttentionByDepartment") {
+
+                                            url = '/admin/UserGroup/Rendering?' + "Title=" + categories[index] + "&type=" + id + "&id=" + activityID;
+                                        } else {
+
+                                            url = '/admin/UserGroup/ActivitySummary?id=' + activityID[index]+ "&Title=" + categories[index];
+                                        }
+
+                                            window.open(
+                                                  url,
+                                                  '_blank' // <- This is what makes it open in a new window.
+                                                );
+
+
+
+                            }
+                    },
+                },
+                fill: {
+                    colors: '#5762c7',
+                },
+                plotOptions: {
+                    bar: {
+                        dataLabels: {
+                            position: 'top', // top, center, bottom
+                        },
+                    }
+                },
+                 dataLabels: {
+                    enabled: true,
+                    style: {
+                        colors: ["#000"],
+                        fontSize: "14px",
+                        fontFamily: "Montserrat, Arial, sans-serif",
+
+                    },
+                    formatter: function (val, opt) {
+					        if(val>0){
+					          return val+  "%"
+					        }else{
+					          return "";
+					        }
+
+                            },
+                    offsetY: -20,
+
+                },
+                series: [{
+                    name: '',
+                    data: series
+                }],
+                xaxis: {
+                    categories: categories,
+                    position: 'bottom',
+                    labels: {
+                        show: true,
+
+
+                    },
+                    axisBorder: {
+                        show: false
+                    },
+                    axisTicks: {
+                        show: false
+                    },
+                    show: true,
+                    crosshairs: {
+                        fill: {
+                            type: 'gradient',
+                            gradient: {
+                                colorFrom: '#5762c7',
+                                colorTo: '#5762c7',
+                                stops: [0, 100],
+                                opacityFrom: 0.4,
+                                opacityTo: 0.5,
+                            }
+                        }
+                    },
+
+                },
+
+                yaxis: {
+                    axisBorder: {
+                        show: true
+                    },
+                    axisTicks: {
+                        show: true,
+                    },
+                    forceNiceScale: false,
+                    max: 100,
+                    labels: {
+                          formatter: function(value, index){
+                                if (index <= 10 && index >= 0) {
+                                        return value.toFixed(0) + '%'
+                                }
+                                else
+                                {
+                                    if (index != -1 && index != undefined) {
+                                      var raw = consumeRaw;
+                                      return raw[index.dataPointIndex];
+                                    }
+                                }
+                            },
+                    },
+
+                },
+
+            }
+
+            Service = new ApexCharts(
+                document.querySelector("#"+id),
+                options
+             );
+            Service.render();
+
+    }
+
+        //$('.date-picker').datepicker({
+        //    format: 'dd/mm/yyyy',
+        //    autoclose: true,
+        //    setDate: false
+
+        //});
+  
+    function setDateFromTo(from, to, start, end) {
+        $(from).val(start)
+        $(to).val(end)
+        var opt = {
+            todayBtn: 1,
+            autoclose: true,
+        };
+
+        $(from).datepicker(opt).on('changeDate', function (selected) {
+            var fromD = moment(this.value, "DD/MM/YYYY");
+            var toD = moment($(to).val(), "DD/MM/YYYY");
+            if (fromD > toD) {
+                $(to).val(this.value)
+            }
+
+            var minDate = new Date(selected.date.valueOf());
+            $(to).datepicker('setStartDate', minDate);
+        });
+
+
+        $(to).datepicker(opt)
+            .on('changeDate', function (selected) {
+                var fromD = moment($(from).val(), "DD/MM/YYYY");
+                var toD = moment(this.value, "DD/MM/YYYY");
+                if (toD < fromD) {
+                    $(from).val(this.value)
+                }
+                var minDate = new Date(selected.date.valueOf());
+                $(from).datepicker('setEndDate', minDate);
+            });
+        setTimeout(function () { $(to).datepicker('setStartDate', start); }, 1000)
+
+    }
+
+    function setMonthYearFromTo(from, to, start, end) {
+        $(from).val(start)
+        $(to).val(end)
+        var opt = {
+            todayBtn: 1,
+            autoclose: true,
+            format: "mm/yyyy",
+            startView: "months",
+            minViewMode: "months"
+        };
+        $(from).datepicker(opt).on('changeDate', function (selected) {
+
+            if (this.value > $(to).val()) {
+                $(to).val(this.value)
+            }
+            var minDate = new Date(selected.date.valueOf());
+            $(to).datepicker('setStartDate', minDate);
+        });
+
+
+        $(to).datepicker(opt)
+            .on('changeDate', function (selected) {
+                if (this.value < $(from).val()) {
+                    $(from).val(this.value)
+                }
+                var minDate = new Date(selected.date.valueOf());
+                $(from).datepicker('setEndDate', minDate);
+            });
+    }
+
+    function formatMoney(n, c, d, t) {
+        var c = isNaN(c = Math.abs(c)) ? 2 : c,
+            d = d == undefined ? "." : d,
+            t = t == undefined ? "," : t,
+            s = n < 0 ? "-" : "",
+            i = String(parseInt(n = Math.abs(Number(n) || 0).toFixed(c))),
+            j = (j = i.length) > 3 ? j % 3 : 0;
+
+        return s + (j ? i.substr(0, j) + t : "") + i.substr(j).replace(/(\d{3})(?=\d)/g, "$1" + t) + (c ? d + Math.abs(n - i).toFixed(c).slice(2) : "");
+    }
+    function renderComma(value) {
+        var num = Number(value.replace(/,/g, ''))
+        if (num == Math.floor(num)) {
+            return formatMoney(num, 0)
+        }
+        else {
+            return formatMoney(num, 2)
+        }
+    }
+</script> 
+    
+    <script>
+        $(document).ready(function () {
+            $('#StudentProfile').addClass("active");
+        });
+
+        function thisFileUpload() {
+            document.getElementById("file").click();
+        };
+
+        //function thisFileUpload_inactive() {
+        //    document.getElementById("file2").click();
+        //};
+
+        function downloadTemplate() {
+            var url = "/admin/Templates/StudentProfile.xlsx";
+            window.location.href = url;
+        }
+
+        $('#file').on('change', function () {
+            var form = document.getElementById('file');
+            var formData = new FormData();
+            formData.append("file", form.files[0]);
+            $.ajax({
+                url: '/admin/UserGroup/Import',
+                type: "POST",
+                data: formData,
+                processData: false,
+                contentType: false,
+                success: function (str) {
+                    if (str == true) {
+                         _alert("", "Upload file success.", true).then(function () {
+                            oTable.draw();
+                        })
+                    } else {
+                        _alert("", str, false).then(function () {
+                                location.reload();
+                        })
+                    }
+                },
+                error: function (str) {
+                    _alert("", str, false).then(function () {
+                        location.reload();
+                    })
+                }
+            });
+        });
+
+        var oTable = null;
+        oTable =  $('.datatables').DataTable({
+                    "dom": '<"clear">tip',
+                    "language": 'en',
+                    "serverSide": true,
+                    "ajax": {
+                        "url": '/admin/' + 'api/UserGroupSearch',
+                        "type": "POST",
+                        "datatype": "json",
+                        "data": function (d) {
+                            d.keyword = $('#keyword').val();
+                            d.IsActive = $("#Status").val();
+                        }
+            },
+            "columnDefs": [
+                { "orderable": false, "targets": [8] }
+            ],
+                    "columns": [
+                        { "data": "StudentID", "name": "StudentID" },
+                        { "data": "FullName", "name": "FullName" },
+                        { "data": "School", "name": "School" },
+                        { "data": "MobilePhone", "name": "MobilePhone" },
+                        { "data": "ParentPhone", "name": "ParentPhone" },
+                        //{
+                        //data: "Modified",
+
+                        //},
+                        //{ "data": "ModifiedBy", "name": "ModifiedBy" },
+                        {
+                            "data": null,
+                            render: function (data, type, row)
+                            {
+                                if (data.IsActive == false) {
+                                    return `<a onclick="changeStatus(${data.IsActive},'${data.StudentGuid}')" style="color:white" class="ml-4 btn btn-danger btn-sm margin-bottom-10 "><i class="fa fa-lock"></i> </a>`;
+
+                                } else {
+                                    return `<a onclick="changeStatus(${data.IsActive},'${data.StudentGuid}')" style="color:white" class="ml-4 btn btn-primary btn-sm margin-bottom-10 "><i class="fa fa-check"></i> </a>`;
+
+                                }
+
+                            }
+                        },
+                        { "data": "TerminateStatus", "name": "TerminateStatus",class:"text-center" },
+                        { "data": "ExpireDateStr", "name": "ExpireDateStr" },
+                        {
+                            data: null,
+                            render: function (data) {
+                                return `<div style="width: 70px;"><a class="btn btn-warning btn-sm margin-bottom-10" style="color: white;" title="Edit" href="/admin/UserGroup/Edit/${data.StudentGuid}"> <i class="fa fa-edit"></i> </a> <a class="btn btn-danger btn-sm margin-bottom-10" style="color: white;" title="Delete" onclick="Delete('${data.StudentGuid}');"><i class="fa fa-trash"></i></a></div>`;
+                            }
+                        }
+                    ],
+                    "order": [[0, "asc"]]
+         });
+
+        $('.datatables').on( 'page.dt', function () {
+            $("html, body").animate({ scrollTop: 0 });
+        });
+
+        $("#keyword").keyup(function () {
+            dontBlock = true;
+            oTable.draw();
+        });
+
+        $("#btn-search").on("click", function (e) {
+            oTable.draw();
+        });
+
+        function changeStatus(id, stdID) {
+            var text = id == true? "Are you sure to inactive this user?" : "Do you want to active this user?"
+                 _confirm(text,"", false)
+                        .then(function () {
+                            $.ajax({
+                                url: '/admin/UserGroup/ChangeStatus',
+                                type: "POST",
+                                datatype: "json",
+                                data: {
+                                    'userId': stdID,
+                                },
+                                success: function (result) {
+                                    oTable.draw();
+                                    } ,error: function (error) {
+
+                                    }
+                                });
+                        }, function () {
+                            location.reload();
+                        });
+        }
+
+        $("#Status").change(function () {
+            oTable.draw();
+        });
+
+
+        function Delete(userID) {
+            _confirm("Are you sure to delete ","", false)
+                .then(function () {
+                    $.ajax({
+                        url: '/admin/UserGroup/Delete',
+                        type: "POST",
+                        datatype: "json",
+                        data: {
+                            'userId': userID,
+                        },
+                        success: function (result) {
+                            if (result.Item1) {
+                                window.location.href = '/admin/UserGroup';
+                            } else {
+                                _alertNewLine("", false, result.Item2);
+                            }
+                        },
+                        error: function (error) {
+                            alert(error);
+                        }
+                    });
+                }, function () {
+                    location.reload();
+                });
+        }
+
+
+    </script>
+
+</body>
+</html>
+<script>
+    var ismini = localStorage.getItem("isMini");
+    if (ismini == "true") {
+        $("body").addClass("mini-navbar");
+        $(".navbar-default").addClass("mini-menu");
+    }
+    else {
+        $("body").removeClass("mini-navbar");
+        $(".navbar-default").removeClass("mini-menu");
+    }
+</script>

@@ -155,4 +155,10 @@ describe('AbsenceList (student summary + drill-down)', () => {
     render(<AbsenceList students={null} sessions={sessions} />);
     expect(screen.getByText(/No students/)).toBeTruthy();
   });
+
+  it('shows student ID before name in summary card', () => {
+    render(<AbsenceList students={[alice, carol]} sessions={sessions} />);
+    expect(screen.getByText(/stu-1 Alice/)).toBeTruthy();
+    expect(screen.getByText(/stu-3 Carol/)).toBeTruthy();
+  });
 });

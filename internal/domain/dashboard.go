@@ -104,6 +104,14 @@ type DashboardSessionSummary struct {
 	Status         string  `json:"status"`
 }
 
+// StudentProfile is a student record from the Warwick UserGroup/Student Profile page.
+type StudentProfile struct {
+	StudentID   string `json:"studentId"`
+	StudentGuid string `json:"studentGuid"`
+	FullName    string `json:"fullName"`
+	School      string `json:"school"`
+}
+
 // SavedDashboardView is a persisted filter configuration.
 type SavedDashboardView struct {
 	ID         int64            `json:"id"`

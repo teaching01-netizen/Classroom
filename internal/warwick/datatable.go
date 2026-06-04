@@ -97,6 +97,27 @@ type GivePointResponse struct {
 	Item2 string `json:"Item2"` // message or error description
 }
 
+// UserGroupRow represents a single student in the UserGroup search results.
+type UserGroupRow struct {
+	StudentID       string `json:"StudentID"`
+	StudentGuid     string `json:"StudentGuid"`
+	FullName        string `json:"FullName"`
+	School          string `json:"School"`
+	MobilePhone     string `json:"MobilePhone"`
+	ParentPhone     string `json:"ParentPhone"`
+	IsActive        bool   `json:"IsActive"`
+	TerminateStatus string `json:"TerminateStatus"`
+	ExpireDateStr   string `json:"ExpireDateStr"`
+}
+
+// UserGroupSearchResponse is the DataTables response for the UserGroup search endpoint.
+type UserGroupSearchResponse struct {
+	Draw            int            `json:"draw"`
+	RecordsTotal    int            `json:"recordsTotal"`
+	RecordsFiltered int            `json:"recordsFiltered"`
+	Data            []UserGroupRow `json:"data"`
+}
+
 // DefaultDataTablesRequest returns a DataTablesRequest with sensible defaults for initial queries.
 func DefaultDataTablesRequest(columns []string) DataTablesRequest {
 	cols := make([]DataTablesColumn, len(columns))

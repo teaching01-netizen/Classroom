@@ -1207,6 +1207,127 @@ func equalTimePtr(a, b *time.Time) bool {
 	return a.Equal(*b)
 }
 
+// FetchStudentProfiles fetches the list of student profiles from Warwick's UserGroup search.
+func (c *ClassroomClient) FetchStudentProfiles() ([]domain.StudentProfile, error) {
+	if c.pool != nil {
+		return c.fetchStudentProfilesWithPool()
+	}
+
+	if c.auth == nil {
+		return nil, fmt.Errorf("ClassroomClient has no auth and no pool")
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		cookie, _, err := c.auth.GetValidSession()
+		if err != nil {
+			return nil, domain.ErrAuthExpired
+		}
+
+		profiles, err := c.fetchStudentProfiles(cookie)
+		if err == nil {
+			return profiles, nil
+		}
+
+		var fe *domain.FetchError
+		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
+			lastErr = err
+			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
+				return nil, domain.ErrAuthExpired
+			}
+			continue
+		}
+
+		return nil, err
+	}
+	return nil, lastErr
+}
+
+func (c *ClassroomClient) fetchStudentProfilesWithPool() ([]domain.StudentProfile, error) {
+	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
+	if err != nil {
+		if errors.Is(err, ErrAuthConflict) {
+			return nil, domain.ErrAuthConflict
+		}
+		if errors.Is(err, ErrNoAvailableSessions) {
+			return nil, domain.ErrPoolExhausted
+		}
+		return nil, domain.ErrAuthExpired
+	}
+	defer c.pool.Release(ref)
+
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		profiles, err := c.fetchStudentProfiles(ref.Cookie)
+		if err == nil {
+			return profiles, nil
+		}
+		var fe *domain.FetchError
+		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
+			lastErr = err
+			if attempt == 0 {
+				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
+					if errors.Is(rerr, ErrAuthConflict) {
+						return nil, domain.ErrAuthConflict
+					}
+					return nil, domain.ErrAuthExpired
+				}
+				continue
+			}
+			return nil, lastErr
+		}
+		return nil, err
+	}
+	return nil, lastErr
+}
+
+func (c *ClassroomClient) fetchStudentProfiles(cookie string) ([]domain.StudentProfile, error) {
+	body := EncodeDataTablesBody(DefaultDataTablesRequest([]string{"StudentID", "FullName", "School"}), map[string]string{
+		"keyword":  "",
+		"IsActive": "",
+	})
+
+	resp, err := c.doRequest("POST", "/admin/api/UserGroupSearch", cookie, strings.NewReader(body))
+	if err != nil {
+		return nil, domain.NewNetworkError(err.Error())
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkAuth(resp); err != nil {
+		return nil, err
+	}
+
+	limited := io.LimitReader(resp.Body, maxBodySize)
+	var data UserGroupSearchResponse
+	if err := json.NewDecoder(limited).Decode(&data); err != nil {
+		return nil, domain.NewInvalidPayloadError(fmt.Sprintf("decode UserGroupSearch: %v", err))
+	}
+
+	slog.Debug("warwick_student_profiles_fetch",
+		"http_status", resp.StatusCode,
+		"records_total", data.RecordsTotal,
+		"records_filtered", data.RecordsFiltered,
+		"data_count", len(data.Data),
+	)
+
+	if len(data.Data) == 0 {
+		slog.Warn("warwick_student_profiles_empty",
+			"hint", "UserGroupSearch returned 0 students; student IDs will not be available",
+		)
+	}
+
+	profiles := make([]domain.StudentProfile, 0, len(data.Data))
+	for _, row := range data.Data {
+		profiles = append(profiles, domain.StudentProfile{
+			StudentID:   row.StudentID,
+			StudentGuid: row.StudentGuid,
+			FullName:    row.FullName,
+			School:      row.School,
+		})
+	}
+	return profiles, nil
+}
+
 // populateCourseName fills in the empty Name field of a CourseDetail by
 // looking it up in the cached courses list. The ClassAttendanceDetailSearch
 // endpoint only returns session-level data, so the course name must come
