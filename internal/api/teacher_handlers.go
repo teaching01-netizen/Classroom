@@ -643,7 +643,7 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 		// Aggregate across courses.
 		// Track per-student data across courses.
 		type studentAgg struct {
-			studentID   string
+			studentGUID string // UUID from attendance data
 			name        string
 			nickname    string
 			school      string
@@ -696,7 +696,7 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 				agg, ok := studentMap[s.StudentID]
 				if !ok {
 				agg = &studentAgg{
-					studentID:   s.StudentID,
+					studentGUID: s.StudentID,
 					name:        s.Name,
 					nickname:    s.Nickname,
 					school:      s.School,
@@ -749,6 +749,19 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 		// Set total students per session.
 		for i := range sessions {
 			sessions[i].TotalStudents = totalStudents
+		}
+
+		// Enrich with Warwick StudentID from UserGroup profile list.
+		// Maps StudentGuid (UUID) → StudentID (e.g. "W88888")
+		guidToStudentID := make(map[string]string)
+		if profiles, err := cc.FetchStudentProfiles(); err == nil {
+			for _, p := range profiles {
+				if p.StudentID != "" && p.StudentGuid != "" {
+					guidToStudentID[p.StudentGuid] = p.StudentID
+				}
+			}
+		} else {
+			slog.Warn("absence_dashboard_student_profiles_fetch_failed", "error", err)
 		}
 
 		// Build student absence list.
@@ -821,7 +834,7 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			studentSet[key] = true
 
 			students = append(students, domain.StudentAbsence{
-				StudentID:        agg.studentID,
+				StudentID:        guidToStudentID[agg.studentGUID],
 				Name:             agg.name,
 				Nickname:         agg.nickname,
 				School:           agg.school,
