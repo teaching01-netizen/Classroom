@@ -1,12 +1,12 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 
-const buildSections = (students, sessions) => {
+const buildStudentSummaries = (students, sessions) => {
   const sessionLookup = new Map();
   for (const s of sessions || []) {
     sessionLookup.set(s.sessionId, s);
   }
 
-  const sectionsByCourse = new Map();
+  const summaries = [];
   for (const student of students || []) {
     const absentSessions = (student.perSession || []).filter((ps) => ps.status === 'absent');
     if (absentSessions.length === 0) continue;
@@ -25,40 +25,284 @@ const buildSections = (students, sessions) => {
       byCourse.get(sess.courseId).absences.push(ps);
     }
 
-    for (const course of byCourse.values()) {
-      if (!sectionsByCourse.has(course.courseId)) {
-        sectionsByCourse.set(course.courseId, {
-          courseId: course.courseId,
-          courseName: course.courseName,
-          rows: [],
-        });
-      }
-      const sorted = [...course.absences].sort((a, b) =>
-        (a.sessionDate || '').localeCompare(b.sessionDate || ''),
-      );
-      const latest = sorted[sorted.length - 1];
-      sectionsByCourse.get(course.courseId).rows.push({
-        student,
-        absenceCount: course.absences.length,
-        latestDate: latest?.sessionDate || '',
-        latestSessionName: latest?.sessionName || (latest ? `Session ${latest.sessionNumber}` : ''),
-      });
-    }
+    const courses = Array.from(byCourse.values())
+      .map((c) => ({
+        ...c,
+        absences: [...c.absences].sort((a, b) =>
+          (a.sessionDate || '').localeCompare(b.sessionDate || ''),
+        ),
+      }))
+      .sort((a, b) => (a.courseName || '').localeCompare(b.courseName || ''));
+
+    summaries.push({
+      student,
+      totalAbsences: absentSessions.length,
+      courses,
+    });
   }
 
-  return Array.from(sectionsByCourse.values())
-    .map((s) => ({
-      ...s,
-      rows: s.rows.sort((a, b) => {
-        if (b.absenceCount !== a.absenceCount) return b.absenceCount - a.absenceCount;
-        return (a.student.name || '').localeCompare(b.student.name || '');
-      }),
-    }))
-    .sort((a, b) => (a.courseName || '').localeCompare(b.courseName || ''));
+  return summaries.sort((a, b) => {
+    if (a.student.atRisk !== b.student.atRisk) return a.student.atRisk ? -1 : 1;
+    if (b.totalAbsences !== a.totalAbsences) return b.totalAbsences - a.totalAbsences;
+    return (a.student.name || '').localeCompare(b.student.name || '');
+  });
 };
 
+function StudentSummary({ summary, expanded, onToggle }) {
+  const { student, totalAbsences, courses } = summary;
+  const courseNames = courses.map((c) => c.courseName).join(', ');
+
+  return (
+    <div
+      style={{
+        background: 'var(--color-bg, #FFFFFF)',
+        border: '1px solid var(--color-border, #DCDBDD)',
+        borderRadius: 'var(--radius-lg, 12px)',
+        overflow: 'hidden',
+        borderLeft: student.atRisk
+          ? '3px solid var(--color-warning, #7A631C)'
+          : '3px solid transparent',
+      }}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        style={{
+          width: '100%',
+          padding: 'var(--space-4, 16px)',
+          background: 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          textAlign: 'left',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--space-3, 12px)',
+          font: 'inherit',
+          color: 'inherit',
+        }}
+      >
+        <div
+          style={{
+            width: '36px',
+            height: '36px',
+            borderRadius: '50%',
+            background: student.atRisk
+              ? 'color-mix(in srgb, var(--color-warning, #7A631C) 12%, transparent)'
+              : 'var(--color-bg-hover, #F1F2F4)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: '14px',
+            fontWeight: '600',
+            color: student.atRisk ? 'var(--color-warning, #7A631C)' : 'var(--color-text-secondary, #4F5056)',
+            flexShrink: 0,
+          }}
+        >
+          {(student.name || '?')[0].toUpperCase()}
+        </div>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 'var(--space-2, 8px)',
+              flexWrap: 'wrap',
+            }}
+          >
+            <span style={{ fontSize: '15px', fontWeight: '600', color: 'var(--color-text-primary, #111113)' }}>
+              {student.name}
+            </span>
+            {student.atRisk && (
+              <span
+                style={{
+                  fontSize: '10px',
+                  fontWeight: '600',
+                  padding: '2px 6px',
+                  borderRadius: 'var(--radius-sm, 4px)',
+                  background: 'var(--color-warning-bg, #FAF0C4)',
+                  color: 'var(--color-warning, #7A631C)',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                AT RISK
+              </span>
+            )}
+          </div>
+          <div
+            style={{
+              fontSize: '12px',
+              color: 'var(--color-text-muted, #696A6C)',
+              marginTop: '2px',
+            }}
+          >
+            {totalAbsences} absence{totalAbsences !== 1 ? 's' : ''} · {courseNames}
+          </div>
+        </div>
+
+        <span
+          aria-hidden="true"
+          style={{
+            fontSize: '14px',
+            color: 'var(--color-text-muted, #696A6C)',
+            transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)',
+            transition: 'transform 0.15s ease',
+            flexShrink: 0,
+          }}
+        >
+          ▼
+        </span>
+      </button>
+
+      {expanded && <StudentDetail courses={courses} />}
+    </div>
+  );
+}
+
+function StudentDetail({ courses }) {
+  return (
+    <div
+      style={{
+        borderTop: '1px solid var(--color-border-subtle, #EEEFF1)',
+        background: 'var(--color-bg-subtle, #F5F5F5)',
+        padding: 'var(--space-3, 12px) var(--space-4, 16px) var(--space-4, 16px)',
+      }}
+    >
+      {courses.map((course) => (
+        <div
+          key={course.courseId}
+          style={{
+            marginBottom: 'var(--space-3, 12px)',
+            background: 'var(--color-bg, #FFFFFF)',
+            border: '1px solid var(--color-border-subtle, #EEEFF1)',
+            borderRadius: 'var(--radius-md, 8px)',
+            overflow: 'hidden',
+          }}
+        >
+          <h4
+            style={{
+              margin: 0,
+              padding: '8px 12px',
+              fontSize: '0.8125rem',
+              fontWeight: '600',
+              color: 'var(--color-text-primary, #111113)',
+              background: 'var(--color-bg-subtle, #F5F5F5)',
+              borderBottom: '1px solid var(--color-border-subtle, #EEEFF1)',
+            }}
+          >
+            {course.courseName}
+            <span
+              style={{
+                marginLeft: '8px',
+                fontSize: '0.6875rem',
+                fontWeight: '500',
+                color: 'var(--color-text-muted, #696A6C)',
+              }}
+            >
+              {course.absences.length} absence{course.absences.length !== 1 ? 's' : ''}
+            </span>
+          </h4>
+
+          <table
+            style={{
+              width: '100%',
+              borderCollapse: 'collapse',
+              fontSize: '0.8125rem',
+            }}
+          >
+            <thead>
+              <tr>
+                <th
+                  scope="col"
+                  style={{
+                    textAlign: 'left',
+                    padding: '6px 12px',
+                    fontSize: '0.6875rem',
+                    fontWeight: '600',
+                    color: 'var(--color-text-muted, #696A6C)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.04em',
+                    borderBottom: '1px solid var(--color-border-subtle, #EEEFF1)',
+                    width: '60px',
+                  }}
+                >
+                  ครั้งที่
+                </th>
+                <th
+                  scope="col"
+                  style={{
+                    textAlign: 'left',
+                    padding: '6px 12px',
+                    fontSize: '0.6875rem',
+                    fontWeight: '600',
+                    color: 'var(--color-text-muted, #696A6C)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.04em',
+                    borderBottom: '1px solid var(--color-border-subtle, #EEEFF1)',
+                    width: '120px',
+                  }}
+                >
+                  Date
+                </th>
+                <th
+                  scope="col"
+                  style={{
+                    textAlign: 'left',
+                    padding: '6px 12px',
+                    fontSize: '0.6875rem',
+                    fontWeight: '600',
+                    color: 'var(--color-text-muted, #696A6C)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.04em',
+                    borderBottom: '1px solid var(--color-border-subtle, #EEEFF1)',
+                  }}
+                >
+                  Session
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {course.absences.map((absence) => (
+                <tr key={absence.sessionId}>
+                  <td
+                    style={{
+                      padding: '8px 12px',
+                      color: 'var(--color-text-primary, #111113)',
+                      fontVariantNumeric: 'tabular-nums',
+                    }}
+                  >
+                    {absence.sessionNumber}
+                  </td>
+                  <td
+                    style={{
+                      padding: '8px 12px',
+                      color: 'var(--color-text-secondary, #4F5056)',
+                    }}
+                  >
+                    {absence.sessionDate || '—'}
+                  </td>
+                  <td
+                    style={{
+                      padding: '8px 12px',
+                      color: 'var(--color-text-primary, #111113)',
+                    }}
+                  >
+                    {absence.sessionName || `Session ${absence.sessionNumber}`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function AbsenceList({ students, sessions }) {
-  const sections = useMemo(() => buildSections(students, sessions), [students, sessions]);
+  const summaries = useMemo(() => buildStudentSummaries(students, sessions), [students, sessions]);
+  const [expandedStudentId, setExpandedStudentId] = useState(null);
 
   if (!students || students.length === 0) {
     return (
@@ -79,7 +323,7 @@ export function AbsenceList({ students, sessions }) {
     );
   }
 
-  if (sections.length === 0) {
+  if (summaries.length === 0) {
     return (
       <div
         style={{
@@ -98,175 +342,19 @@ export function AbsenceList({ students, sessions }) {
       style={{
         display: 'flex',
         flexDirection: 'column',
-        gap: 'var(--space-6, 24px)',
+        gap: 'var(--space-3, 12px)',
       }}
     >
-      {sections.map((section) => (
-        <section
-          key={section.courseId}
-          style={{
-            background: 'var(--color-bg, #FFFFFF)',
-            border: '1px solid var(--color-border, #DCDBDD)',
-            borderRadius: 'var(--radius-lg, 12px)',
-            overflow: 'hidden',
+      {summaries.map((summary) => (
+        <StudentSummary
+          key={summary.student.studentId || summary.student.name}
+          summary={summary}
+          expanded={expandedStudentId === (summary.student.studentId || summary.student.name)}
+          onToggle={() => {
+            const id = summary.student.studentId || summary.student.name;
+            setExpandedStudentId((prev) => (prev === id ? null : id));
           }}
-        >
-          <h3
-            style={{
-              padding: 'var(--space-3, 12px) var(--space-4, 16px)',
-              fontSize: '0.9375rem',
-              fontWeight: '600',
-              color: 'var(--color-text-primary, #111113)',
-              background: 'var(--color-bg-subtle, #F5F5F5)',
-              borderBottom: '1px solid var(--color-border, #DCDBDD)',
-              margin: 0,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-            }}
-          >
-            <span>{section.courseName}</span>
-            <span
-              style={{
-                fontSize: '0.75rem',
-                fontWeight: '500',
-                color: 'var(--color-text-muted, #696A6C)',
-              }}
-            >
-              {section.rows.length} student{section.rows.length !== 1 ? 's' : ''} absent
-            </span>
-          </h3>
-
-          <table
-            style={{
-              width: '100%',
-              borderCollapse: 'collapse',
-              fontSize: '0.875rem',
-            }}
-          >
-            <thead>
-              <tr>
-                <th
-                  scope="col"
-                  style={{
-                    textAlign: 'left',
-                    padding: '8px 16px',
-                    fontSize: '0.75rem',
-                    fontWeight: '600',
-                    color: 'var(--color-text-muted, #696A6C)',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.04em',
-                    borderBottom: '1px solid var(--color-border-subtle, #EEEFF1)',
-                  }}
-                >
-                  Student
-                </th>
-                <th
-                  scope="col"
-                  style={{
-                    textAlign: 'right',
-                    padding: '8px 16px',
-                    fontSize: '0.75rem',
-                    fontWeight: '600',
-                    color: 'var(--color-text-muted, #696A6C)',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.04em',
-                    borderBottom: '1px solid var(--color-border-subtle, #EEEFF1)',
-                    width: '100px',
-                  }}
-                >
-                  Absences
-                </th>
-                <th
-                  scope="col"
-                  style={{
-                    textAlign: 'left',
-                    padding: '8px 16px',
-                    fontSize: '0.75rem',
-                    fontWeight: '600',
-                    color: 'var(--color-text-muted, #696A6C)',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.04em',
-                    borderBottom: '1px solid var(--color-border-subtle, #EEEFF1)',
-                  }}
-                >
-                  Latest
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {section.rows.map((row) => (
-                <tr
-                  key={row.student.studentId || row.student.name}
-                  style={{
-                    borderTop: '1px solid var(--color-border-subtle, #EEEFF1)',
-                  }}
-                >
-                  <td
-                    style={{
-                      padding: '10px 16px',
-                      color: 'var(--color-text-primary, #111113)',
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 'var(--space-2, 8px)',
-                      }}
-                    >
-                      <span style={{ fontWeight: '500' }}>{row.student.name}</span>
-                      {row.student.atRisk && (
-                        <span
-                          style={{
-                            fontSize: '0.625rem',
-                            fontWeight: '600',
-                            padding: '2px 6px',
-                            borderRadius: 'var(--radius-sm, 4px)',
-                            background: 'var(--color-warning-bg, #FAF0C4)',
-                            color: 'var(--color-warning, #7A631C)',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          AT RISK
-                        </span>
-                      )}
-                    </div>
-                  </td>
-                  <td
-                    style={{
-                      padding: '10px 16px',
-                      textAlign: 'right',
-                      color: 'var(--color-text-primary, #111113)',
-                      fontVariantNumeric: 'tabular-nums',
-                    }}
-                  >
-                    {row.absenceCount}
-                  </td>
-                  <td
-                    style={{
-                      padding: '10px 16px',
-                      color: 'var(--color-text-secondary, #4F5056)',
-                      fontSize: '0.8125rem',
-                    }}
-                  >
-                    {row.latestDate || '—'}
-                    {row.latestSessionName && (
-                      <span
-                        style={{
-                          marginLeft: '8px',
-                          color: 'var(--color-text-muted, #696A6C)',
-                        }}
-                      >
-                        · {row.latestSessionName}
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
+        />
       ))}
     </div>
   );
