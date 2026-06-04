@@ -190,7 +190,7 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 // Uses GetCourseDetail which handles its own caching — no extra API calls on warm cache.
 func (c *ClassroomClient) enrichCourses(courses []domain.CourseSummary) {
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 5) // limit concurrency
+	sem := make(chan struct{}, 2) // match teacher tier capacity (default 2 sessions)
 	var mu sync.Mutex
 
 	for i := range courses {
