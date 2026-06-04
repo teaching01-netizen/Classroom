@@ -4,7 +4,6 @@ import { useDashboardViews } from '../hooks/useDashboardViews';
 import { useCourses } from '../hooks/useCourses';
 import { useDashboardFiltersStore } from '../store/useDashboardFiltersStore';
 import { DashboardKPIRow } from '../components/dashboard/DashboardKPIRow';
-import { AtRiskCallout } from '../components/dashboard/AtRiskCallout';
 import { FilterBar } from '../components/dashboard/FilterBar';
 import { AbsenceList } from '../components/dashboard/AbsenceList';
 
@@ -130,7 +129,6 @@ export function AbsenceDashboard() {
       {!loading && !error && data && (
         <>
           <DashboardKPIRow data={data} />
-          <AtRiskCallout students={data?.topAtRisk} />
           <AbsenceList students={data?.students} sessions={data?.sessions} />
 
           <div style={{
