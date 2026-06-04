@@ -19,6 +19,7 @@ const (
 	TierQR          SessionTier = iota // QR polling — predictable, steady
 	TierTeacher                        // Teacher browsing + toggle — bursty
 	TierInteractive                    // Toggle check-in — fast, low-latency
+	TierPreWarm                        // SessionPreWarmer background sync — gentle, isolated
 )
 
 // Staggered re-auth / kicked detection constants.
@@ -126,14 +127,16 @@ func (s *pooledSession) isKickCandidate() bool {
 //   - Rate limit buckets (each session has its own connection pool)
 type SessionPool struct {
 	mu              sync.Mutex
-	cond            *sync.Cond   // signals waiters when a session is released
+	cond            *sync.Cond // signals waiters when a session is released
 	sessions        []*pooledSession
 	qrNext          uint64
 	teacherNext     uint64
 	interactiveNext uint64
+	prewarmNext     uint64
 	qrSize          int
 	teacherSize     int
 	interactiveSize int
+	prewarmSize     int // 0 = TierPreWarm disabled
 }
 
 // NewSessionPool creates a pool with the given session counts.
@@ -210,6 +213,13 @@ func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 	case TierInteractive:
 		start = p.qrSize + p.teacherSize
 		end = p.qrSize + p.teacherSize + p.interactiveSize
+	case TierPreWarm:
+		if p.prewarmSize == 0 {
+			p.mu.Unlock()
+			return nil, fmt.Errorf("warwick: TierPreWarm requested but pool has no prewarm sessions (call SetPreWarmSize first)")
+		}
+		start = p.qrSize + p.teacherSize + p.interactiveSize
+		end = start + p.prewarmSize
 	default:
 		p.mu.Unlock()
 		return nil, fmt.Errorf("warwick: unknown session tier %d", tier)
@@ -230,6 +240,8 @@ func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 		next = int(atomic.AddUint64(&p.teacherNext, 1) - 1)
 	case TierInteractive:
 		next = int(atomic.AddUint64(&p.interactiveNext, 1) - 1)
+	case TierPreWarm:
+		next = int(atomic.AddUint64(&p.prewarmNext, 1) - 1)
 	}
 
 	for offset := 0; offset < (end - start); offset++ {
@@ -278,6 +290,13 @@ func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration
 	case TierInteractive:
 		start = p.qrSize + p.teacherSize
 		end = p.qrSize + p.teacherSize + p.interactiveSize
+	case TierPreWarm:
+		if p.prewarmSize == 0 {
+			p.mu.Unlock()
+			return nil, fmt.Errorf("warwick: TierPreWarm requested but pool has no prewarm sessions (call SetPreWarmSize first)")
+		}
+		start = p.qrSize + p.teacherSize + p.interactiveSize
+		end = start + p.prewarmSize
 	default:
 		p.mu.Unlock()
 		return nil, fmt.Errorf("warwick: unknown session tier %d", tier)
@@ -317,6 +336,8 @@ func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration
 			next = int(atomic.AddUint64(&p.teacherNext, 1) - 1)
 		case TierInteractive:
 			next = int(atomic.AddUint64(&p.interactiveNext, 1) - 1)
+		case TierPreWarm:
+			next = int(atomic.AddUint64(&p.prewarmNext, 1) - 1)
 		}
 
 		for offset := 0; offset < (end - start); offset++ {
@@ -364,6 +385,48 @@ func (p *SessionPool) Release(ref *SessionRef) {
 	ref.session.inUse = false
 	p.cond.Signal()
 	p.mu.Unlock()
+}
+
+// SetPreWarmSize configures the number of sessions reserved for TierPreWarm
+// (background pre-warming by SessionPreWarmer). Must be called BEFORE the
+// pool starts serving traffic, and must be > 0 to enable the tier.
+//
+// The prewarm sessions are appended after the QR/Teacher/Interactive slices
+// in the underlying sessions array, so the existing tier ranges stay stable.
+func (p *SessionPool) SetPreWarmSize(n int) error {
+	if n < 1 {
+		return fmt.Errorf("warwick: prewarmSessions must be >= 1, got %d", n)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.prewarmSize != 0 {
+		return fmt.Errorf("warwick: prewarmSize already set to %d, cannot resize", p.prewarmSize)
+	}
+
+	needed := p.qrSize + p.teacherSize + p.interactiveSize + n
+	for len(p.sessions) < needed {
+		// We need to construct additional pooledSession entries sharing the
+		// existing sessions' HTTP clients would be ideal, but the original
+		// NewSessionPool stores email/password/loginURL on the session itself.
+		// We pull the first session's credentials as a best-effort default
+		// for the new ones; in practice SetPreWarmSize is called right after
+		// NewSessionPool, so the first session is a valid template.
+		if len(p.sessions) == 0 {
+			return fmt.Errorf("warwick: SetPreWarmSize called on empty pool")
+		}
+		tmpl := p.sessions[0]
+		s := &pooledSession{
+			client:    tmpl.client,
+			email:     tmpl.email,
+			password:  tmpl.password,
+			loginURL:  tmpl.loginURL,
+			obtainedAt: time.Time{},
+			expiresAt: time.Now().Add(-time.Duration(rand.Intn(300)) * time.Second),
+		}
+		p.sessions = append(p.sessions, s)
+	}
+	p.prewarmSize = n
+	return nil
 }
 
 // ForceRefreshOnSession performs a fresh login for just this one session.

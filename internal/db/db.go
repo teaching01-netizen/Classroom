@@ -65,14 +65,16 @@ func RunMigrations(databaseURL string) error {
 		return err
 	}
 
-	// After successful migration (or ErrNoChange), verify schema version >= 4
+	// After successful migration (or ErrNoChange), verify schema version >= 5
+	// (5 adds attendance_reports table + last_warwick_sync_at column for
+	// the pre-warm infrastructure used by phases 1-5.)
 	var version int
 	if err := db.QueryRowContext(context.Background(), "SELECT version FROM schema_migrations").Scan(&version); err != nil {
 		return fmt.Errorf("check schema version: %w", err)
 	}
-	if version < 4 {
-		slog.Error("schema version below required minimum", "have", version, "need", 4)
-		return fmt.Errorf("schema version %d below required minimum 4", version)
+	if version < 5 {
+		slog.Error("schema version below required minimum", "have", version, "need", 5)
+		return fmt.Errorf("schema version %d below required minimum 5", version)
 	}
 
 	return nil

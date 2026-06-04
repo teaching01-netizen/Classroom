@@ -1,8 +1,11 @@
 package cache
 
 import (
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestGetStale_FreshData(t *testing.T) {
@@ -126,4 +129,81 @@ func TestGet_MissingKey(t *testing.T) {
 	if ok {
 		t.Fatal("expected ok=false for missing key")
 	}
+}
+
+// --- MarkStale tests ---
+
+func TestMarkStale_ExtendsTTL(t *testing.T) {
+	c := New()
+	// Set with 1ms TTL so it expires fast.
+	c.Set("k", "v", 1*time.Millisecond)
+	time.Sleep(2 * time.Millisecond)
+
+	// Must be expired now.
+	_, ok := c.Get("k")
+	assert.False(t, ok, "must be expired before MarkStale")
+
+	// MarkStale extends by 5 minutes.
+	ok = c.MarkStale("k", 5*time.Minute)
+	assert.True(t, ok, "MarkStale must return true for existing key")
+
+	// Must be accessible via Get now (TTL extended).
+	val, ok := c.Get("k")
+	assert.True(t, ok, "Get must succeed after MarkStale extends TTL")
+	assert.Equal(t, "v", val)
+}
+
+func TestMarkStale_StillStaleViaGetStale(t *testing.T) {
+	c := New()
+	c.Set("k", "v", 1*time.Millisecond)
+	time.Sleep(2 * time.Millisecond)
+
+	// GetStale works even before MarkStale (entry exists, just expired).
+	val, ok := c.GetStale("k")
+	assert.True(t, ok)
+	assert.Equal(t, "v", val)
+
+	// After MarkStale, GetStale still works.
+	c.MarkStale("k", 1*time.Millisecond)
+	time.Sleep(2 * time.Millisecond)
+	val, ok = c.GetStale("k")
+	assert.True(t, ok, "GetStale must work after MarkStale even after secondary expiry")
+	assert.Equal(t, "v", val)
+}
+
+func TestMarkStale_MissingKeyReturnsFalse(t *testing.T) {
+	c := New()
+	ok := c.MarkStale("nonexistent", 5*time.Minute)
+	assert.False(t, ok, "MarkStale must return false for missing key")
+}
+
+func TestMarkStale_ConcurrentAccess(t *testing.T) {
+	c := New()
+	c.Set("k", "v", 5*time.Minute)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.MarkStale("k", 1*time.Second)
+			c.Get("k")
+			c.GetStale("k")
+		}()
+	}
+	wg.Wait()
+}
+
+func TestMarkStale_DeltaCanBeNegative(t *testing.T) {
+	c := New()
+	c.Set("k", "v", 10*time.Minute)
+
+	// Negative delta should shrink the TTL, potentially making it expire sooner.
+	ok := c.MarkStale("k", -20*time.Minute)
+	assert.True(t, ok)
+
+	// Get should fail because the TTL is now in the past.
+	time.Sleep(time.Millisecond)
+	_, ok = c.Get("k")
+	assert.False(t, ok, "negative delta should shrink TTL past expiry")
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"qr-command-center/internal/cache"
 	"qr-command-center/internal/db"
@@ -38,13 +39,16 @@ func init() {
 	allowedOrigin = os.Getenv("CORS_ORIGIN")
 }
 
-func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.FavouriteRepository, c *cache.Cache, refresher *service.DataRefresher, wsMaxConns int64) *chi.Mux {
+func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.FavouriteRepository, c *cache.Cache, refresher *service.DataRefresher, wsMaxConns int64, checkinRepo db.SessionCheckinRepository, persister warwick.ReportEnqueuer) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(chimiddleware.Logger)
 	r.Use(corsMiddleware)
 
 	r.Get("/api", healthHandler(c, refresher))
 	r.Get("/api/", healthHandler(c, refresher))
+
+	// Prometheus metrics endpoint.
+	r.Handle("/metrics", promhttp.Handler())
 
 	r.Route("/api/rooms", func(r chi.Router) {
 		r.Use(roomLimiter.Middleware)
@@ -65,7 +69,7 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.
 		r.Get("/courses/{courseId}", getCourseDetailHandler(cc))
 		r.Get("/courses/{courseId}/sessions/{sessionId}", getSessionDetailHandler(cc))
 		r.With(toggleLimiter.Middleware).Post("/courses/{courseId}/sessions/{sessionId}/toggle-checkin", toggleCheckinHandler(cc))
-		r.Get("/courses/{courseId}/attendance-report", getCourseAttendanceReportHandler(cc))
+		r.Get("/courses/{courseId}/attendance-report", getCourseAttendanceReportHandler(cc, checkinRepo, persister))
 
 		r.Get("/favourites", getFavouritesHandler(favRepo))
 		r.Post("/favourites", addFavouriteHandler(favRepo))

@@ -10,9 +10,13 @@ import (
 	"qr-command-center/internal/domain"
 )
 
-// SessionFetcher abstracts live session-detail retrieval so that
-// ComputeCourseAttendanceReport can be unit-tested without the real Warwick API.
-type SessionFetcher interface {
+// SessionDataSource abstracts where session student data comes from for the
+// attendance report. Implementations include:
+//   - DBSessionDataSource: reads pre-warmed data from the session_checkins table (default)
+//   - LiveSessionDataSource: fetches live from Warwick API (?source=live)
+//
+// Both have the same shape so ComputeCourseAttendanceReport is agnostic to the source.
+type SessionDataSource interface {
 	FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error)
 }
 
@@ -28,7 +32,7 @@ type SessionFetcher interface {
 // This is the fairest metric for late-add or transferred students.
 func ComputeCourseAttendanceReport(
 	ctx context.Context,
-	fetcher SessionFetcher,
+	source SessionDataSource,
 	course *domain.CourseDetail,
 	threshold int,
 ) *domain.CourseAttendanceReport {
@@ -93,7 +97,7 @@ func ComputeCourseAttendanceReport(
 			sessCtx, sessCancel := context.WithTimeout(ctx, 10*time.Second)
 			defer sessCancel()
 
-			detail, err := fetcher.FetchSessionDetailLive(sessCtx, sess.SessionID)
+			detail, err := source.FetchSessionDetailLive(sessCtx, sess.SessionID)
 			if err != nil {
 				if ctx.Err() != nil {
 					results[idx] = sessionResult{index: idx, state: "error", err: fmt.Errorf("cancelled")}
@@ -111,7 +115,7 @@ func ComputeCourseAttendanceReport(
 					}
 					retryCtx, retryCancel := context.WithTimeout(ctx, 10*time.Second)
 					defer retryCancel()
-					detail, err = fetcher.FetchSessionDetailLive(retryCtx, sess.SessionID)
+					detail, err = source.FetchSessionDetailLive(retryCtx, sess.SessionID)
 					if err != nil {
 						results[idx] = sessionResult{index: idx, state: "error", err: err}
 						return

@@ -246,6 +246,88 @@ func TestUpsertFromWarwick_EmptyStudentsList(t *testing.T) {
 	require.NoError(t, err, "should not error with empty students list")
 }
 
+// TestUpsertFromWarwick_SetsLastWarwickSyncAt pins the Phase 1 contract:
+// UpsertFromWarwick must stamp last_warwick_sync_at = NOW() on every row it
+// touches. The session pre-warmer (Phase 2) and the per-session staleness
+// check in the report source (Phase 3) both depend on this column being
+// current after a Warwick refresh.
+func TestUpsertFromWarwick_SetsLastWarwickSyncAt(t *testing.T) {
+	repo := newTestRepo(t)
+	sessionID := "test-session-" + t.Name()
+	sessionDate := time.Date(2026, 5, 30, 0, 0, 0, 0, time.UTC)
+	pool := repo.pool
+	t.Cleanup(func() { cleanupTestSession(t, pool, sessionID) })
+
+	before := time.Now().Add(-time.Second)
+
+	err := repo.UpsertFromWarwick(context.Background(), sessionID, sessionDate, []domain.StudentCheckin{
+		{StudentID: "s1", Name: "Alice", CheckedIn: false},
+		{StudentID: "s2", Name: "Bob", CheckedIn: true},
+	})
+	require.NoError(t, err)
+
+	after := time.Now().Add(time.Second)
+
+	rows, err := pool.Query(context.Background(),
+		`SELECT student_id, last_warwick_sync_at FROM session_checkins WHERE session_id = $1`, sessionID)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	type row struct {
+		id      string
+		syncAt  time.Time
+	}
+	var got []row
+	for rows.Next() {
+		var r row
+		require.NoError(t, rows.Scan(&r.id, &r.syncAt))
+		got = append(got, r)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, got, 2)
+
+	for _, r := range got {
+		assert.True(t, !r.syncAt.Before(before) && !r.syncAt.After(after),
+			"student %s last_warwick_sync_at=%v must be within [%v, %v]",
+			r.id, r.syncAt, before, after)
+	}
+}
+
+// TestUpsertFromWarwick_StaleSessionHasOldSyncAt asserts the inverse: a
+// session never refreshed (or refreshed long ago) has an old or null
+// last_warwick_sync_at. The Phase 3 staleness check relies on
+// time.Since(last_warwick_sync_at) > threshold to decide whether to
+// trigger an async re-pre-warm.
+func TestUpsertFromWarwick_StaleSessionHasOldSyncAt(t *testing.T) {
+	repo := newTestRepo(t)
+	sessionID := "test-session-" + t.Name()
+	sessionDate := time.Date(2026, 5, 30, 0, 0, 0, 0, time.UTC)
+	pool := repo.pool
+	t.Cleanup(func() { cleanupTestSession(t, pool, sessionID) })
+
+	// Insert once to establish a sync_at ~now.
+	require.NoError(t, repo.UpsertFromWarwick(context.Background(), sessionID, sessionDate, []domain.StudentCheckin{
+		{StudentID: "s1", Name: "Alice", CheckedIn: false},
+	}))
+
+	// Manually backdate the sync_at to simulate staleness.
+	twoMinutesAgo := time.Now().Add(-2 * time.Minute)
+	_, err := pool.Exec(context.Background(),
+		`UPDATE session_checkins SET last_warwick_sync_at = $1 WHERE session_id = $2`,
+		twoMinutesAgo, sessionID)
+	require.NoError(t, err)
+
+	// Read it back and confirm the staleness check would fire.
+	var syncAt *time.Time
+	err = pool.QueryRow(context.Background(),
+		`SELECT MAX(last_warwick_sync_at) FROM session_checkins WHERE session_id = $1`,
+		sessionID).Scan(&syncAt)
+	require.NoError(t, err)
+	require.NotNil(t, syncAt)
+	assert.True(t, time.Since(*syncAt) > 25*time.Second,
+		"a 2-minute-old sync_at must be considered stale (got age %v)", time.Since(*syncAt))
+}
+
 func TestUpsertFromWarwick_DoesNotOverwriteToggledRows_MultipleStudents(t *testing.T) {
 	repo := newTestRepo(t)
 	sessionID := "test-session-" + t.Name()

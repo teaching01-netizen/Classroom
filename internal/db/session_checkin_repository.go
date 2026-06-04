@@ -64,11 +64,12 @@ func (r *PgSessionCheckinRepository) UpsertFromWarwick(ctx context.Context, sess
 
 	for _, student := range students {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO session_checkins (session_id, student_id, student_name, checked_in, refreshed_at, session_date)
-			 VALUES ($1, $2, $3, $4, NOW(), $5)
+			`INSERT INTO session_checkins (session_id, student_id, student_name, checked_in, refreshed_at, session_date, last_warwick_sync_at)
+			 VALUES ($1, $2, $3, $4, NOW(), $5, NOW())
 			 ON CONFLICT (session_id, student_id)
 			 DO UPDATE SET
-			     refreshed_at  = NOW(),
+			     refreshed_at         = NOW(),
+			     last_warwick_sync_at = NOW(),
 			     checked_in    = CASE WHEN session_checkins.toggled_at IS NULL
 			                          THEN EXCLUDED.checked_in
 			                          ELSE session_checkins.checked_in END`,
