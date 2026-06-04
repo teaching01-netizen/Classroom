@@ -134,23 +134,6 @@ export function AbsenceDashboard() {
         <>
           <DashboardKPIRow data={data} />
           <AbsenceList students={data?.students} sessions={data?.sessions} />
-
-          <div style={{
-            marginTop: 'var(--space-8, 32px)',
-            padding: 'var(--space-3, 12px) var(--space-4, 16px)',
-            background: 'var(--color-bg-subtle, #F5F5F5)',
-            borderRadius: 'var(--radius-md, 8px)',
-            fontSize: '0.75rem',
-            color: 'var(--color-text-muted, #696A6C)',
-            fontFamily: 'monospace',
-          }}>
-            Students: {data?.students?.length ?? 0} | Sessions: {data?.sessions?.length ?? 0} | Courses: {data?.totalCourses ?? 0} | At Risk: {data?.atRiskCount ?? 0}
-            {data?.generatedAt && (
-              <span style={{ marginLeft: '12px' }}>
-                Generated {new Date(data.generatedAt).toLocaleTimeString()}
-              </span>
-            )}
-          </div>
         </>
       )}
 
