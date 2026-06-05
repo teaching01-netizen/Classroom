@@ -5,6 +5,7 @@ const DEFAULT_FILTERS = {
   dateRange: null,
   threshold: 0,
   sortBy: 'risk',
+  wCodes: [],
 };
 
 export const useDashboardFiltersStore = create((set, get) => ({
@@ -38,6 +39,12 @@ export const useDashboardFiltersStore = create((set, get) => ({
     }));
   },
 
+  setWCodes: (wCodes) => {
+    set((state) => ({
+      filters: { ...state.filters, wCodes },
+    }));
+  },
+
   loadView: (view) => {
     if (view && view.filters) {
       set({ filters: { ...view.filters } });
@@ -55,17 +62,18 @@ export const useDashboardFiltersStore = create((set, get) => ({
 }));
 
 export const selectHasActiveFilters = (state) => {
-  const { courseIds, dateRange, threshold, sortBy } = state.filters;
+  const { courseIds, dateRange, threshold, sortBy, wCodes } = state.filters;
   return (
     courseIds.length > 0 ||
     dateRange !== null ||
     threshold !== 0 ||
-    sortBy !== 'risk'
+    sortBy !== 'risk' ||
+    wCodes.length > 0
   );
 };
 
 export const selectFilterSummary = (state) => {
-  const { courseIds, dateRange, threshold, sortBy } = state.filters;
+  const { courseIds, dateRange, threshold, sortBy, wCodes } = state.filters;
   const parts = [];
   if (courseIds.length > 0) {
     parts.push(`${courseIds.length} course${courseIds.length > 1 ? 's' : ''}`);
@@ -78,6 +86,9 @@ export const selectFilterSummary = (state) => {
   }
   if (sortBy !== 'risk') {
     parts.push(`sorted by ${sortBy}`);
+  }
+  if (wCodes.length > 0) {
+    parts.push(`${wCodes.length} student${wCodes.length > 1 ? 's' : ''}`);
   }
   return parts.length > 0 ? parts.join(' · ') : 'All courses';
 };

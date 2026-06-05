@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -11,6 +12,7 @@ type DashboardFilters struct {
 	DateRange *DateRange       `json:"dateRange"`
 	Threshold int              `json:"threshold"`
 	SortBy    DashboardSortBy  `json:"sortBy"`
+	WCodes    []string         `json:"wCodes"`
 }
 
 // DateRange represents a start and end date filter.
@@ -141,5 +143,38 @@ func DefaultDashboardFilters() DashboardFilters {
 		DateRange: nil,
 		Threshold: 0,
 		SortBy:    SortByRisk,
+		WCodes:    []string{},
 	}
+}
+
+// FilterStudentsByWCodes filters a slice of StudentAbsence to only those
+// whose StudentID (WCode) appears in the provided codes slice. Codes are
+// trimmed of whitespace. An empty or nil codes slice returns all students.
+func FilterStudentsByWCodes(students []StudentAbsence, codes []string) []StudentAbsence {
+	if len(codes) == 0 {
+		return students
+	}
+	if len(students) == 0 {
+		return students
+	}
+
+	codeSet := make(map[string]bool, len(codes))
+	for _, code := range codes {
+		code = strings.TrimSpace(code)
+		if code != "" {
+			codeSet[code] = true
+		}
+	}
+
+	if len(codeSet) == 0 {
+		return students
+	}
+
+	filtered := make([]StudentAbsence, 0, len(students))
+	for _, s := range students {
+		if codeSet[s.StudentID] {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
 }

@@ -1,12 +1,19 @@
 import React, { useState, useMemo } from 'react';
 import { useDashboardFiltersStore } from '../../store/useDashboardFiltersStore';
 
+function parseWCodes(input) {
+  if (!input.trim()) return [];
+  const parts = input.split(/[, \n]+/);
+  return parts.map((p) => p.trim()).filter(Boolean);
+}
+
 export function FilterBar({ courses, coursesLoading, activeViewId, onLoadView, onSaveView, onDeleteView, onLoadDashboard, dashboardLoading, views }) {
   const filters = useDashboardFiltersStore((s) => s.filters);
   const setCourseIds = useDashboardFiltersStore((s) => s.setCourseIds);
   const setThreshold = useDashboardFiltersStore((s) => s.setThreshold);
   const setSortBy = useDashboardFiltersStore((s) => s.setSortBy);
   const setDateRange = useDashboardFiltersStore((s) => s.setDateRange);
+  const setWCodes = useDashboardFiltersStore((s) => s.setWCodes);
   const resetFilters = useDashboardFiltersStore((s) => s.resetFilters);
 
   const [showSaveDialog, setShowSaveDialog] = useState(false);
@@ -14,6 +21,7 @@ export function FilterBar({ courses, coursesLoading, activeViewId, onLoadView, o
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
   const [courseSearch, setCourseSearch] = useState('');
   const [showCoursePicker, setShowCoursePicker] = useState(false);
+  const [wCodeInput, setWCodeInput] = useState(filters.wCodes.join(', '));
 
   const filteredCourses = useMemo(() => {
     if (!courses) return [];
@@ -41,6 +49,12 @@ export function FilterBar({ courses, coursesLoading, activeViewId, onLoadView, o
 
   const clearAll = () => {
     setCourseIds([]);
+  };
+
+  const handleWCodeChange = (e) => {
+    const raw = e.target.value;
+    setWCodeInput(raw);
+    setWCodes(parseWCodes(raw));
   };
 
   const handleSave = () => {
@@ -239,6 +253,34 @@ export function FilterBar({ courses, coursesLoading, activeViewId, onLoadView, o
         )}
       </div>
 
+      {/* WCode Filter */}
+      <div style={{ marginBottom: 'var(--space-2, 8px)' }}>
+        <textarea
+          value={wCodeInput}
+          onChange={handleWCodeChange}
+          placeholder="Paste WCode(s) — comma, space, or line separated"
+          rows={2}
+          style={{
+            ...inputStyle,
+            width: '100%',
+            resize: 'vertical',
+            fontFamily: 'monospace',
+            fontSize: '0.75rem',
+            lineHeight: '1.4',
+          }}
+        />
+        {filters.wCodes.length > 0 && (
+          <span style={{
+            fontSize: '0.6875rem',
+            color: 'var(--color-text-muted, #696A6C)',
+            marginTop: '2px',
+            display: 'block',
+          }}>
+            {filters.wCodes.length} WCode{filters.wCodes.length !== 1 ? 's' : ''} applied
+          </span>
+        )}
+      </div>
+
       {/* Filter Row */}
       <div style={{
         display: 'flex',
@@ -287,7 +329,7 @@ export function FilterBar({ courses, coursesLoading, activeViewId, onLoadView, o
           ariaLabel="To date"
         />
 
-        <button onClick={resetFilters} style={linkBtn}>Reset</button>
+        <button onClick={() => { resetFilters(); setWCodeInput(''); }} style={linkBtn}>Reset</button>
       </div>
 
       {/* Load Button */}

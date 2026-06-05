@@ -482,6 +482,7 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			"threshold", filters.Threshold,
 			"date_range", filters.DateRange,
 			"sort_by", filters.SortBy,
+			"w_codes", filters.WCodes,
 		)
 
 		// Determine threshold: use filter value or default to 20% (0 = auto).
@@ -853,6 +854,13 @@ func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.Sess
 			}
 			return students[i].Name < students[j].Name
 		})
+
+		// Filter by WCode if specified.
+		if len(filters.WCodes) > 0 {
+			slog.Info("absence_dashboard_filtering_by_wcodes", "w_codes", filters.WCodes, "before", len(students))
+			students = domain.FilterStudentsByWCodes(students, filters.WCodes)
+			slog.Info("absence_dashboard_filtered_by_wcodes", "after", len(students))
+		}
 
 		// Build top-N at-risk students.
 		topAtRisk := make([]domain.StudentRisk, 0)

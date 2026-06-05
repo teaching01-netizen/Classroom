@@ -12,6 +12,7 @@ describe('useDashboardFiltersStore', () => {
     expect(filters.dateRange).toBeNull();
     expect(filters.threshold).toBe(0);
     expect(filters.sortBy).toBe('risk');
+    expect(filters.wCodes).toEqual([]);
   });
 
   it('setCourseIds updates courseIds', () => {
@@ -39,6 +40,19 @@ describe('useDashboardFiltersStore', () => {
     expect(filters.sortBy).toBe('rate-asc');
   });
 
+  it('setWCodes updates wCodes', () => {
+    useDashboardFiltersStore.getState().setWCodes(['W12345', 'W67890']);
+    const { filters } = useDashboardFiltersStore.getState();
+    expect(filters.wCodes).toEqual(['W12345', 'W67890']);
+  });
+
+  it('setWCodes replaces wCodes array', () => {
+    useDashboardFiltersStore.getState().setWCodes(['W11111']);
+    useDashboardFiltersStore.getState().setWCodes(['W22222']);
+    const { filters } = useDashboardFiltersStore.getState();
+    expect(filters.wCodes).toEqual(['W22222']);
+  });
+
   it('setFilters merges partial filters', () => {
     useDashboardFiltersStore.getState().setFilters({ threshold: 3, sortBy: 'name' });
     const { filters } = useDashboardFiltersStore.getState();
@@ -54,6 +68,7 @@ describe('useDashboardFiltersStore', () => {
         dateRange: { from: '2026-03-01', to: '2026-05-01' },
         threshold: 2,
         sortBy: 'rate-desc',
+        wCodes: ['W12345'],
       },
     };
     useDashboardFiltersStore.getState().loadView(view);
@@ -71,11 +86,13 @@ describe('useDashboardFiltersStore', () => {
   it('resetFilters returns to defaults', () => {
     useDashboardFiltersStore.getState().setCourseIds(['c1']);
     useDashboardFiltersStore.getState().setThreshold(5);
+    useDashboardFiltersStore.getState().setWCodes(['W12345']);
     useDashboardFiltersStore.getState().resetFilters();
     const { filters } = useDashboardFiltersStore.getState();
     expect(filters.courseIds).toEqual([]);
     expect(filters.threshold).toBe(0);
     expect(filters.sortBy).toBe('risk');
+    expect(filters.wCodes).toEqual([]);
   });
 
   it('getFilterString returns JSON string of filters', () => {
@@ -114,6 +131,11 @@ describe('selectHasActiveFilters', () => {
     useDashboardFiltersStore.getState().setSortBy('name');
     expect(selectHasActiveFilters(useDashboardFiltersStore.getState())).toBe(true);
   });
+
+  it('returns true when wCodes is non-empty', () => {
+    useDashboardFiltersStore.getState().setWCodes(['W12345']);
+    expect(selectHasActiveFilters(useDashboardFiltersStore.getState())).toBe(true);
+  });
 });
 
 describe('selectFilterSummary', () => {
@@ -140,9 +162,20 @@ describe('selectFilterSummary', () => {
     expect(selectFilterSummary(useDashboardFiltersStore.getState())).toBe('3+ absences');
   });
 
+  it('shows wCodes count', () => {
+    useDashboardFiltersStore.getState().setWCodes(['W12345', 'W67890']);
+    expect(selectFilterSummary(useDashboardFiltersStore.getState())).toBe('2 students');
+  });
+
   it('combines multiple filters', () => {
     useDashboardFiltersStore.getState().setCourseIds(['c1']);
     useDashboardFiltersStore.getState().setThreshold(2);
     expect(selectFilterSummary(useDashboardFiltersStore.getState())).toBe('1 course · 2+ absences');
+  });
+
+  it('combines wCodes with other filters', () => {
+    useDashboardFiltersStore.getState().setCourseIds(['c1']);
+    useDashboardFiltersStore.getState().setWCodes(['W12345']);
+    expect(selectFilterSummary(useDashboardFiltersStore.getState())).toBe('1 course · 1 student');
   });
 });

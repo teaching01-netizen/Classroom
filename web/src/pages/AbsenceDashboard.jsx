@@ -133,6 +133,19 @@ export function AbsenceDashboard() {
       {!loading && !error && data && (
         <>
           <DashboardKPIRow data={data} />
+          {filters.wCodes.length > 0 && (
+            <div style={{
+              fontSize: '0.8125rem',
+              color: 'var(--color-text-secondary, #4F5056)',
+              marginBottom: 'var(--space-3, 12px)',
+              padding: 'var(--space-2, 8px) var(--space-3, 12px)',
+              background: 'color-mix(in srgb, var(--color-primary-600, #276BF0) 6%, transparent)',
+              borderRadius: 'var(--radius-sm, 4px)',
+              border: '1px solid color-mix(in srgb, var(--color-primary-600, #276BF0) 15%, transparent)',
+            }}>
+              Showing {data.students?.length || 0} of {filters.wCodes.length} specified WCode{filters.wCodes.length !== 1 ? 's' : ''}
+            </div>
+          )}
           <AbsenceList students={data?.students} sessions={data?.sessions} />
         </>
       )}
