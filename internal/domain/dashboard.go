@@ -124,6 +124,23 @@ type SavedDashboardView struct {
 	UpdatedAt  time.Time        `json:"updatedAt"`
 }
 
+// UnmarshalJSON ensures nil-slice fields always default to empty slices after
+// unmarshaling, even when the JSON key is missing or null. This protects
+// against old saved views that predate the wCodes field.
+func (f *DashboardFilters) UnmarshalJSON(data []byte) error {
+	type raw DashboardFilters
+	if err := json.Unmarshal(data, (*raw)(f)); err != nil {
+		return err
+	}
+	if f.WCodes == nil {
+		f.WCodes = []string{}
+	}
+	if f.CourseIds == nil {
+		f.CourseIds = []string{}
+	}
+	return nil
+}
+
 // MarshalFiltersJSON returns the JSON bytes for the filters field.
 func (f DashboardFilters) MarshalFiltersJSON() ([]byte, error) {
 	return json.Marshal(f)

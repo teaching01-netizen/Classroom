@@ -21,7 +21,7 @@ export function FilterBar({ courses, coursesLoading, activeViewId, onLoadView, o
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
   const [courseSearch, setCourseSearch] = useState('');
   const [showCoursePicker, setShowCoursePicker] = useState(false);
-  const [wCodeInput, setWCodeInput] = useState(filters.wCodes.join(', '));
+  const [wCodeInput, setWCodeInput] = useState((filters.wCodes || []).join(', '));
 
   const filteredCourses = useMemo(() => {
     if (!courses) return [];

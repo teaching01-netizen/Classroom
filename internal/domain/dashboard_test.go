@@ -53,20 +53,20 @@ func TestDashboardFiltersOmitsWCodesInDefaultFilters(t *testing.T) {
 	assert.Equal(t, []string{}, decoded.WCodes)
 }
 
-func TestDashboardFiltersUnmarshalWithNullWCodes(t *testing.T) {
-	raw := `{"courseIds":["CS101"],"threshold":0,"sortBy":"risk","dateRange":null}`
+func TestDashboardFiltersUnmarshalWithNullWCodesDefaultsToEmpty(t *testing.T) {
+	raw := `{"courseIds":["CS101"],"threshold":0,"sortBy":"risk","dateRange":null,"wCodes":null}`
 	var filters DashboardFilters
 	err := json.Unmarshal([]byte(raw), &filters)
 	assert.NoError(t, err)
-	assert.Equal(t, []string(nil), filters.WCodes)
+	assert.Equal(t, []string{}, filters.WCodes)
 }
 
-func TestDashboardFiltersUnmarshalWithoutWCodesField(t *testing.T) {
+func TestDashboardFiltersUnmarshalWithoutWCodesFieldDefaultsToEmpty(t *testing.T) {
 	raw := `{"courseIds":["CS101"],"threshold":5,"sortBy":"name"}`
 	var filters DashboardFilters
 	err := json.Unmarshal([]byte(raw), &filters)
 	assert.NoError(t, err)
-	assert.Equal(t, []string(nil), filters.WCodes)
+	assert.Equal(t, []string{}, filters.WCodes)
 }
 
 func TestFilterStudentsByWCodesReturnsMatchingStudents(t *testing.T) {
