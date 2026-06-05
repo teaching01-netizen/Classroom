@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useDashboardFiltersStore } from '../../store/useDashboardFiltersStore';
 
 function parseWCodes(input) {
@@ -22,6 +22,14 @@ export function FilterBar({ courses, coursesLoading, activeViewId, onLoadView, o
   const [courseSearch, setCourseSearch] = useState('');
   const [showCoursePicker, setShowCoursePicker] = useState(false);
   const [wCodeInput, setWCodeInput] = useState((filters.wCodes || []).join(', '));
+
+  useEffect(() => {
+    const currentParsed = JSON.stringify(parseWCodes(wCodeInput));
+    const storeParsed = JSON.stringify(filters.wCodes || []);
+    if (currentParsed !== storeParsed) {
+      setWCodeInput((filters.wCodes || []).join(', '));
+    }
+  }, [filters.wCodes]);
 
   const filteredCourses = useMemo(() => {
     if (!courses) return [];
