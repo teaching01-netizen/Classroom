@@ -109,6 +109,12 @@ func getSessionDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
 		}
+
+		// Enrich StudentID: replace UUID with Warwick wcode from student profiles.
+		if profiles, profErr := cc.FetchStudentProfiles(); profErr == nil {
+			warwick.EnrichCheckinStudentIDWithWCode(detail.Students, profiles)
+		}
+
 		writeJSON(w, http.StatusOK, successResponse(detail))
 	}
 }
@@ -358,6 +364,11 @@ func getCourseAttendanceReportHandler(cc *warwick.ClassroomClient, checkinRepo d
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
+		}
+
+		// Enrich StudentID: replace UUID with Warwick wcode from student profiles.
+		if profiles, profErr := cc.FetchStudentProfiles(); profErr == nil {
+			warwick.EnrichStudentIDWithWCode(report.Students, profiles)
 		}
 
 		writeJSON(w, http.StatusOK, successResponse(report))
