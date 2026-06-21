@@ -39,8 +39,23 @@ export const StudentRow = ({ student, onToggleCheckin, index }) => {
           }}
         />
       </td>
-      <td style={{ color: 'var(--color-text-primary, #111113)', fontWeight: '500' }}>{student.name}</td>
-      <td style={{ color: 'var(--color-text-secondary, #4F5056)' }}>{student.school}</td>
+      <td>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div>
+            <div style={{ fontSize: '14px', fontWeight: '500', color: 'var(--color-text-primary, #111113)' }}>
+              {student.nickname || student.name}
+              {student.school && (
+                <span style={{ fontWeight: '400', color: 'var(--color-text-muted, #696A6C)', marginLeft: '8px', fontSize: '12px' }}>
+                  {student.school}
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--color-text-muted, #696A6C)' }}>
+              {student.student_id}
+            </div>
+          </div>
+        </div>
+      </td>
       <td>
         <span style={{ color: status.color }}>
           {status.icon} {status.label}

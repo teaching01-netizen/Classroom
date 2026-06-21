@@ -40,18 +40,7 @@ export const StudentTable = ({ students, onToggleCheckin, page, perPage, totalIt
               fontSize: '12px',
             }}
           >
-            Name
-          </th>
-          <th
-            style={{
-              padding: '12px var(--space-4, 16px)',
-              textAlign: 'left',
-              color: 'var(--color-text-secondary, #4F5056)',
-              fontWeight: '500',
-              fontSize: '12px',
-            }}
-          >
-            School
+            Student
           </th>
           <th
             style={{

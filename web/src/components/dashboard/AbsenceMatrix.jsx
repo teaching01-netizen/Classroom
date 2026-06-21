@@ -159,18 +159,16 @@ function StudentRow({ student, sessions }) {
           )}
           <div>
             <div style={{ fontSize: '14px', fontWeight: '500', color: 'var(--color-text-primary, #111113)' }}>
-              {student.name}
-              {student.nickname && student.nickname !== student.name && (
-                <span style={{ fontWeight: '400', color: 'var(--color-text-muted, #696A6C)', marginLeft: '4px' }}>
-                  ({student.nickname})
+              {student.nickname || student.name}
+              {student.school && (
+                <span style={{ fontWeight: '400', color: 'var(--color-text-muted, #696A6C)', marginLeft: '8px', fontSize: '12px' }}>
+                  {student.school}
                 </span>
               )}
             </div>
-            {student.school && (
-              <div style={{ fontSize: '11px', color: 'var(--color-text-muted, #696A6C)' }}>
-                {student.school}
-              </div>
-            )}
+            <div style={{ fontSize: '11px', color: 'var(--color-text-muted, #696A6C)' }}>
+              {student.studentId}
+            </div>
           </div>
           {student.atRisk && (
             <span style={{

@@ -86,24 +86,22 @@ export function AtRiskCallout({ students }) {
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
               }}>
-                {student.name}
-                {student.nickname && student.nickname !== student.name && (
-                  <span style={{ fontWeight: '400', color: 'var(--color-text-muted, #696A6C)', marginLeft: '4px' }}>
-                    ({student.nickname})
+                {student.nickname || student.name}
+                {student.courseName && (
+                  <span style={{ fontWeight: '400', color: 'var(--color-text-muted, #696A6C)', marginLeft: '8px', fontSize: '12px' }}>
+                    {student.courseName}
                   </span>
                 )}
               </div>
-              {student.courseName && (
-                <div style={{
-                  fontSize: '0.75rem',
-                  color: 'var(--color-text-muted, #696A6C)',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                }}>
-                  {student.courseName}
-                </div>
-              )}
+              <div style={{
+                fontSize: '0.75rem',
+                color: 'var(--color-text-muted, #696A6C)',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}>
+                {student.studentId}
+              </div>
             </div>
 
             <div style={{

@@ -91,4 +91,44 @@ describe('AttendanceRow', () => {
     );
     expect(screen.getByText('!')).toBeTruthy();
   });
+
+  it('shows nickname instead of full name when nickname is provided', () => {
+    const student = { ...baseStudent, nickname: 'Ali', name: 'Alice Smith' };
+    render(
+      <table><tbody>
+        <AttendanceRow student={student} sessions={baseSessions} />
+      </tbody></table>
+    );
+    expect(screen.getByText('Ali')).toBeTruthy();
+    expect(screen.queryByText('Alice Smith')).toBeNull();
+  });
+
+  it('falls back to full name when nickname is empty', () => {
+    const student = { ...baseStudent, nickname: '', name: 'Alice Smith' };
+    render(
+      <table><tbody>
+        <AttendanceRow student={student} sessions={baseSessions} />
+      </tbody></table>
+    );
+    expect(screen.getByText('Alice Smith')).toBeTruthy();
+  });
+
+  it('shows student ID (wcode) below the name', () => {
+    render(
+      <table><tbody>
+        <AttendanceRow student={baseStudent} sessions={baseSessions} />
+      </tbody></table>
+    );
+    expect(screen.getByText('stu-1')).toBeTruthy();
+  });
+
+  it('shows school below the name', () => {
+    const student = { ...baseStudent, school: 'Concord' };
+    render(
+      <table><tbody>
+        <AttendanceRow student={student} sessions={baseSessions} />
+      </tbody></table>
+    );
+    expect(screen.getByText('Concord')).toBeTruthy();
+  });
 });

@@ -112,7 +112,12 @@ function StudentSummary({ summary, expanded, onToggle }) {
             }}
           >
             <span style={{ fontSize: '15px', fontWeight: '600', color: 'var(--color-text-primary, #111113)' }}>
-              {student.studentId ? `${student.studentId} ` : ''}{student.name}
+              {student.nickname || student.name}
+              {student.school && (
+                <span style={{ fontWeight: '400', color: 'var(--color-text-muted, #696A6C)', marginLeft: '8px', fontSize: '12px' }}>
+                  {student.school}
+                </span>
+              )}
             </span>
             {student.atRisk && (
               <span
@@ -129,6 +134,9 @@ function StudentSummary({ summary, expanded, onToggle }) {
                 AT RISK
               </span>
             )}
+          </div>
+          <div style={{ fontSize: '11px', color: 'var(--color-text-muted, #696A6C)', marginTop: '2px' }}>
+            {student.studentId}
           </div>
           <div
             style={{

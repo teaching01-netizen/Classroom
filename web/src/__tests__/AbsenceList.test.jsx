@@ -100,7 +100,7 @@ describe('AbsenceList (student summary + drill-down)', () => {
 
   it('clicking a student expands detail panel', () => {
     render(<AbsenceList students={[alice]} sessions={sessions} />);
-    const button = screen.getByRole('button', { name: /Alice/ });
+    const button = screen.getByRole('button', { name: /Ali/ });
     fireEvent.click(button);
     const allCells = screen.getAllByRole('cell');
     const cellTexts = allCells.map((c) => c.textContent);
@@ -110,7 +110,7 @@ describe('AbsenceList (student summary + drill-down)', () => {
 
   it('expanded detail groups absences by course with sub-headers', () => {
     render(<AbsenceList students={[alice]} sessions={sessions} />);
-    fireEvent.click(screen.getByRole('button', { name: /Alice/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Ali/ }));
     const sectionHeadings = screen.getAllByRole('heading', { level: 4 });
     const headingTexts = sectionHeadings.map((h) => h.textContent);
     expect(headingTexts.some((t) => t.includes('SAT Math'))).toBe(true);
@@ -119,7 +119,7 @@ describe('AbsenceList (student summary + drill-down)', () => {
 
   it('expanded detail shows date and session number for each absence', () => {
     render(<AbsenceList students={[alice]} sessions={sessions} />);
-    fireEvent.click(screen.getByRole('button', { name: /Alice/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Ali/ }));
     expect(screen.getByText('2026-06-10')).toBeTruthy();
     expect(screen.getByText('2026-06-17')).toBeTruthy();
     expect(screen.getByText('2026-06-11')).toBeTruthy();
@@ -127,7 +127,7 @@ describe('AbsenceList (student summary + drill-down)', () => {
 
   it('clicking the same student twice collapses the detail', () => {
     render(<AbsenceList students={[alice]} sessions={sessions} />);
-    const button = screen.getByRole('button', { name: /Alice/ });
+    const button = screen.getByRole('button', { name: /Ali/ });
     fireEvent.click(button);
     expect(screen.getByText('2026-06-10')).toBeTruthy();
     fireEvent.click(button);
@@ -136,7 +136,7 @@ describe('AbsenceList (student summary + drill-down)', () => {
 
   it('only one student can be expanded at a time', () => {
     render(<AbsenceList students={[alice, carol]} sessions={sessions} />);
-    fireEvent.click(screen.getByRole('button', { name: /Alice/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Ali/ }));
     fireEvent.click(screen.getByRole('button', { name: /Carol/ }));
     const allCells = screen.getAllByRole('cell');
     const cellTexts = allCells.map((c) => c.textContent);
@@ -156,9 +156,26 @@ describe('AbsenceList (student summary + drill-down)', () => {
     expect(screen.getByText(/No students/)).toBeTruthy();
   });
 
-  it('shows student ID before name in summary card', () => {
+  it('shows nickname (not full name) in summary card when available', () => {
     render(<AbsenceList students={[alice, carol]} sessions={sessions} />);
-    expect(screen.getByText(/stu-1 Alice/)).toBeTruthy();
-    expect(screen.getByText(/stu-3 Carol/)).toBeTruthy();
+    expect(screen.getByText('Ali')).toBeTruthy();
+    expect(screen.queryByText('Alice Smith')).toBeNull();
+  });
+
+  it('falls back to full name when nickname is empty', () => {
+    render(<AbsenceList students={[alice, carol]} sessions={sessions} />);
+    expect(screen.getByText('Carol')).toBeTruthy();
+  });
+
+  it('shows student ID (wcode) in summary card', () => {
+    render(<AbsenceList students={[alice, carol]} sessions={sessions} />);
+    expect(screen.getByText('stu-1')).toBeTruthy();
+    expect(screen.getByText('stu-3')).toBeTruthy();
+  });
+
+  it('shows school in summary card', () => {
+    render(<AbsenceList students={[alice, carol]} sessions={sessions} />);
+    expect(screen.getByText('Concord')).toBeTruthy();
+    expect(screen.getByText('Satit')).toBeTruthy();
   });
 });
