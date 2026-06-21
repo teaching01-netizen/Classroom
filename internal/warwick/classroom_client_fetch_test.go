@@ -538,3 +538,113 @@ func TestFetchStudentProfiles_Pagination(t *testing.T) {
 	assert.Equal(t, 3, requestCount, "should make exactly 3 requests")
 	assert.Equal(t, []int{0, 500, 1000}, requestedStarts, "should request starts 0, 500, 1000")
 }
+
+func TestFetchStudentProfiles_CacheHitSkipsWarwick(t *testing.T) {
+	mc := cache.New()
+
+	mc.Set("student_profiles", []domain.StudentProfile{
+		{StudentID: "W001", StudentGuid: "guid-1", FullName: "Cached Student", School: "Science"},
+	}, 5*time.Minute)
+
+	apiCalls := 0
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	profiles, err := client.FetchStudentProfiles()
+	require.NoError(t, err)
+	require.Len(t, profiles, 1)
+	assert.Equal(t, "W001", profiles[0].StudentID)
+	assert.Equal(t, 0, apiCalls, "should not call Warwick when cache is warm")
+}
+
+func TestFetchStudentProfiles_StaleCacheReturnsStaleAndRefreshes(t *testing.T) {
+	mc := cache.New()
+
+	mc.Set("student_profiles", []domain.StudentProfile{
+		{StudentID: "W001", StudentGuid: "guid-1", FullName: "Stale Profile", School: "Science"},
+	}, -1*time.Second)
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"draw": 1,
+			"recordsTotal": 1,
+			"recordsFiltered": 1,
+			"data": [
+				{"StudentID": "W999", "StudentGuid": "guid-999", "FullName": "Fresh Profile", "School": "Math", "MobilePhone": "", "ParentPhone": "", "IsActive": true, "TerminateStatus": "", "ExpireDateStr": ""}
+			]
+		}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	profiles, err := client.FetchStudentProfiles()
+	require.NoError(t, err)
+	require.Len(t, profiles, 1)
+	assert.Equal(t, "W001", profiles[0].StudentID, "should return stale data immediately")
+
+	time.Sleep(200 * time.Millisecond)
+
+	cached, ok := mc.Get("student_profiles")
+	require.True(t, ok)
+	freshProfiles := cached.([]domain.StudentProfile)
+	require.Len(t, freshProfiles, 1)
+	assert.Equal(t, "W999", freshProfiles[0].StudentID, "cache should be refreshed with fresh data")
+}
+
+func TestFetchStudentProfiles_CachesAfterFirstFetch(t *testing.T) {
+	mc := cache.New()
+
+	apiCalls := 0
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		if !strings.Contains(r.URL.Path, "UserGroupSearch") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"draw": 1,
+			"recordsTotal": 2,
+			"recordsFiltered": 2,
+			"data": [
+				{"StudentID": "STU001", "StudentGuid": "guid-a", "FullName": "Alice", "School": "Science", "MobilePhone": "", "ParentPhone": "", "IsActive": true, "TerminateStatus": "", "ExpireDateStr": ""},
+				{"StudentID": "STU002", "StudentGuid": "guid-b", "FullName": "Bob", "School": "Math", "MobilePhone": "", "ParentPhone": "", "IsActive": true, "TerminateStatus": "", "ExpireDateStr": ""}
+			]
+		}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	profiles, err := client.FetchStudentProfiles()
+	require.NoError(t, err)
+	require.Len(t, profiles, 2)
+	assert.Equal(t, 1, apiCalls, "first call should hit Warwick")
+
+	profiles, err = client.FetchStudentProfiles()
+	require.NoError(t, err)
+	require.Len(t, profiles, 2)
+	assert.Equal(t, 1, apiCalls, "second call should use cache, not hit Warwick")
+}

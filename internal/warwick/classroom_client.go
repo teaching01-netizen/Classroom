@@ -1208,9 +1208,33 @@ func equalTimePtr(a, b *time.Time) bool {
 }
 
 // FetchStudentProfiles fetches the list of student profiles from Warwick's UserGroup search.
+// Results are cached in-memory with a 5-minute TTL and stale-while-revalidate semantics.
+// The cache is shared across all callers so enrichment is effectively free on warm cache.
 func (c *ClassroomClient) FetchStudentProfiles() ([]domain.StudentProfile, error) {
+	const profilesKey = "student_profiles"
+
+	if c.cache != nil {
+		if cached, ok := c.cache.Get(profilesKey); ok {
+			return cached.([]domain.StudentProfile), nil
+		}
+
+		if stale, ok := c.cache.GetStale(profilesKey); ok {
+			if c.pool != nil {
+				c.tryRefresh(profilesKey, c.refreshStudentProfilesCache)
+				return stale.([]domain.StudentProfile), nil
+			}
+		}
+	}
+
 	if c.pool != nil {
-		return c.fetchStudentProfilesWithPool()
+		profiles, err := c.fetchStudentProfilesWithPool()
+		if err != nil {
+			return nil, err
+		}
+		if c.cache != nil {
+			c.cache.Set(profilesKey, profiles, 5*time.Minute)
+		}
+		return profiles, nil
 	}
 
 	if c.auth == nil {
@@ -1226,6 +1250,9 @@ func (c *ClassroomClient) FetchStudentProfiles() ([]domain.StudentProfile, error
 
 		profiles, err := c.fetchStudentProfiles(cookie)
 		if err == nil {
+			if c.cache != nil {
+				c.cache.Set(profilesKey, profiles, 5*time.Minute)
+			}
 			return profiles, nil
 		}
 
@@ -1241,6 +1268,23 @@ func (c *ClassroomClient) FetchStudentProfiles() ([]domain.StudentProfile, error
 		return nil, err
 	}
 	return nil, lastErr
+}
+
+// refreshStudentProfilesCache fetches fresh profiles from Warwick in the background.
+func (c *ClassroomClient) refreshStudentProfilesCache() {
+	const profilesKey = "student_profiles"
+	profiles, err := c.fetchStudentProfilesWithPool()
+	if err != nil {
+		if errors.Is(err, domain.ErrAuthConflict) || errors.Is(err, domain.ErrPoolExhausted) || errors.Is(err, domain.ErrAuthExpired) {
+			slog.Warn("cache_refresh_student_profiles_failed", "error", err)
+		} else {
+			slog.Debug("cache_refresh_student_profiles_failed", "error", err)
+		}
+		return
+	}
+	if c.cache != nil {
+		c.cache.Set(profilesKey, profiles, 5*time.Minute)
+	}
 }
 
 func (c *ClassroomClient) fetchStudentProfilesWithPool() ([]domain.StudentProfile, error) {

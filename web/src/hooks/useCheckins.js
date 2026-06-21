@@ -43,6 +43,9 @@ export const useCheckins = (courseId, sessionId) => {
   }, [fetchStudents]);
 
   const toggleCheckin = async (studentId, checked) => {
+    // Optimistic update: reflect toggle immediately in the UI before the
+    // server round-trip completes. Roll back by reverting on error.
+    updateStudentCheckin(studentId, checked);
     try {
       const response = await fetch(`/api/teacher/courses/${courseId}/sessions/${sessionId}/toggle-checkin`, {
         method: 'POST',
@@ -50,11 +53,11 @@ export const useCheckins = (courseId, sessionId) => {
         body: JSON.stringify({ student_id: studentId, checked }),
       });
       const result = await response.json();
-      if (result.success) {
-        updateStudentCheckin(studentId, checked);
+      if (!result.success) {
+        updateStudentCheckin(studentId, !checked);
       }
     } catch (err) {
-      console.error('Failed to toggle checkin:', err);
+      updateStudentCheckin(studentId, !checked);
     }
   };
 
@@ -63,7 +66,9 @@ export const useCheckins = (courseId, sessionId) => {
   useEffect(() => {
     const key = `${courseId}-${sessionId}`;
     if (prevKeyRef.current !== null && prevKeyRef.current !== key) {
-      reset();
+      // Stale-while-revalidate: don't reset students/session — show stale data
+      // while fetching fresh. Only mark loading so the UI knows a refresh is
+      // in-flight. The old data remains visible until the new response arrives.
       hasLoadedRef.current = false;
     }
     prevKeyRef.current = key;

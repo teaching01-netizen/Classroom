@@ -92,7 +92,29 @@ func getSessionDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 			return
 		}
 
-		detail, err := cc.GetSessionDetail(courseID, sessionID)
+		// Fetch session detail and student profiles concurrently.
+		// FetchStudentProfiles is cached (5-min TTL) so after the first request
+		// it is effectively free. Running them in parallel benefits the cold case
+		// and prevents head-of-line blocking between the two Warwick round trips.
+		var (
+			detail   *domain.SessionDetail
+			err      error
+			profiles []domain.StudentProfile
+		)
+		detailCh := make(chan struct{})
+		profilesCh := make(chan struct{})
+
+		go func() {
+			detail, err = cc.GetSessionDetail(courseID, sessionID)
+			close(detailCh)
+		}()
+		go func() {
+			p, _ := cc.FetchStudentProfiles()
+			profiles = p
+			close(profilesCh)
+		}()
+
+		<-detailCh
 		if err != nil {
 			if errors.Is(err, domain.ErrAuthExpired) {
 				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
@@ -110,8 +132,8 @@ func getSessionDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 			return
 		}
 
-		// Enrich StudentID: replace UUID with Warwick wcode from student profiles.
-		if profiles, profErr := cc.FetchStudentProfiles(); profErr == nil {
+		<-profilesCh
+		if len(profiles) > 0 {
 			warwick.EnrichCheckinStudentIDWithWCode(detail.Students, profiles)
 		}
 
