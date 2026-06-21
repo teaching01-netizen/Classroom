@@ -29,7 +29,7 @@ func (r *PgSessionCheckinRepository) GetStudentsBySession(ctx context.Context, s
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	rows, err := r.pool.Query(ctx, `SELECT student_id, student_name, checked_in, session_date FROM session_checkins WHERE session_id = $1`, sessionID)
+	rows, err := r.pool.Query(ctx, `SELECT student_id, student_name, nickname, school, checked_in, session_date FROM session_checkins WHERE session_id = $1`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("get students by session: %w", err)
 	}
@@ -39,7 +39,7 @@ func (r *PgSessionCheckinRepository) GetStudentsBySession(ctx context.Context, s
 	for rows.Next() {
 		var sc domain.StudentCheckin
 		var sessionDate time.Time
-		if err := rows.Scan(&sc.StudentID, &sc.Name, &sc.CheckedIn, &sessionDate); err != nil {
+		if err := rows.Scan(&sc.StudentID, &sc.Name, &sc.Nickname, &sc.School, &sc.CheckedIn, &sessionDate); err != nil {
 			return nil, fmt.Errorf("scan student checkin: %w", err)
 		}
 		result = append(result, sc)
@@ -64,16 +64,18 @@ func (r *PgSessionCheckinRepository) UpsertFromWarwick(ctx context.Context, sess
 
 	for _, student := range students {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO session_checkins (session_id, student_id, student_name, checked_in, refreshed_at, session_date, last_warwick_sync_at)
-			 VALUES ($1, $2, $3, $4, NOW(), $5, NOW())
+			`INSERT INTO session_checkins (session_id, student_id, student_name, nickname, school, checked_in, refreshed_at, session_date, last_warwick_sync_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, NOW())
 			 ON CONFLICT (session_id, student_id)
 			 DO UPDATE SET
 			     refreshed_at         = NOW(),
 			     last_warwick_sync_at = NOW(),
+			     nickname    = EXCLUDED.nickname,
+			     school      = EXCLUDED.school,
 			     checked_in    = CASE WHEN session_checkins.toggled_at IS NULL
 			                          THEN EXCLUDED.checked_in
 			                          ELSE session_checkins.checked_in END`,
-			sessionID, student.StudentID, student.Name, student.CheckedIn, sessionDate)
+			sessionID, student.StudentID, student.Name, student.Nickname, student.School, student.CheckedIn, sessionDate)
 		if err != nil {
 			return fmt.Errorf("upsert from warwick student %s: %w", student.StudentID, err)
 		}
