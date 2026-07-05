@@ -48,10 +48,11 @@ func (e *stubEnqueuer) count() int {
 
 // newTestClient creates a minimal ClassroomClient for report tests.
 func newTestClient(c *cache.Cache) *ClassroomClient {
-	return &ClassroomClient{
-		ReportCache: c,
+	client := &ClassroomClient{
 		ReportFlight: singleflight.Group{},
 	}
+	client.SetReportCache(c)
+	return client
 }
 
 // sessions is a minimal session list for report computation.

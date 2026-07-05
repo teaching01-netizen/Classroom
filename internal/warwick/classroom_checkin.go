@@ -1,0 +1,125 @@
+package warwick
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"qr-command-center/internal/domain"
+)
+
+// ToggleCheckin updates a student's check-in status for a session.
+func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, checked bool) error {
+	if c.pool != nil {
+		return c.toggleCheckinWithPool(courseID, sessionID, studentID, checked)
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		cookie, _, err := c.auth.GetValidSession()
+		if err != nil {
+			return domain.ErrAuthExpired
+		}
+		err = c.doToggleCheckin(cookie, sessionID, studentID, checked)
+		if err == nil {
+			if c.cache != nil {
+				c.cache.Invalidate("course:" + courseID)
+				c.cache.Invalidate("courses")
+				c.cache.Invalidate("session:" + sessionID)
+			}
+			return nil
+		}
+		lastErr = err
+		if err != domain.ErrAuthExpired || attempt == 1 {
+			break
+		}
+		if _, _, err := c.auth.ForceRefresh(); err != nil {
+			return domain.ErrAuthExpired
+		}
+	}
+	return lastErr
+}
+
+func (c *ClassroomClient) toggleCheckinWithPool(courseID, sessionID, studentID string, checked bool) error {
+	ref, err := c.pool.Acquire(TierInteractive)
+	if err != nil {
+		if errors.Is(err, ErrAuthConflict) {
+			return domain.ErrAuthConflict
+		}
+		if errors.Is(err, ErrNoAvailableSessions) {
+			return domain.ErrPoolExhausted
+		}
+		return domain.ErrAuthExpired
+	}
+	defer c.pool.Release(ref)
+
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		err = c.doToggleCheckin(ref.Cookie, sessionID, studentID, checked)
+		if err == nil {
+			// On success: persist toggle to DB if DB-backed cache is enabled
+			if c.checkinRepo != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				// Name intentionally empty — UpsertStudent subquery/COALESCE preserves existing student_name
+				if dbErr := c.checkinRepo.UpsertStudent(ctx, sessionID, domain.StudentCheckin{
+					StudentID: studentID, CheckedIn: checked,
+				}); dbErr != nil {
+					slog.Error("failed to persist toggle to DB", "student_id", studentID, "error", dbErr)
+				}
+				cancel()
+			}
+
+			if c.cache != nil {
+				c.cache.Invalidate("course:" + courseID)
+				c.cache.Invalidate("courses")
+				c.cache.Invalidate("session:" + sessionID)
+			}
+			return nil
+		}
+		lastErr = err
+		if err != domain.ErrAuthExpired || attempt == 1 {
+			break
+		}
+		if _, _, err := c.pool.ForceRefreshOnSession(ref); err != nil {
+			if errors.Is(err, ErrAuthConflict) {
+				return domain.ErrAuthConflict
+			}
+			return domain.ErrAuthExpired
+		}
+	}
+	return lastErr
+}
+
+func (c *ClassroomClient) doToggleCheckin(cookie, sessionID, studentID string, checked bool) error {
+	checkedVal := "0"
+	if checked {
+		checkedVal = "1"
+	}
+	form := url.Values{}
+	form.Set("id", sessionID)
+	form.Set("studentId", studentID)
+	form.Set("checked", checkedVal)
+
+	resp, err := c.doRequest("POST", "/admin/ClassAttendance/ToggleCheckin", cookie, strings.NewReader(form.Encode()))
+	if err != nil {
+		return domain.NewNetworkError(err.Error())
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkAuth(resp); err != nil {
+		return err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+		return domain.NewInvalidPayloadError(fmt.Sprintf("toggle checkin failed (%d): %s", resp.StatusCode, string(respBody)))
+	}
+
+	return nil
+}

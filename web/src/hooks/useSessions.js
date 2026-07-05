@@ -4,7 +4,7 @@ import { useFocusRefetch } from './useFocusRefetch';
 import { useWsReconnect } from './useWebSocket';
 
 export const useSessions = (courseId) => {
-  const { sessions, isInitialLoading, isRefreshing, error, setSessions, setInitialLoading, setRefreshing, setError, reset } = useSessionStore();
+  const { sessions, isInitialLoading, isRefreshing, error, setSessions, setCourseName, setInitialLoading, setRefreshing, setError, reset } = useSessionStore();
 
   const prevCourseIdRef = useRef(null);
 
@@ -20,13 +20,14 @@ export const useSessions = (courseId) => {
       const result = await res.json();
       if (result.success) {
         setSessions(result.data.sessions || []);
+        setCourseName(result.data.name || '');
       } else {
         setError(result.error || 'Failed to fetch sessions');
       }
     } catch (err) {
       setError(err.message || 'Network error');
     }
-  }, [courseId, setInitialLoading, setRefreshing, setSessions, setError]);
+  }, [courseId, setInitialLoading, setRefreshing, setSessions, setCourseName, setError]);
 
   useEffect(() => {
     if (prevCourseIdRef.current !== null && prevCourseIdRef.current !== courseId) {

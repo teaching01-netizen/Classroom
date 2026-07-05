@@ -2,6 +2,7 @@ import { create } from 'zustand';
 
 export const useSessionStore = create((set) => ({
   sessions: [],
+  courseName: '',
   currentSession: null,
   students: [],
   isInitialLoading: true,
@@ -9,6 +10,7 @@ export const useSessionStore = create((set) => ({
   error: null,
 
   setSessions: (sessions) => set({ sessions, isInitialLoading: false, isRefreshing: false, error: null }),
+  setCourseName: (courseName) => set({ courseName }),
   setCurrentSession: (session) => set({ currentSession: session }),
   setStudents: (students) => set({ students, isInitialLoading: false, isRefreshing: false, error: null }),
   updateStudentCheckin: (studentId, checkedIn) => set((state) => ({
@@ -25,6 +27,7 @@ export const useSessionStore = create((set) => ({
   clearError: () => set({ error: null }),
   reset: () => set({
     students: [],
+    courseName: '',
     currentSession: null,
     isInitialLoading: true,
     isRefreshing: false,

@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,17 +12,27 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"qr-command-center/internal/cache"
+	"qr-command-center/internal/domain"
+	"qr-command-center/internal/service"
 	"qr-command-center/internal/warwick"
 )
 
-// newNonNilClient returns a ClassroomClient that passes nil checks
+// stubFetcher implements domain.SessionFetcher for tests that need a non-nil fetcher.
+type stubFetcher struct{}
+
+func (s *stubFetcher) FetchSessionDetailLive(_ context.Context, _ string) (*domain.SessionDetail, error) {
+	return nil, nil
+}
+
+// newNonNilTeacherService returns a TeacherService that passes nil checks
 // but will fail on actual API calls (useful for body validation tests).
-func newNonNilClient() *warwick.ClassroomClient {
-	return warwick.NewClassroomClient(nil, cache.New())
+func newNonNilTeacherService() *service.TeacherService {
+	cc := warwick.NewClassroomClient(nil, cache.New())
+	return service.NewTeacherService(cc, &stubFetcher{})
 }
 
 func TestBatchAttendance_NilClient_Returns503(t *testing.T) {
-	handler := getBatchAttendanceHandler(nil, nil)
+	handler := getBatchAttendanceHandler(nil)
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"course_ids": []string{"CS101"},
@@ -39,7 +50,7 @@ func TestBatchAttendance_NilClient_Returns503(t *testing.T) {
 }
 
 func TestBatchAttendance_EmptyCourseIds_Returns400(t *testing.T) {
-	handler := getBatchAttendanceHandler(newNonNilClient(), nil)
+	handler := getBatchAttendanceHandler(newNonNilTeacherService())
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"course_ids": []string{},
@@ -56,7 +67,7 @@ func TestBatchAttendance_EmptyCourseIds_Returns400(t *testing.T) {
 }
 
 func TestBatchAttendance_InvalidJSON_Returns400(t *testing.T) {
-	handler := getBatchAttendanceHandler(newNonNilClient(), nil)
+	handler := getBatchAttendanceHandler(newNonNilTeacherService())
 
 	req := httptest.NewRequest(http.MethodPost, "/api/teacher/courses/attendance-batch", bytes.NewReader([]byte("not json")))
 	req.Header.Set("Content-Type", "application/json")
@@ -67,7 +78,7 @@ func TestBatchAttendance_InvalidJSON_Returns400(t *testing.T) {
 }
 
 func TestBatchAttendance_MissingCourseIds_Returns400(t *testing.T) {
-	handler := getBatchAttendanceHandler(newNonNilClient(), nil)
+	handler := getBatchAttendanceHandler(newNonNilTeacherService())
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"threshold": 2,

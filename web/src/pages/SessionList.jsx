@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useSessions } from '../hooks/useSessions';
+import { useSessionStore } from '../store/useSessionStore';
 import { StatsBar } from '../components/StatsBar';
 import { SessionTable } from '../components/SessionTable';
 import { BackBreadcrumb } from '../components/BackBreadcrumb';
@@ -8,6 +9,7 @@ import { BackBreadcrumb } from '../components/BackBreadcrumb';
 export function SessionList() {
   const { courseId } = useParams();
   const { sessions, isLoading, isRefreshing, error } = useSessions(courseId);
+  const courseName = useSessionStore((state) => state.courseName);
 
   const stats = useMemo(() => {
     const totalSessions = sessions.length;
@@ -36,8 +38,6 @@ export function SessionList() {
       </div>
     );
   }
-
-  const courseName = sessions.length > 0 ? sessions[0].name : 'Course';
 
   return (
     <div style={{ padding: 'var(--space-8, 32px)' }}>

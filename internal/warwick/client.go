@@ -13,7 +13,7 @@ import (
 	"qr-command-center/internal/domain"
 )
 
-const qrEndpoint = "https://warwick.humantix.cloud/admin/ClassAttendance/GetQRCode"
+const defaultQREndpoint = "https://warwick.humantix.cloud/admin/ClassAttendance/GetQRCode"
 
 type WarwickQrClient struct {
 	auth       *WarwickAuth   // kept for backward compatibility; nil when pool is used
@@ -32,8 +32,13 @@ func NewWarwickQrClient(auth *WarwickAuth) *WarwickQrClient {
 				return http.ErrUseLastResponse
 			},
 		},
-		qrEndpoint: qrEndpoint,
+		qrEndpoint: defaultQREndpoint,
 	}
+}
+
+// SetBaseURL updates the QR endpoint URL base. Must be called before use.
+func (c *WarwickQrClient) SetBaseURL(baseURL string) {
+	c.qrEndpoint = baseURL + "/admin/ClassAttendance/GetQRCode"
 }
 
 func NewWarwickQrClientWithEndpoint(auth *WarwickAuth, endpoint string) *WarwickQrClient {
@@ -61,7 +66,7 @@ func NewWarwickQrClientFromPool(pool *SessionPool, tier SessionTier) *WarwickQrC
 				return http.ErrUseLastResponse
 			},
 		},
-		qrEndpoint: qrEndpoint,
+		qrEndpoint: defaultQREndpoint,
 	}
 }
 

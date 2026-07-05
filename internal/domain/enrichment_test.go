@@ -1,20 +1,18 @@
-package warwick
+package domain
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
-	"qr-command-center/internal/domain"
 )
 
 func TestEnrichStudentIDWithWCode_ReplacesUUIDWithWCode(t *testing.T) {
-	students := []domain.StudentAttendance{
+	students := []StudentAttendance{
 		{StudentID: "uuid-1111", Name: "Alice", Nickname: "Ali"},
 		{StudentID: "uuid-2222", Name: "Bob", Nickname: ""},
 	}
 
-	profiles := []domain.StudentProfile{
+	profiles := []StudentProfile{
 		{StudentID: "W11111", StudentGuid: "uuid-1111", FullName: "Alice", School: "Science"},
 		{StudentID: "W22222", StudentGuid: "uuid-2222", FullName: "Bob", School: "Math"},
 	}
@@ -26,12 +24,12 @@ func TestEnrichStudentIDWithWCode_ReplacesUUIDWithWCode(t *testing.T) {
 }
 
 func TestEnrichStudentIDWithWCode_LeavesUnmappedIDsUntouched(t *testing.T) {
-	students := []domain.StudentAttendance{
+	students := []StudentAttendance{
 		{StudentID: "uuid-1111", Name: "Alice"},
 		{StudentID: "uuid-9999", Name: "Unknown"},
 	}
 
-	profiles := []domain.StudentProfile{
+	profiles := []StudentProfile{
 		{StudentID: "W11111", StudentGuid: "uuid-1111", FullName: "Alice"},
 	}
 
@@ -42,7 +40,7 @@ func TestEnrichStudentIDWithWCode_LeavesUnmappedIDsUntouched(t *testing.T) {
 }
 
 func TestEnrichStudentIDWithWCode_HandlesEmptyProfiles(t *testing.T) {
-	students := []domain.StudentAttendance{
+	students := []StudentAttendance{
 		{StudentID: "uuid-1111", Name: "Alice"},
 	}
 
@@ -52,12 +50,12 @@ func TestEnrichStudentIDWithWCode_HandlesEmptyProfiles(t *testing.T) {
 }
 
 func TestEnrichCheckinStudentIDWithWCode_ReplacesUUIDWithWCode(t *testing.T) {
-	students := []domain.StudentCheckin{
+	students := []StudentCheckin{
 		{StudentID: "uuid-1111", Name: "Alice"},
 		{StudentID: "uuid-2222", Name: "Bob"},
 	}
 
-	profiles := []domain.StudentProfile{
+	profiles := []StudentProfile{
 		{StudentID: "W11111", StudentGuid: "uuid-1111"},
 		{StudentID: "W22222", StudentGuid: "uuid-2222"},
 	}
@@ -69,7 +67,7 @@ func TestEnrichCheckinStudentIDWithWCode_ReplacesUUIDWithWCode(t *testing.T) {
 }
 
 func TestEnrichCheckinStudentIDWithWCode_HandlesEmptyProfiles(t *testing.T) {
-	students := []domain.StudentCheckin{
+	students := []StudentCheckin{
 		{StudentID: "uuid-1111", Name: "Alice"},
 	}
 

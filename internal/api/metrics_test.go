@@ -18,13 +18,13 @@ import (
 
 func TestMetricsEndpoint_ReturnsPrometheusFormat(t *testing.T) {
 	c := cache.New()
-	repo := &stubMetricsReportRepo{}
-	persister := service.NewReportPersister(repo, c, 10)
 
 	rm := service.NewRoomManager(nil, nil)
 	cc := warwick.NewClassroomClient(nil, c)
+	ts := service.NewTeacherService(cc, &stubFetcher{})
 
-	router := NewRouter(rm, cc, nil, c, nil, 100, nil, persister, nil)
+	router, rl := NewRouter(rm, ts, nil, c, nil, 100, nil, "")
+	defer rl.Stop()
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
@@ -40,21 +40,19 @@ func TestMetricsEndpoint_ReturnsPrometheusFormat(t *testing.T) {
 
 func TestMetricsEndpoint_ContainsOurMetrics(t *testing.T) {
 	c := cache.New()
-	repo := &stubMetricsReportRepo{}
-	persister := service.NewReportPersister(repo, c, 10)
 
 	rm := service.NewRoomManager(nil, nil)
 	cc := warwick.NewClassroomClient(nil, c)
+	ts := service.NewTeacherService(cc, &stubFetcher{})
 
-	router := NewRouter(rm, cc, nil, c, nil, 100, nil, persister, nil)
+	router, rl := NewRouter(rm, ts, nil, c, nil, 100, nil, "")
+	defer rl.Stop()
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
 	body := w.Body.String()
-	// These metrics are registered via promauto and always appear in the
-	// /metrics output even without any code path exercising them.
 	for _, metric := range []string{
 		"report_persist_dropped_total",
 		"report_persist_queue_depth",

@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QR Command Center - System Architecture</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --border: #334155;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --accent: #3b82f6;
+      --accent-light: #60a5fa;
+      --green: #22c55e;
+      --yellow: #eab308;
+      --red: #ef4444;
+      --purple: #a855f7;
+    }
+    
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 2rem;
+    }
+    
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    
+    h1 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      background: linear-gradient(135deg, var(--accent) 0%, var(--purple) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    
+    .subtitle {
+      color: var(--text-muted);
+      font-size: 1.125rem;
+      margin-bottom: 2rem;
+    }
+    
+    .diagram-section {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+      margin-bottom: 2rem;
+    }
+    
+    .diagram-section h2 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      color: var(--accent-light);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    
+    .diagram-section h2::before {
+      content: '';
+      width: 4px;
+      height: 24px;
+      background: var(--accent);
+      border-radius: 2px;
+    }
+    
+    .diagram-container {
+      background: #0f172a;
+      border-radius: 8px;
+      padding: 1.5rem;
+      overflow-x: auto;
+    }
+    
+    .mermaid {
+      display: flex;
+      justify-content: center;
+    }
+    
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+    
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-top: 1.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+    
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.875rem;
+      color: var(--text-muted);
+    }
+    
+    .legend-color {
+      width: 16px;
+      height: 16px;
+      border-radius: 4px;
+    }
+    
+    .description {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      margin-bottom: 1.5rem;
+      line-height: 1.7;
+    }
+    
+    .flow-steps {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+      margin-top: 1.5rem;
+    }
+    
+    .flow-step {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+    }
+    
+    .flow-step .step-number {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      background: var(--accent);
+      color: white;
+      border-radius: 50%;
+      font-weight: 600;
+      font-size: 0.875rem;
+      margin-bottom: 0.5rem;
+    }
+    
+    .flow-step h4 {
+      font-size: 1rem;
+      margin-bottom: 0.25rem;
+    }
+    
+    .flow-step p {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+    }
+    
+    .tech-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.375rem 0.75rem;
+      background: rgba(59, 130, 246, 0.1);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      color: var(--accent-light);
+      margin: 0.25rem;
+    }
+    
+    .tech-stack {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+    
+    .status-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.25rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    
+    .status-running {
+      background: rgba(34, 197, 94, 0.15);
+      color: var(--green);
+    }
+    
+    .status-warning {
+      background: rgba(234, 179, 8, 0.15);
+      color: var(--yellow);
+    }
+    
+    .status-error {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--red);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>QR Command Center</h1>
+    <p class="subtitle">System Architecture Overview - Attendance Management Platform</p>
+    
+    <!-- High-Level Architecture -->
+    <div class="diagram-section">
+      <h2>High-Level System Architecture</h2>
+      <p class="description">
+        The QR Command Center is a real-time attendance management system that generates QR codes for classroom check-ins,
+        tracks student attendance across sessions and courses, and provides teachers with dashboards to monitor engagement.
+      </p>
+      <div class="diagram-container">
+        <pre class="mermaid">
+flowchart TB
+    subgraph Frontend["Frontend (React SPA)"]
+        UI[React UI Components]
+        Store[Zustand State Management]
+        Hooks[Custom React Hooks]
+        WS_Client[WebSocket Client]
+    end
+    
+    subgraph Backend["Backend (Go API Server)"]
+        Router[Chi Router]
+        Handlers[API Handlers]
+        Services[Service Layer]
+        Domain[Domain Models]
+    end
+    
+    subgraph External["External Services"]
+        Warwick[Warwick HumanTix]
+        PostgreSQL[(PostgreSQL)]
+        Cache[(In-Memory Cache)]
+    end
+    
+    UI --> Store
+    Store --> Hooks
+    Hooks --> WS_Client
+    Hooks --> |REST API| Router
+    WS_Client --> |WebSocket| Router
+    
+    Router --> Handlers
+    Handlers --> Services
+    Services --> Domain
+    Services --> Warwick
+    Services --> PostgreSQL
+    Services --> Cache
+    
+    style Frontend fill:#1e40af,stroke:#3b82f6,stroke-width:2px
+    style Backend fill:#065f46,stroke:#10b981,stroke-width:2px
+    style External fill:#7c2d12,stroke:#f97316,stroke-width:2px
+        </pre>
+      </div>
+      <div class="legend">
+        <div class="legend-item">
+          <div class="legend-color" style="background: #3b82f6;"></div>
+          Frontend (React)
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #10b981;"></div>
+          Backend (Go)
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background: #f97316;"></div>
+          External Services
+        </div>
+      </div>
+    </div>
+    
+    <!-- Backend Architecture -->
+    <div class="diagram-section">
+      <h2>Backend Package Architecture</h2>
+      <p class="description">
+        The Go backend follows clean architecture principles with clear separation of concerns.
+        The <code>internal/</code> directory contains domain models, services, API handlers, and data access layers.
+      </p>
+      <div class="diagram-container">
+        <pre class="mermaid">
+flowchart LR
+    subgraph API["api/"]
+        R[Routes]
+        H[Handlers]
+        WS[WebSocket]
+    end
+    
+    subgraph Service["service/"]
+        RM[RoomManager]
+        DR[DataRefresher]
+        SP[SessionPrewarmer]
+        RH[ReportHydrator]
+        RP[ReportPersister]
+    end
+    
+    subgraph Domain["domain/"]
+        Room[Room Model]
+        Classroom[Classroom Models]
+        Dashboard[Dashboard Models]
+    end
+    
+    subgraph Warwick["warwick/"]
+        Auth[Auth Client]
+        Client[QR Client]
+        CC[Classroom Client]
+        Pool[Session Pool]
+    end
+    
+    subgraph DB["db/"]
+        Repos[Repositories]
+        Migrations[SQL Migrations]
+    end
+    
+    H --> RM
+    H --> CC
+    WS --> RM
+    RM --> Client
+    RM --> Repos
+    DR --> CC
+    CC --> Auth
+    CC --> Pool
+    Client --> Auth
+    
+    RM --> Room
+    CC --> Classroom
+    CC --> Dashboard
+    Repos --> DB[(PostgreSQL)]
+    
+    style API fill:#7c3aed,stroke:#a78bfa,stroke-width:2px
+    style Service fill:#2563eb,stroke:#60a5fa,stroke-width:2px
+    style Domain fill:#0891b2,stroke:#22d3ee,stroke-width:2px
+    style Warwick fill:#d97706,stroke:#fbbf24,stroke-width:2px
+    style DB fill:#059669,stroke:#34d399,stroke-width:2px
+        </pre>
+      </div>
+    </div>
+    
+    <!-- Room State Machine -->
+    <div class="diagram-section">
+      <h2>Room State Machine</h2>
+      <p class="description">
+        Each room follows a strict state machine for QR code lifecycle management.
+        The state transitions are validated and persisted to ensure consistency.
+      </p>
+      <div class="diagram-container">
+        <pre class="mermaid">
+stateDiagram-v2
+    [*] --> Idle: Create Room
+    
+    Idle --> Running: Start Room
+    Idle --> Stopped: Delete Room
+    
+    Running --> Fetching: Fetch QR Code
+    Running --> Stopped: Stop Room
+    
+    Fetching --> Running: Success
+    Fetching --> Warning: Rate Limited / Auth Conflict
+    Fetching --> AuthExpired: Session Expired
+    Fetching --> Stopped: Invalid Payload
+    
+    Warning --> Fetching: Retry
+    Warning --> Stopped: Stop Room
+    
+    AuthExpired --> Fetching: Retry with Fresh Auth
+    AuthExpired --> Stopped: Stop Room
+    
+    Stopped --> Running: Restart
+    
+    note right of Idle: Waiting to start
+    note right of Running: QR code active
+    note right of Fetching: Request in progress
+    note right of Warning: Recoverable error
+    note right of AuthExpired: Needs re-login
+    note right of Stopped: Terminal state
+        </pre>
+      </div>
+    </div>
+    
+    <!-- QR Code Flow -->
+    <div class="diagram-section">
+      <h2>QR Code Generation Flow</h2>
+      <p class="description">
+        The system continuously fetches fresh QR codes from Warwick before they expire.
+        The RoomManager runs a worker goroutine per room with automatic recovery.
+      </p>
+      <div class="diagram-container">
+        <pre class="mermaid">
+sequenceDiagram
+    participant UI as Frontend
+    participant API as Go API
+    participant RM as RoomManager
+    participant Pool as SessionPool
+    participant Warwick as Warwick API
+    participant DB as PostgreSQL
+    
+    UI->>API: POST /api/rooms/{id}/start
+    API->>RM: StartRoom(roomID)
+    RM->>RM: Create worker goroutine
+    RM->>DB: Persist Running state
+    RM-->>UI: WebSocket: RoomUpdated
+    
+    loop Every 500ms-1.5s
+        RM->>RM: Check QR expiration
+        alt QR expired or about to expire
+            RM->>RM: TransitionTo(Fetching)
+            RM-->>UI: WebSocket: RoomUpdated
+            RM->>Pool: Acquire session
+            Pool-->>RM: Session cookie
+            RM->>Warwick: POST /GetQRCode
+            Warwick-->>RM: QR URL + TTL
+            RM->>RM: TransitionTo(Running)
+            RM->>DB: Persist QR data
+            RM-->>UI: WebSocket: RoomUpdated
+        end
+    end
+    
+    Note over UI,DB: Frontend receives real-time updates via WebSocket
+        </pre>
+      </div>
+    </div>
+    
+    <!-- Attendance Dashboard Flow -->
+    <div class="diagram-section">
+      <h2>Attendance Dashboard Architecture</h2>
+      <p class="description">
+        The absence dashboard aggregates attendance data across all courses.
+        It uses a multi-layered caching strategy with background refresh.
+      </p>
+      <div class="diagram-container">
+        <pre class="mermaid">
+flowchart TB
+    subgraph Request["Request Flow"]
+        FE[Frontend Dashboard]
+        API[API Handler]
+        Hydrator[Report Hydrator]
+    end
+    
+    subgraph DataSources["Data Sources"]
+        WarwickAPI[Warwick API]
+        Cache[In-Memory Cache]
+        DB[(PostgreSQL)]
+    end
+    
+    subgraph Background["Background Jobs"]
+        Refresher[DataRefresher]
+        Prewarmer[SessionPrewarmer]
+    end
+    
+    FE --> |GET /absence-dashboard| API
+    API --> Hydrator
+    
+    Hydrator --> Cache
+    Cache --> |Cache Miss| WarwickAPI
+    WarwickAPI --> |Enrich Cache| Cache
+    
+    Refresher --> |Periodic Refresh| WarwickAPI
+    Prewarmer --> |Pre-compute Reports| DB
+    
+    Hydrator --> |Read Pre-warmed| DB
+    DB --> |Persist Reports| DB
+    
+    style Request fill:#3b82f6,stroke:#60a5fa,stroke-width:2px
+    style DataSources fill:#10b981,stroke:#34d399,stroke-width:2px
+    style Background fill:#a855f7,stroke:#c084fc,stroke-width:2px
+        </pre>
+      </div>
+    </div>
+    
+    <!-- Data Flow Diagram -->
+    <div class="diagram-section">
+      <h2>Data Flow & Real-Time Updates</h2>
+      <p class="description">
+        Real-time updates flow from the backend to all connected clients via WebSocket.
+        The RoomManager broadcasts events to subscribed clients.
+      </p>
+      <div class="diagram-container">
+        <pre class="mermaid">
+flowchart LR
+    subgraph Clients["Connected Clients"]
+        C1[Browser Tab 1]
+        C2[Browser Tab 2]
+        C3[Mobile Browser]
+    end
+    
+    subgraph Events["Event Types"]
+        Sync[FullStateSync]
+        Created[RoomCreated]
+        Updated[RoomUpdated]
+        Deleted[RoomDeleted]
+    end
+    
+    subgraph Backend["Event System"]
+        RM[RoomManager]
+        Fanout[Fanout Loop]
+        Subs[Subscribers]
+    end
+    
+    RM --> Fanout
+    Fanout --> Subs
+    
+    Subs --> |WebSocket| C1
+    Subs --> |WebSocket| C2
+    Subs --> |WebSocket| C3
+    
+    Sync --> |Initial State| Subs
+    Created --> |New Room| Subs
+    Updated --> |Status Change| Subs
+    Deleted --> |Room Removed| Subs
+    
+    style Clients fill:#7c3aed,stroke:#a78bfa,stroke-width:2px
+    style Events fill:#ea580c,stroke:#fb923c,stroke-width:2px
+    style Backend fill:#0891b2,stroke:#22d3ee,stroke-width:2px
+        </pre>
+      </div>
+    </div>
+    
+    <!-- Tech Stack -->
+    <div class="diagram-section">
+      <h2>Technology Stack</h2>
+      <div class="tech-stack">
+        <span class="tech-badge">Go 1.21+</span>
+        <span class="tech-badge">Chi Router</span>
+        <span class="tech-badge">PostgreSQL</span>
+        <span class="tech-badge">pgx Pool</span>
+        <span class="tech-badge">React 18</span>
+        <span class="tech-badge">Zustand</span>
+        <span class="tech-badge">WebSocket</span>
+        <span class="tech-badge">Vite</span>
+        <span class="tech-badge">Mermaid</span>
+        <span class="tech-badge">Docker</span>
+        <span class="tech-badge">Railway</span>
+      </div>
+      
+      <div class="flow-steps" style="margin-top: 2rem;">
+        <div class="flow-step">
+          <span class="step-number">1</span>
+          <h4>Session Pool</h4>
+          <p>Manages multiple Warwick auth sessions for parallel QR fetching with automatic rotation and conflict detection.</p>
+        </div>
+        <div class="flow-step">
+          <span class="step-number">2</span>
+          <h4>Room Manager</h4>
+          <p>Orchestrates QR code lifecycle with goroutine-per-room workers, exponential backoff, and WebSocket broadcasting.</p>
+        </div>
+        <div class="flow-step">
+          <span class="step-number">3</span>
+          <h4>Data Refresher</h4>
+          <p>Background job that periodically fetches course data to warm the cache and ensure fresh data availability.</p>
+        </div>
+        <div class="flow-step">
+          <span class="step-number">4</span>
+          <h4>Report Prewarmer</h4>
+          <p>Pre-computes attendance reports and persists them to PostgreSQL for fast dashboard loading.</p>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Room States -->
+    <div class="diagram-section">
+      <h2>Room Status Indicators</h2>
+      <p class="description">
+        The UI displays real-time status for each room based on the current state machine position.
+      </p>
+      <div style="display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 1rem;">
+        <span class="status-indicator status-running">● Idle</span>
+        <span class="status-indicator status-running">● Running</span>
+        <span class="status-indicator status-warning">● Fetching</span>
+        <span class="status-indicator status-warning">● Warning</span>
+        <span class="status-indicator status-error">● AuthExpired</span>
+        <span class="status-indicator status-error">● Stopped</span>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    mermaid.initialize({ 
+      startOnLoad: true,
+      theme: 'dark',
+      themeVariables: {
+        primaryColor: '#3b82f6',
+        primaryTextColor: '#fff',
+        primaryBorderColor: '#60a5fa',
+        lineColor: '#60a5fa',
+        secondaryColor: '#7c3aed',
+        tertiaryColor: '#1e293b',
+        fontSize: '14px'
+      }
+    });
+  </script>
+</body>
+</html>

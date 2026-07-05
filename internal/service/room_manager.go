@@ -257,6 +257,166 @@ func (rm *RoomManager) emit(event RoomManagerEvent) {
 	}
 }
 
+func (rm *RoomManager) handleNoQRClient(state *RoomState) {
+	rm.mu.Lock()
+	msg := "QR client not available (session pool not initialized)"
+	state.room.ErrorMessage = &msg
+	_ = state.room.TransitionTo(domain.Stopped)
+	roomCopy := state.room
+	rm.mu.Unlock()
+	rm.persistRoomUpdate(roomCopy)
+	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+}
+
+func (rm *RoomManager) persistRoomUpdate(room domain.Room) {
+	go func() {
+		if _, err := rm.repository.UpdateRoom(room); err != nil {
+			slog.Error("failed to persist room update", "error", err, "room_id", room.RoomID)
+		}
+	}()
+}
+
+// shouldFetchQR determines if the QR code needs refreshing.
+func shouldFetchQR(expiresAt *time.Time, lastQrTime uint64, now time.Time) bool {
+	if expiresAt == nil {
+		return true
+	}
+	ttl := lastQrTime
+	if ttl == 0 {
+		ttl = 60
+	}
+	return now.After(expiresAt.Add(-time.Duration(domain.CalculateNextFetchDelay(ttl)) * time.Second))
+}
+
+// handleRoomFetchSuccess updates room state after a successful QR fetch.
+func (rm *RoomManager) handleRoomFetchSuccess(state *RoomState, resp *domain.QrResponse, now time.Time) {
+	rm.mu.Lock()
+	expiresAt := now.Add(time.Duration(resp.QrTime) * time.Second)
+	state.room.QRURL = &resp.QrURL
+	state.room.ExpiresAt = &expiresAt
+	state.room.LastUpdatedAt = &now
+	state.room.LastFetchAt = &now
+	state.lastQrTime = uint64(resp.QrTime)
+	if err := state.room.TransitionTo(domain.Running); err != nil {
+		slog.Warn("invalid transition", "error", err)
+	}
+	state.room.WarningMessage = nil
+	state.room.ErrorMessage = nil
+	roomCopy := state.room
+	rm.mu.Unlock()
+	rm.persistRoomUpdate(roomCopy)
+	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+}
+
+// handleNonRecoverableError sets warning on a non-auth error and emits.
+func (rm *RoomManager) handleNonRecoverableError(state *RoomState, err error) {
+	rm.mu.Lock()
+	msg := fmt.Sprintf("Error: %v", err)
+	state.room.WarningMessage = &msg
+	roomCopy := state.room
+	rm.mu.Unlock()
+	rm.persistRoomUpdate(roomCopy)
+	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+}
+
+// recoveryLoop attempts to re-authenticate and re-fetch the QR code with
+// exponential backoff. Returns true if recovery succeeded.
+func (rm *RoomManager) recoveryLoop(state *RoomState, classID string) bool {
+	backoff := roomRecoveryInitialBackoff
+	for attempts := 0; attempts < roomRecoveryMaxAttempts; attempts++ {
+		select {
+		case <-state.ctx.Done():
+			return false
+		case <-time.After(backoff):
+			resp, err := rm.qrClient.FetchQRWithFreshAuth(classID)
+			if err == nil {
+				rm.mu.Lock()
+				select {
+				case <-state.ctx.Done():
+					rm.mu.Unlock()
+					return false
+				default:
+				}
+				now := time.Now()
+				expiresAt := now.Add(time.Duration(resp.QrTime) * time.Second)
+				state.room.QRURL = &resp.QrURL
+				state.room.ExpiresAt = &expiresAt
+				state.room.LastUpdatedAt = &now
+				state.room.LastFetchAt = &now
+				state.lastQrTime = uint64(resp.QrTime)
+				state.room.WarningMessage = nil
+				state.room.ErrorMessage = nil
+				if err := state.room.TransitionTo(domain.Fetching); err != nil {
+					slog.Warn("invalid transition", "error", err)
+				}
+				if err := state.room.TransitionTo(domain.Running); err != nil {
+					slog.Warn("invalid transition", "error", err)
+				}
+				roomCopy := state.room
+				rm.mu.Unlock()
+				rm.persistRoomUpdate(roomCopy)
+				rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+				return true
+			}
+
+			if errors.Is(err, domain.ErrAuthConflict) {
+				slog.Info("Session kicked by admin, backing off", "room_id", state.room.RoomID)
+				rm.mu.Lock()
+				state.room.WarningMessage = strPtr("Admin logged in, retrying...")
+				state.room.ErrorMessage = nil
+				state.room.TransitionTo(domain.Warning)
+				roomCopy := state.room
+				rm.mu.Unlock()
+				rm.persistRoomUpdate(roomCopy)
+				rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+				return false
+			}
+
+			if errors.Is(err, domain.ErrPoolExhausted) {
+				slog.Debug("pool exhausted, retrying", "room_id", state.room.RoomID)
+				select {
+				case <-state.ctx.Done():
+					return false
+				case <-time.After(time.Duration(500 + rand.Intn(500)) * time.Millisecond):
+				}
+				attempts--
+				continue
+			}
+
+			var fetchErr *domain.FetchError
+			if errors.As(err, &fetchErr) && fetchErr.Kind == domain.ErrKindInvalidPayload {
+				rm.mu.Lock()
+				msg := fmt.Sprintf("Invalid QR response: %s", fetchErr.Message)
+				state.room.ErrorMessage = &msg
+				if err := state.room.TransitionTo(domain.Stopped); err != nil {
+					slog.Warn("invalid transition", "error", err)
+				}
+				roomCopy := state.room
+				rm.mu.Unlock()
+				rm.persistRoomUpdate(roomCopy)
+				rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+				return false
+			}
+
+			backoff *= 2
+			if backoff > roomRecoveryMaxBackoff {
+				backoff = roomRecoveryMaxBackoff
+			}
+		}
+	}
+
+	rm.mu.Lock()
+	state.room.ErrorMessage = strPtr("Session recovery failed after 10 attempts")
+	state.room.TransitionTo(domain.Stopped)
+	state.cancel()
+	state.cancel = nil
+	roomCopy := state.room
+	rm.mu.Unlock()
+	rm.persistRoomUpdate(roomCopy)
+	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+	return false
+}
+
 func (rm *RoomManager) runRoomWorker(state *RoomState) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -265,22 +425,10 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 	}()
 
 	if rm.qrClient == nil {
-		rm.mu.Lock()
-		msg := "QR client not available (session pool not initialized)"
-		state.room.ErrorMessage = &msg
-		_ = state.room.TransitionTo(domain.Stopped)
-		roomCopy := state.room
-		rm.mu.Unlock()
-		go func() {
-			if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
-				slog.Error("failed to persist QR client error", "error", err)
-			}
-		}()
-		rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+		rm.handleNoQRClient(state)
 		return
 	}
 
-roomLoop:
 	for {
 		select {
 		case <-state.ctx.Done():
@@ -291,211 +439,52 @@ roomLoop:
 			expiresAt := state.room.ExpiresAt
 			classID := state.room.ClassID
 			rm.mu.RUnlock()
-			defaultTTL := state.lastQrTime
-			if defaultTTL == 0 {
-				defaultTTL = 60
+
+			if !shouldFetchQR(expiresAt, state.lastQrTime, now) {
+				continue
 			}
-			shouldFetch := expiresAt == nil || now.After(expiresAt.Add(-time.Duration(domain.CalculateNextFetchDelay(defaultTTL))*time.Second))
 
-			if shouldFetch {
+			rm.mu.Lock()
+			if err := state.room.TransitionTo(domain.Fetching); err != nil {
+				slog.Warn("invalid transition", "error", err)
+			}
+			fetchingRoom := state.room
+			rm.mu.Unlock()
+			rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: fetchingRoom})
+
+			resp, err := rm.qrClient.FetchQR(classID)
+			if err != nil {
 				rm.mu.Lock()
-				if err := state.room.TransitionTo(domain.Fetching); err != nil {
-					slog.Warn("invalid transition", "error", err)
+				var fetchErr *domain.FetchError
+				if errors.As(err, &fetchErr) {
+					if err := state.room.TransitionTo(fetchErr.ToRoomStatus()); err != nil {
+						slog.Warn("invalid transition", "error", err)
+					}
+				} else {
+					if err := state.room.TransitionTo(domain.Warning); err != nil {
+						slog.Warn("invalid transition", "error", err)
+					}
 				}
-				fetchingRoom := state.room
-				rm.mu.Unlock()
-
-				rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: fetchingRoom})
-
-				resp, err := rm.qrClient.FetchQR(classID)
-				if err != nil {
-					rm.mu.Lock()
-					var fetchErr *domain.FetchError
-					if errors.As(err, &fetchErr) {
-						if err := state.room.TransitionTo(fetchErr.ToRoomStatus()); err != nil {
-							slog.Warn("invalid transition", "error", err)
-						}
-					} else {
-						if err := state.room.TransitionTo(domain.Warning); err != nil {
-							slog.Warn("invalid transition", "error", err)
-						}
-					}
-					if state.room.Status == domain.AuthExpired {
-						// Recovery loop — keep worker alive, retry with backoff
-						msg := "Session expired, retrying..."
-						state.room.WarningMessage = &msg
-						state.room.ErrorMessage = nil
-						roomCopy := state.room
-						rm.mu.Unlock()
-
-						go func() {
-							if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
-								slog.Error("failed to persist recovery state", "error", err)
-							}
-						}()
-						rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
-
-						// Recovery loop with exponential backoff
-						backoff := roomRecoveryInitialBackoff
-						recovered := false
-						for attempts := 0; attempts < roomRecoveryMaxAttempts; attempts++ {
-							select {
-							case <-state.ctx.Done():
-								return
-							case <-time.After(backoff):
-								resp, err := rm.qrClient.FetchQRWithFreshAuth(classID)
-								if err == nil {
-									rm.mu.Lock()
-									// Check if context was cancelled while HTTP was in-flight (race with StopRoom)
-									select {
-									case <-state.ctx.Done():
-										rm.mu.Unlock()
-										return
-									default:
-									}
-									now := time.Now()
-									expiresAt := now.Add(time.Duration(resp.QrTime) * time.Second)
-									state.room.QRURL = &resp.QrURL
-									state.room.ExpiresAt = &expiresAt
-									state.room.LastUpdatedAt = &now
-									state.room.LastFetchAt = &now
-									state.lastQrTime = uint64(resp.QrTime)
-									state.room.WarningMessage = nil
-									state.room.ErrorMessage = nil
-									if err := state.room.TransitionTo(domain.Fetching); err != nil {
-										slog.Warn("invalid transition", "error", err)
-									}
-									if err := state.room.TransitionTo(domain.Running); err != nil {
-										slog.Warn("invalid transition", "error", err)
-									}
-									roomCopy = state.room
-									rm.mu.Unlock()
-									go func() {
-										if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
-											slog.Error("failed to persist recovery", "error", err)
-										}
-									}()
-									rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
-									recovered = true
-									break
-								}
-
-								// Auth conflict — pool handles backoff, skip retry loop
-								if errors.Is(err, domain.ErrAuthConflict) {
-									slog.Info("Session kicked by admin, backing off", "room_id", state.room.RoomID)
-									rm.mu.Lock()
-									state.room.WarningMessage = strPtr("Admin logged in, retrying...")
-									state.room.ErrorMessage = nil
-									state.room.TransitionTo(domain.Warning)
-									roomCopy = state.room
-									rm.mu.Unlock()
-									go func() {
-										if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
-											slog.Error("failed to persist warning state", "error", err)
-										}
-									}()
-									rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
-									continue roomLoop
-								}
-
-								// Pool exhaustion — all sessions in use, retry with short jitter
-								if errors.Is(err, domain.ErrPoolExhausted) {
-									slog.Debug("pool exhausted, retrying", "room_id", state.room.RoomID)
-									select {
-									case <-state.ctx.Done():
-										return
-									case <-time.After(time.Duration(500 + rand.Intn(500)) * time.Millisecond):
-									}
-									attempts--
-									continue
-								}
-
-								// Check for invalid payload — will never succeed on retry
-								var fetchErr *domain.FetchError
-								if errors.As(err, &fetchErr) && fetchErr.Kind == domain.ErrKindInvalidPayload {
-									rm.mu.Lock()
-									msg := fmt.Sprintf("Invalid QR response: %s", fetchErr.Message)
-									state.room.ErrorMessage = &msg
-									if err := state.room.TransitionTo(domain.Stopped); err != nil {
-										slog.Warn("invalid transition", "error", err)
-									}
-									roomCopy = state.room
-									rm.mu.Unlock()
-									go func() {
-										if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
-											slog.Error("failed to persist invalid payload failure", "error", err)
-										}
-									}()
-									rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
-									return
-								}
-								backoff *= 2
-								if backoff > roomRecoveryMaxBackoff {
-									backoff = roomRecoveryMaxBackoff
-								}
-							}
-							if recovered {
-								break
-							}
-						}
-						if !recovered {
-							rm.mu.Lock()
-							state.room.ErrorMessage = strPtr("Session recovery failed after 10 attempts")
-							state.room.TransitionTo(domain.Stopped)
-							state.cancel()
-							state.cancel = nil
-							roomCopy = state.room
-							rm.mu.Unlock()
-							go func() {
-								if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
-									slog.Error("failed to persist final recovery failure", "error", err)
-								}
-							}()
-							rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
-							return
-						}
-						continue
-					} else {
-						msg := fmt.Sprintf("Error: %v", err)
-						state.room.WarningMessage = &msg
-					}
+				if state.room.Status == domain.AuthExpired {
+					msg := "Session expired, retrying..."
+					state.room.WarningMessage = &msg
+					state.room.ErrorMessage = nil
 					roomCopy := state.room
 					rm.mu.Unlock()
-
-					go func() {
-						if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
-							slog.Error("failed to persist room error", "error", err)
-						}
-					}()
-
+					rm.persistRoomUpdate(roomCopy)
 					rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
 
-					continue
-				}
-
-				expiresAt := now.Add(time.Duration(resp.QrTime) * time.Second)
-				rm.mu.Lock()
-				state.room.QRURL = &resp.QrURL
-				state.room.ExpiresAt = &expiresAt
-				state.room.LastUpdatedAt = &now
-				state.room.LastFetchAt = &now
-				state.lastQrTime = uint64(resp.QrTime)
-				if err := state.room.TransitionTo(domain.Running); err != nil {
-					slog.Warn("invalid transition", "error", err)
-				}
-				state.room.WarningMessage = nil
-				state.room.ErrorMessage = nil
-				roomCopy := state.room
-				rm.mu.Unlock()
-
-				go func() {
-					if _, err := rm.repository.UpdateRoom(roomCopy); err != nil {
-						slog.Error("failed to persist room update", "error", err)
+					if rm.recoveryLoop(state, classID) {
+						continue
 					}
-				}()
-
-				rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+					return
+				}
+				rm.mu.Unlock()
+				rm.handleNonRecoverableError(state, err)
+				continue
 			}
+
+			rm.handleRoomFetchSuccess(state, &resp, now)
 		}
 	}
 }

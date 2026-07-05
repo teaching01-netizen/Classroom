@@ -4,38 +4,38 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"log/slog"
 	"net/http"
-	"sort"
 	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
-	"qr-command-center/internal/db"
 	"qr-command-center/internal/domain"
-	"qr-command-center/internal/warwick"
+	"qr-command-center/internal/service"
 )
 
-func getCoursesHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
+// mapServiceError maps domain errors to HTTP status codes.
+func mapServiceError(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, domain.ErrAuthExpired) {
+		writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
+		return true
+	}
+	if errors.Is(err, domain.ErrPoolExhausted) {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
+		return true
+	}
+	if errors.Is(err, domain.ErrAuthConflict) {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
+		return true
+	}
+	return false
+}
+
+func getCoursesHandler(ts *service.TeacherService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if cc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
-			return
-		}
-		courses, err := cc.GetCourses()
+		courses, err := ts.GetCourses(r.Context())
 		if err != nil {
-			if errors.Is(err, domain.ErrAuthExpired) {
-				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
-				return
-			}
-			if errors.Is(err, domain.ErrPoolExhausted) {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
-				return
-			}
-			if errors.Is(err, domain.ErrAuthConflict) {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
+			if mapServiceError(w, err) {
 				return
 			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
@@ -45,30 +45,17 @@ func getCoursesHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 	}
 }
 
-func getCourseDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
+func getCourseDetailHandler(ts *service.TeacherService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if cc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
-			return
-		}
 		courseID := chi.URLParam(r, "courseId")
 		if courseID == "" {
 			writeJSON(w, http.StatusBadRequest, errorResponse("courseId is required"))
 			return
 		}
 
-		detail, err := cc.GetCourseDetail(courseID)
+		detail, err := ts.GetCourseDetail(r.Context(), courseID)
 		if err != nil {
-			if errors.Is(err, domain.ErrAuthExpired) {
-				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
-				return
-			}
-			if errors.Is(err, domain.ErrPoolExhausted) {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
-				return
-			}
-			if errors.Is(err, domain.ErrAuthConflict) {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
+			if mapServiceError(w, err) {
 				return
 			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
@@ -78,12 +65,8 @@ func getCourseDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 	}
 }
 
-func getSessionDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
+func getSessionDetailHandler(ts *service.TeacherService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if cc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
-			return
-		}
 		courseID := chi.URLParam(r, "courseId")
 		sessionID := chi.URLParam(r, "sessionId")
 
@@ -92,61 +75,21 @@ func getSessionDetailHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 			return
 		}
 
-		// Fetch session detail and student profiles concurrently.
-		// FetchStudentProfiles is cached (5-min TTL) so after the first request
-		// it is effectively free. Running them in parallel benefits the cold case
-		// and prevents head-of-line blocking between the two Warwick round trips.
-		var (
-			detail   *domain.SessionDetail
-			err      error
-			profiles []domain.StudentProfile
-		)
-		detailCh := make(chan struct{})
-		profilesCh := make(chan struct{})
-
-		go func() {
-			detail, err = cc.GetSessionDetail(courseID, sessionID)
-			close(detailCh)
-		}()
-		go func() {
-			p, _ := cc.FetchStudentProfiles()
-			profiles = p
-			close(profilesCh)
-		}()
-
-		<-detailCh
+		result, err := ts.GetSessionDetail(r.Context(), courseID, sessionID)
 		if err != nil {
-			if errors.Is(err, domain.ErrAuthExpired) {
-				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
-				return
-			}
-			if errors.Is(err, domain.ErrPoolExhausted) {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
-				return
-			}
-			if errors.Is(err, domain.ErrAuthConflict) {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
+			if mapServiceError(w, err) {
 				return
 			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
 		}
 
-		<-profilesCh
-		if len(profiles) > 0 {
-			warwick.EnrichCheckinStudentIDWithWCode(detail.Students, profiles)
-		}
-
-		writeJSON(w, http.StatusOK, successResponse(detail))
+		writeJSON(w, http.StatusOK, successResponse(result.Detail))
 	}
 }
 
-func toggleCheckinHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
+func toggleCheckinHandler(ts *service.TeacherService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if cc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
-			return
-		}
 		courseID := chi.URLParam(r, "courseId")
 		sessionID := chi.URLParam(r, "sessionId")
 
@@ -161,17 +104,8 @@ func toggleCheckinHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 			return
 		}
 
-		if err := cc.ToggleCheckin(courseID, sessionID, req.StudentID, req.Checked); err != nil {
-			if errors.Is(err, domain.ErrAuthExpired) {
-				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
-				return
-			}
-			if errors.Is(err, domain.ErrPoolExhausted) {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
-				return
-			}
-			if errors.Is(err, domain.ErrAuthConflict) {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
+		if err := ts.ToggleCheckin(r.Context(), courseID, sessionID, req.StudentID, req.Checked); err != nil {
+			if mapServiceError(w, err) {
 				return
 			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
@@ -184,16 +118,14 @@ func toggleCheckinHandler(cc *warwick.ClassroomClient) http.HandlerFunc {
 			NewCount:  0,
 		}))
 
-		// Mark the attendance report stale (not hard invalidate).
-		// Stale-while-revalidate: next request returns stale + triggers async refresh.
-		cc.MarkStaleReport(courseID)
+		ts.MarkReportStale(courseID)
 	}
 }
 
 // listDashboardViewsHandler returns all saved dashboard views.
-func listDashboardViewsHandler(viewRepo db.DashboardViewRepository) http.HandlerFunc {
+func listDashboardViewsHandler(svc *service.DashboardViewService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		views, err := viewRepo.List(r.Context())
+		views, err := svc.List(r.Context())
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
@@ -206,7 +138,7 @@ func listDashboardViewsHandler(viewRepo db.DashboardViewRepository) http.Handler
 }
 
 // getDashboardViewHandler returns a single saved dashboard view by ID.
-func getDashboardViewHandler(viewRepo db.DashboardViewRepository) http.HandlerFunc {
+func getDashboardViewHandler(svc *service.DashboardViewService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		idStr := chi.URLParam(r, "id")
 		id, err := strconv.ParseInt(idStr, 10, 64)
@@ -214,7 +146,7 @@ func getDashboardViewHandler(viewRepo db.DashboardViewRepository) http.HandlerFu
 			writeJSON(w, http.StatusBadRequest, errorResponse("invalid view id"))
 			return
 		}
-		view, err := viewRepo.GetByID(r.Context(), id)
+		view, err := svc.GetByID(r.Context(), id)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, errorResponse("view not found"))
 			return
@@ -224,7 +156,7 @@ func getDashboardViewHandler(viewRepo db.DashboardViewRepository) http.HandlerFu
 }
 
 // createDashboardViewHandler creates a new saved dashboard view.
-func createDashboardViewHandler(viewRepo db.DashboardViewRepository) http.HandlerFunc {
+func createDashboardViewHandler(svc *service.DashboardViewService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Name    string                `json:"name"`
@@ -239,7 +171,7 @@ func createDashboardViewHandler(viewRepo db.DashboardViewRepository) http.Handle
 			return
 		}
 
-		view, err := viewRepo.Create(r.Context(), req.Name, req.Filters)
+		view, err := svc.Create(r.Context(), req.Name, req.Filters)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
@@ -249,7 +181,7 @@ func createDashboardViewHandler(viewRepo db.DashboardViewRepository) http.Handle
 }
 
 // updateDashboardViewHandler updates an existing saved dashboard view.
-func updateDashboardViewHandler(viewRepo db.DashboardViewRepository) http.HandlerFunc {
+func updateDashboardViewHandler(svc *service.DashboardViewService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		idStr := chi.URLParam(r, "id")
 		id, err := strconv.ParseInt(idStr, 10, 64)
@@ -271,7 +203,7 @@ func updateDashboardViewHandler(viewRepo db.DashboardViewRepository) http.Handle
 			return
 		}
 
-		view, err := viewRepo.Update(r.Context(), id, req.Name, req.Filters)
+		view, err := svc.Update(r.Context(), id, req.Name, req.Filters)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
@@ -281,7 +213,7 @@ func updateDashboardViewHandler(viewRepo db.DashboardViewRepository) http.Handle
 }
 
 // deleteDashboardViewHandler deletes a saved dashboard view.
-func deleteDashboardViewHandler(viewRepo db.DashboardViewRepository) http.HandlerFunc {
+func deleteDashboardViewHandler(svc *service.DashboardViewService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		idStr := chi.URLParam(r, "id")
 		id, err := strconv.ParseInt(idStr, 10, 64)
@@ -290,7 +222,7 @@ func deleteDashboardViewHandler(viewRepo db.DashboardViewRepository) http.Handle
 			return
 		}
 
-		if err := viewRepo.Delete(r.Context(), id); err != nil {
+		if err := svc.Delete(r.Context(), id); err != nil {
 			writeJSON(w, http.StatusNotFound, errorResponse(err.Error()))
 			return
 		}
@@ -299,7 +231,7 @@ func deleteDashboardViewHandler(viewRepo db.DashboardViewRepository) http.Handle
 }
 
 // touchDashboardViewHandler updates the last_used_at timestamp for a view.
-func touchDashboardViewHandler(viewRepo db.DashboardViewRepository) http.HandlerFunc {
+func touchDashboardViewHandler(svc *service.DashboardViewService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		idStr := chi.URLParam(r, "id")
 		id, err := strconv.ParseInt(idStr, 10, 64)
@@ -308,7 +240,7 @@ func touchDashboardViewHandler(viewRepo db.DashboardViewRepository) http.Handler
 			return
 		}
 
-		if err := viewRepo.Touch(r.Context(), id); err != nil {
+		if err := svc.Touch(r.Context(), id); err != nil {
 			writeJSON(w, http.StatusNotFound, errorResponse(err.Error()))
 			return
 		}
@@ -316,20 +248,14 @@ func touchDashboardViewHandler(viewRepo db.DashboardViewRepository) http.Handler
 	}
 }
 
-func getCourseAttendanceReportHandler(cc *warwick.ClassroomClient, checkinRepo db.SessionCheckinRepository, persister warwick.ReportEnqueuer) http.HandlerFunc {
+func getCourseAttendanceReportHandler(ts *service.TeacherService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if cc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
-			return
-		}
 		courseID := chi.URLParam(r, "courseId")
 		if courseID == "" {
 			writeJSON(w, http.StatusBadRequest, errorResponse("courseId is required"))
 			return
 		}
 
-		// Parse threshold query param (number of absences allowed).
-		// 0 or empty = default (20% of total sessions).
 		threshold := 0
 		if t := r.URL.Query().Get("threshold"); t != "" {
 			val, err := strconv.Atoi(t)
@@ -340,72 +266,28 @@ func getCourseAttendanceReportHandler(cc *warwick.ClassroomClient, checkinRepo d
 			threshold = val
 		}
 
-		// Parse source query param. Default = "db" (pre-warmed data).
-		// "live" = fetch directly from Warwick API (slower, rate-limited).
-		// DB source uses fallback: if DB has 0 students for a session
-		// (prewarmer hasn't synced yet), it retries from Warwick live.
 		source := r.URL.Query().Get("source")
-		var dataSource warwick.SessionDataSource
-		if source == "live" {
-			dataSource = warwick.NewLiveSessionDataSource(cc)
-		} else {
-			if checkinRepo == nil {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("DB source not available; use ?source=live"))
-				return
-			}
-			dataSource = warwick.NewFallbackSessionDataSource(
-				warwick.NewDBSessionDataSource(checkinRepo),
-				warwick.NewLiveSessionDataSource(cc),
-			)
-		}
 
-		// Fetch course detail for the session list.
-		courseDetail, err := cc.GetCourseDetail(courseID)
-		if err != nil {
-			if errors.Is(err, domain.ErrAuthExpired) {
-				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
-				return
-			}
-			if errors.Is(err, domain.ErrPoolExhausted) {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
-				return
-			}
-			if errors.Is(err, domain.ErrAuthConflict) {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
-				return
-			}
-			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
-			return
-		}
-
-		// Compute report with a generous timeout (live fetch of all sessions).
 		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 		defer cancel()
 
-		report, err := cc.GetCourseAttendanceReport(ctx, courseID, courseDetail.Name, courseDetail.Sessions, threshold, dataSource, persister)
+		report, err := ts.GetAttendanceReport(ctx, courseID, threshold, source)
 		if err != nil {
+			if mapServiceError(w, err) {
+				return
+			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
-		}
-
-		// Enrich StudentID: replace UUID with Warwick wcode from student profiles.
-		if profiles, profErr := cc.FetchStudentProfiles(); profErr == nil {
-			warwick.EnrichStudentIDWithWCode(report.Students, profiles)
 		}
 
 		writeJSON(w, http.StatusOK, successResponse(report))
 	}
 }
 
-// getAbsenceDashboardHandler returns a cross-course absence dashboard.
-// It aggregates attendance data across all (or filtered) courses.
 // getBatchAttendanceHandler returns attendance reports for multiple courses in a single request.
-// POST /api/teacher/courses/attendance-batch
-// Body: { "course_ids": ["CS101", "CS102"], "threshold": 0 }
-// Response: { "courses": { "CS101": <CourseAttendanceReport>, "CS102": <CourseAttendanceReport> } }
-func getBatchAttendanceHandler(cc *warwick.ClassroomClient, checkinRepo db.SessionCheckinRepository) http.HandlerFunc {
+func getBatchAttendanceHandler(ts *service.TeacherService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if cc == nil {
+		if ts == nil {
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
 			return
 		}
@@ -423,63 +305,30 @@ func getBatchAttendanceHandler(cc *warwick.ClassroomClient, checkinRepo db.Sessi
 			return
 		}
 
-		// Build data source (DB pre-warmed with Warwick live fallback).
-		var dataSource warwick.SessionDataSource
-		if checkinRepo != nil {
-			dataSource = warwick.NewFallbackSessionDataSource(
-				warwick.NewDBSessionDataSource(checkinRepo),
-				warwick.NewLiveSessionDataSource(cc),
-			)
-		} else {
-			dataSource = warwick.NewLiveSessionDataSource(cc)
-		}
-
 		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
-		type courseResult struct {
-			report *domain.CourseAttendanceReport
-			err    error
-		}
-
-		results := make(map[string]courseResult, len(req.CourseIds))
-		sem := make(chan struct{}, 2) // match teacher tier capacity
-
-		for _, courseID := range req.CourseIds {
-			sem <- struct{}{}
-			go func(cid string) {
-				defer func() { <-sem }()
-
-				detail, err := cc.GetCourseDetail(cid)
-				if err != nil {
-					results[cid] = courseResult{err: err}
-					return
-				}
-
-				report := warwick.ComputeCourseAttendanceReport(ctx, dataSource, detail, req.Threshold)
-				results[cid] = courseResult{report: report}
-			}(courseID)
-		}
-
-		// Drain semaphore.
-		for i := 0; i < cap(sem); i++ {
-			sem <- struct{}{}
-		}
-
-		if ctx.Err() != nil {
-			writeJSON(w, http.StatusGatewayTimeout, errorResponse("batch computation timed out"))
+		batchResult, err := ts.GetBatchAttendance(ctx, req.CourseIds, req.Threshold)
+		if err != nil {
+			if mapServiceError(w, err) {
+				return
+			}
+			if ctx.Err() != nil {
+				writeJSON(w, http.StatusGatewayTimeout, errorResponse("batch computation timed out"))
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
 		}
 
-		// Build response: map course_id → report.
-		courses := make(map[string]interface{}, len(results))
-		for cid, res := range results {
-			if res.err != nil {
+		courses := make(map[string]interface{}, len(batchResult.Courses))
+		for cid, res := range batchResult.Courses {
+			if res.Err != nil {
 				courses[cid] = map[string]interface{}{
-					"error": res.err.Error(),
+					"error": res.Err.Error(),
 				}
 			} else {
-				courses[cid] = res.report
+				courses[cid] = res.Report
 			}
 		}
 
@@ -489,463 +338,33 @@ func getBatchAttendanceHandler(cc *warwick.ClassroomClient, checkinRepo db.Sessi
 	}
 }
 
-func getAbsenceDashboardHandler(cc *warwick.ClassroomClient, checkinRepo db.SessionCheckinRepository) http.HandlerFunc {
+func getAbsenceDashboardHandler(ts *service.TeacherService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		if cc == nil {
-			slog.Error("absence_dashboard_client_nil")
-			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick client not available"))
-			return
-		}
-
-		// Parse filters from query param.
 		filters := domain.DefaultDashboardFilters()
 		if f := r.URL.Query().Get("filters"); f != "" {
 			decoded, err := domain.UnmarshalDashboardFilters([]byte(f))
 			if err != nil {
-				slog.Error("absence_dashboard_invalid_filters", "filters", f, "error", err)
 				writeJSON(w, http.StatusBadRequest, errorResponse("invalid filters parameter"))
 				return
 			}
 			filters = decoded
 		}
 
-		slog.Info("absence_dashboard_start",
-			"course_ids", filters.CourseIds,
-			"threshold", filters.Threshold,
-			"date_range", filters.DateRange,
-			"sort_by", filters.SortBy,
-			"w_codes", filters.WCodes,
-		)
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		defer cancel()
 
-		// Determine threshold: use filter value or default to 20% (0 = auto).
-		threshold := filters.Threshold
-
-		// Build data source (DB pre-warmed with Warwick live fallback).
-		var dataSource warwick.SessionDataSource
-		if checkinRepo != nil {
-			dataSource = warwick.NewFallbackSessionDataSource(
-				warwick.NewDBSessionDataSource(checkinRepo),
-				warwick.NewLiveSessionDataSource(cc),
-			)
-		} else {
-			dataSource = warwick.NewLiveSessionDataSource(cc)
-		}
-
-		// Fetch all courses from Warwick.
-		slog.Info("absence_dashboard_fetching_courses")
-		coursesStart := time.Now()
-		allCourses, err := cc.GetCourses()
-		coursesDuration := time.Since(coursesStart)
+		report, err := ts.GetAbsenceDashboard(ctx, filters)
 		if err != nil {
-			slog.Error("absence_dashboard_get_courses_failed", "error", err, "duration_ms", coursesDuration.Milliseconds())
-			if errors.Is(err, domain.ErrAuthExpired) {
-				writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
+			if mapServiceError(w, err) {
 				return
 			}
-			if errors.Is(err, domain.ErrPoolExhausted) {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Too many concurrent requests, try again"))
-				return
-			}
-			if errors.Is(err, domain.ErrAuthConflict) {
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Warwick session in use, try again"))
+			if ctx.Err() != nil {
+				writeJSON(w, http.StatusGatewayTimeout, errorResponse("dashboard computation timed out"))
 				return
 			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
 		}
-		slog.Info("absence_dashboard_courses_fetched", "count", len(allCourses), "duration_ms", coursesDuration.Milliseconds())
-
-		// Filter to requested course IDs if specified.
-		courses := allCourses
-		if len(filters.CourseIds) > 0 {
-			idSet := make(map[string]bool, len(filters.CourseIds))
-			for _, id := range filters.CourseIds {
-				idSet[id] = true
-			}
-			courses = make([]domain.CourseSummary, 0)
-			for _, c := range allCourses {
-				if idSet[c.CourseID] {
-					courses = append(courses, c)
-				}
-			}
-			slog.Info("absence_dashboard_filtered_courses", "original", len(allCourses), "filtered", len(courses))
-		}
-
-		if len(courses) == 0 {
-			slog.Info("absence_dashboard_no_courses", "total_fetched", len(allCourses))
-			writeJSON(w, http.StatusOK, successResponse(domain.DashboardReport{
-				GeneratedAt: time.Now(),
-				Students:    []domain.StudentAbsence{},
-				TopAtRisk:   []domain.StudentRisk{},
-				Sessions:    []domain.DashboardSessionSummary{},
-			}))
-			return
-		}
-
-		slog.Info("absence_dashboard_computing_reports", "course_count", len(courses))
-
-		// Compute attendance reports for each course in parallel.
-		type courseResult struct {
-			courseID   string
-			courseName string
-			report     *domain.CourseAttendanceReport
-			err        error
-		}
-
-		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
-		defer cancel()
-
-		results := make([]courseResult, len(courses))
-		sem := make(chan struct{}, 2) // match teacher tier capacity (default 2 sessions)
-
-		for i, course := range courses {
-			sem <- struct{}{}
-			go func(idx int, c domain.CourseSummary) {
-				defer func() { <-sem }()
-				courseStart := time.Now()
-
-				// Retry with backoff on pool exhaustion (other goroutines hold sessions).
-				var detail *domain.CourseDetail
-				var lastErr error
-				for attempt := 0; attempt < 3; attempt++ {
-					var err error
-					detail, err = cc.GetCourseDetail(c.CourseID)
-					if err == nil {
-						lastErr = nil
-						break
-					}
-					lastErr = err
-					if errors.Is(err, domain.ErrPoolExhausted) {
-						backoff := time.Duration(500*(1<<uint(attempt))) * time.Millisecond
-						slog.Warn("dashboard_course_detail_pool_retry", "course_id", c.CourseID, "attempt", attempt+1, "backoff", backoff)
-						select {
-						case <-time.After(backoff):
-							continue
-						case <-ctx.Done():
-							slog.Error("dashboard_course_detail_timeout", "course_id", c.CourseID, "error", ctx.Err())
-							results[idx] = courseResult{courseID: c.CourseID, courseName: c.Name, err: ctx.Err()}
-							return
-						}
-					}
-					// Non-pool errors (auth, etc.) — don't retry.
-					break
-				}
-				if lastErr != nil {
-					slog.Error("dashboard_course_detail_failed", "course_id", c.CourseID, "course_name", c.Name, "error", lastErr, "duration_ms", time.Since(courseStart).Milliseconds())
-					results[idx] = courseResult{courseID: c.CourseID, courseName: c.Name, err: lastErr}
-					return
-				}
-
-				report := warwick.ComputeCourseAttendanceReport(ctx, dataSource, detail, threshold)
-				slog.Info("dashboard_course_report_done",
-					"course_id", c.CourseID,
-					"course_name", c.Name,
-					"students", len(report.Students),
-					"sessions", len(report.Sessions),
-					"errors", len(report.Errors),
-					"duration_ms", time.Since(courseStart).Milliseconds(),
-				)
-				results[idx] = courseResult{courseID: c.CourseID, courseName: c.Name, report: report}
-			}(i, course)
-		}
-
-		// Drain semaphore.
-		for i := 0; i < cap(sem); i++ {
-			sem <- struct{}{}
-		}
-
-		if ctx.Err() != nil {
-			slog.Error("absence_dashboard_timeout", "error", ctx.Err(), "elapsed_ms", time.Since(start).Milliseconds())
-			writeJSON(w, http.StatusGatewayTimeout, errorResponse("dashboard computation timed out"))
-			return
-		}
-
-		// Log per-course results summary.
-		succeeded := 0
-		failed := 0
-		for _, res := range results {
-			if res.err != nil {
-				failed++
-				slog.Warn("absence_dashboard_course_skipped", "course_id", res.courseID, "course_name", res.courseName, "error", res.err)
-			} else {
-				succeeded++
-			}
-		}
-		slog.Info("absence_dashboard_course_results", "succeeded", succeeded, "failed", failed)
-
-		// Aggregate across courses.
-		// Track per-student data across courses.
-		type studentAgg struct {
-			studentGUID string // UUID from attendance data
-			name        string
-			nickname    string
-			school      string
-			avatarURL   string
-			attended    int
-			total       int
-			courses     []domain.CourseAbsence
-			perSession  map[string]bool // sessionID → checkedIn
-		}
-
-		studentMap := make(map[string]*studentAgg)
-		allSessions := make(map[string]*domain.DashboardSessionSummary)
-		totalStudents := 0
-		totalAtRisk := 0
-		totalAttended := 0
-		totalSessions := 0
-
-		for _, res := range results {
-			if res.err != nil || res.report == nil {
-				continue
-			}
-
-			courseSessions := make(map[string]bool)
-			for _, sess := range res.report.Sessions {
-				courseSessions[sess.SessionID] = true
-				if _, exists := allSessions[sess.SessionID]; !exists {
-				allSessions[sess.SessionID] = &domain.DashboardSessionSummary{
-					SessionID:     sess.SessionID,
-					SessionNumber: sess.SessionNumber,
-					Name:          sess.Name,
-					CourseID:      res.courseID,
-					CourseName:    res.courseName,
-					Status:        string(sess.Status),
-				}
-				}
-			}
-
-			// Count checked-in per session for session summaries.
-			for _, s := range res.report.Students {
-				for _, ps := range s.PerSession {
-					if sess, ok := allSessions[ps.SessionID]; ok {
-						if ps.CheckedIn {
-							sess.CheckedInCount++
-						}
-					}
-				}
-			}
-
-			for _, s := range res.report.Students {
-				agg, ok := studentMap[s.StudentID]
-				if !ok {
-				agg = &studentAgg{
-					studentGUID: s.StudentID,
-					name:        s.Name,
-					nickname:    s.Nickname,
-					school:      s.School,
-					avatarURL:   s.AvatarURL,
-					perSession: make(map[string]bool),
-				}
-					studentMap[s.StudentID] = agg
-				}
-
-				agg.attended += s.AttendedSessions
-				agg.total += s.TotalSessions
-				agg.courses = append(agg.courses, domain.CourseAbsence{
-					CourseID:         res.courseID,
-					CourseName:       res.courseName,
-					TotalSessions:    s.TotalSessions,
-					AttendedSessions: s.AttendedSessions,
-					Rate:             s.AttendanceRate,
-					Absences:         s.TotalSessions - s.AttendedSessions,
-					AtRisk:           s.AtRisk,
-				})
-
-				for _, ps := range s.PerSession {
-					agg.perSession[ps.SessionID] = ps.CheckedIn
-				}
-			}
-
-			// Count total students from the first report (approximate).
-			if totalStudents == 0 {
-				totalStudents = len(res.report.Students)
-			} else {
-				// Approximate: max students across courses
-				if len(res.report.Students) > totalStudents {
-					totalStudents = len(res.report.Students)
-				}
-			}
-		}
-
-		// Build session list sorted by course then session number.
-		sessions := make([]domain.DashboardSessionSummary, 0, len(allSessions))
-		for _, s := range allSessions {
-			sessions = append(sessions, *s)
-		}
-		sort.Slice(sessions, func(i, j int) bool {
-			if sessions[i].CourseID != sessions[j].CourseID {
-				return sessions[i].CourseID < sessions[j].CourseID
-			}
-			return sessions[i].SessionNumber < sessions[j].SessionNumber
-		})
-
-		// Set total students per session.
-		for i := range sessions {
-			sessions[i].TotalStudents = totalStudents
-		}
-
-		// Enrich with Warwick StudentID from UserGroup profile list.
-		// Maps StudentGuid (UUID) → StudentID (e.g. "W88888")
-		guidToStudentID := make(map[string]string)
-		if profiles, err := cc.FetchStudentProfiles(); err == nil {
-			for _, p := range profiles {
-				if p.StudentID != "" && p.StudentGuid != "" {
-					guidToStudentID[p.StudentGuid] = p.StudentID
-				}
-			}
-			slog.Info("absence_dashboard_student_profiles_loaded", "profiles", len(profiles), "mappings", len(guidToStudentID))
-		} else {
-			slog.Warn("absence_dashboard_student_profiles_fetch_failed", "error", err)
-		}
-
-		// Build student absence list.
-		students := make([]domain.StudentAbsence, 0, len(studentMap))
-		studentSet := make(map[string]bool)
-		for _, agg := range studentMap {
-			absences := agg.total - agg.attended
-			var rate float64
-			if agg.total > 0 {
-				rate = float64(agg.attended) / float64(agg.total)
-			}
-
-			// Build per-session checkin status for this student.
-			perSession := make([]domain.SessionCheckin, 0, len(sessions))
-			for _, sess := range sessions {
-				checked, hasData := agg.perSession[sess.SessionID]
-				status := "not_started"
-				if sess.Status == "done" {
-					if hasData {
-						if checked {
-							status = "checked_in"
-						} else {
-							status = "absent"
-						}
-					} else {
-						status = "not_started"
-					}
-				} else if sess.Status == "active" {
-					if hasData {
-						if checked {
-							status = "checked_in"
-						} else {
-							status = "present"
-						}
-					}
-				}
-
-			perSession = append(perSession, domain.SessionCheckin{
-				SessionID:     sess.SessionID,
-				SessionNumber: sess.SessionNumber,
-				SessionName:   sess.Name,
-				SessionDate:   sess.Date,
-				SessionStatus: sess.Status,
-				CheckedIn:     checked,
-				Status:        status,
-			})
-			}
-
-			// Apply threshold: at-risk if absences >= threshold.
-			isAtRisk := false
-			if threshold > 0 {
-				isAtRisk = absences >= threshold
-			} else {
-				// Default: 20% of total sessions
-				defaultThreshold := (agg.total + 4) / 5
-				isAtRisk = absences >= defaultThreshold
-			}
-
-			// Deduplicate students across courses.
-			key := agg.name
-			if studentSet[key] {
-				continue
-			}
-			studentSet[key] = true
-
-			students = append(students, domain.StudentAbsence{
-				StudentID:        guidToStudentID[agg.studentGUID],
-				Name:             agg.name,
-				Nickname:         agg.nickname,
-				School:           agg.school,
-				AvatarURL:        agg.avatarURL,
-				AttendedSessions: agg.attended,
-				TotalSessions:    agg.total,
-				AttendanceRate:   rate,
-				AtRisk:           isAtRisk,
-				Courses:          agg.courses,
-				PerSession:       perSession,
-			})
-		}
-
-		// Sort students: at-risk first, then by rate asc, then by name.
-		sort.Slice(students, func(i, j int) bool {
-			if students[i].AtRisk != students[j].AtRisk {
-				return students[i].AtRisk
-			}
-			if students[i].AttendanceRate != students[j].AttendanceRate {
-				return students[i].AttendanceRate < students[j].AttendanceRate
-			}
-			return students[i].Name < students[j].Name
-		})
-
-		// Filter by WCode if specified.
-		if len(filters.WCodes) > 0 {
-			slog.Info("absence_dashboard_filtering_by_wcodes", "w_codes", filters.WCodes, "before", len(students))
-			students = domain.FilterStudentsByWCodes(students, filters.WCodes)
-			slog.Info("absence_dashboard_filtered_by_wcodes", "after", len(students))
-		}
-
-		// Build top-N at-risk students.
-		topAtRisk := make([]domain.StudentRisk, 0)
-		for _, s := range students {
-			if len(topAtRisk) >= 5 {
-				break
-			}
-			if !s.AtRisk {
-				break
-			}
-			courseName := ""
-			if len(s.Courses) > 0 {
-				courseName = s.Courses[0].CourseName
-			}
-			topAtRisk = append(topAtRisk, domain.StudentRisk{
-				StudentID:      s.StudentID,
-				Name:           s.Name,
-				Nickname:       s.Nickname,
-				School:         s.School,
-				AvatarURL:      s.AvatarURL,
-				AttendanceRate: s.AttendanceRate,
-				Absences:       s.TotalSessions - s.AttendedSessions,
-				TotalSessions:  s.TotalSessions,
-				CourseName:     courseName,
-			})
-		}
-
-		var avgRate float64
-		if totalSessions > 0 {
-			avgRate = float64(totalAttended) / float64(totalSessions)
-		}
-
-		report := domain.DashboardReport{
-			GeneratedAt:       time.Now(),
-			TotalStudents:     totalStudents,
-			TotalCourses:      len(courses),
-			AvgAttendanceRate: avgRate,
-			AtRiskCount:       totalAtRisk,
-			TopAtRisk:         topAtRisk,
-			Students:          students,
-			Sessions:          sessions,
-		}
-
-		slog.Info("absence_dashboard_done",
-			"total_students", totalStudents,
-			"total_courses", len(courses),
-			"at_risk_count", totalAtRisk,
-			"students_returned", len(students),
-			"sessions_returned", len(sessions),
-			"avg_rate", fmt.Sprintf("%.1f%%", avgRate*100),
-			"duration_ms", time.Since(start).Milliseconds(),
-		)
 
 		writeJSON(w, http.StatusOK, successResponse(report))
 	}

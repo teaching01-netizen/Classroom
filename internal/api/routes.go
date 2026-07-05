@@ -12,37 +12,36 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"qr-command-center/internal/cache"
-	"qr-command-center/internal/db"
 	"qr-command-center/internal/domain"
 	"qr-command-center/internal/middleware"
 	"qr-command-center/internal/service"
-	"qr-command-center/internal/warwick"
 )
 
-var (
-	teacherLimiter = middleware.NewIPRateLimiter(5, 10)   // teacher/courses browsing: 5 req/s, burst 10
-	toggleLimiter  = middleware.NewIPRateLimiter(2, 3)    // POST toggle-checkin: 2 req/s, burst 3
-	roomLimiter    = middleware.NewIPRateLimiter(10, 20)  // rooms API: 10 req/s, burst 20
-)
-
-// StopRateLimiters stops all package-level rate limiter goroutines.
-// Must be called during server shutdown to prevent goroutine leaks.
-func StopRateLimiters() {
-	teacherLimiter.Stop()
-	toggleLimiter.Stop()
-	roomLimiter.Stop()
+// RateLimiters holds per-route IP rate limiters created by NewRouter.
+// Call Stop() on shutdown to prevent goroutine leaks.
+type RateLimiters struct {
+	teacher *middleware.IPRateLimiter
+	toggle  *middleware.IPRateLimiter
+	room    *middleware.IPRateLimiter
 }
 
-var allowedOrigin string
-
-func init() {
-	allowedOrigin = os.Getenv("CORS_ORIGIN")
+// Stop shuts down all rate limiter cleanup goroutines.
+func (rl *RateLimiters) Stop() {
+	rl.teacher.Stop()
+	rl.toggle.Stop()
+	rl.room.Stop()
 }
 
-func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.FavouriteRepository, c *cache.Cache, refresher *service.DataRefresher, wsMaxConns int64, checkinRepo db.SessionCheckinRepository, persister warwick.ReportEnqueuer, viewRepo db.DashboardViewRepository) *chi.Mux {
+func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *service.FavouriteService, c *cache.Cache, refresher *service.DataRefresher, wsMaxConns int64, viewSvc *service.DashboardViewService, corsOrigin string) (*chi.Mux, *RateLimiters) {
+	rl := &RateLimiters{
+		teacher: middleware.NewIPRateLimiter(5, 10), // teacher/courses browsing: 5 req/s, burst 10
+		toggle:  middleware.NewIPRateLimiter(2, 3),  // POST toggle-checkin: 2 req/s, burst 3
+		room:    middleware.NewIPRateLimiter(10, 20), // rooms API: 10 req/s, burst 20
+	}
+
 	r := chi.NewRouter()
 	r.Use(chimiddleware.Logger)
-	r.Use(corsMiddleware)
+	r.Use(corsMiddleware(corsOrigin))
 
 	r.Get("/api", healthHandler(c, refresher))
 	r.Get("/api/", healthHandler(c, refresher))
@@ -51,7 +50,7 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.
 	r.Handle("/metrics", promhttp.Handler())
 
 	r.Route("/api/rooms", func(r chi.Router) {
-		r.Use(roomLimiter.Middleware)
+		r.Use(rl.room.Middleware)
 
 		r.Get("/", getRoomsHandler(rm))
 		r.Post("/", createRoomHandler(rm))
@@ -63,29 +62,29 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.
 	})
 
 	r.Route("/api/teacher", func(r chi.Router) {
-		r.Use(teacherLimiter.Middleware)
+		r.Use(rl.teacher.Middleware)
 
-		r.Get("/courses", getCoursesHandler(cc))
-		r.Get("/courses/{courseId}", getCourseDetailHandler(cc))
-		r.Get("/courses/{courseId}/sessions/{sessionId}", getSessionDetailHandler(cc))
-		r.With(toggleLimiter.Middleware).Post("/courses/{courseId}/sessions/{sessionId}/toggle-checkin", toggleCheckinHandler(cc))
-		r.Get("/courses/{courseId}/attendance-report", getCourseAttendanceReportHandler(cc, checkinRepo, persister))
-		r.Post("/courses/attendance-batch", getBatchAttendanceHandler(cc, checkinRepo))
+		r.Get("/courses", getCoursesHandler(ts))
+		r.Get("/courses/{courseId}", getCourseDetailHandler(ts))
+		r.Get("/courses/{courseId}/sessions/{sessionId}", getSessionDetailHandler(ts))
+		r.With(rl.toggle.Middleware).Post("/courses/{courseId}/sessions/{sessionId}/toggle-checkin", toggleCheckinHandler(ts))
+		r.Get("/courses/{courseId}/attendance-report", getCourseAttendanceReportHandler(ts))
+		r.Post("/courses/attendance-batch", getBatchAttendanceHandler(ts))
 
 		// Cross-course absence dashboard
-		r.Get("/absence-dashboard", getAbsenceDashboardHandler(cc, checkinRepo))
+		r.Get("/absence-dashboard", getAbsenceDashboardHandler(ts))
 
-		r.Get("/favourites", getFavouritesHandler(favRepo))
-		r.Post("/favourites", addFavouriteHandler(favRepo))
-		r.Delete("/favourites/{courseId}", removeFavouriteHandler(favRepo))
+		r.Get("/favourites", getFavouritesHandler(favSvc))
+		r.Post("/favourites", addFavouriteHandler(favSvc))
+		r.Delete("/favourites/{courseId}", removeFavouriteHandler(favSvc))
 
 		// Dashboard saved views
-		r.Get("/dashboard-views", listDashboardViewsHandler(viewRepo))
-		r.Post("/dashboard-views", createDashboardViewHandler(viewRepo))
-		r.Get("/dashboard-views/{id}", getDashboardViewHandler(viewRepo))
-		r.Put("/dashboard-views/{id}", updateDashboardViewHandler(viewRepo))
-		r.Delete("/dashboard-views/{id}", deleteDashboardViewHandler(viewRepo))
-		r.Post("/dashboard-views/{id}/use", touchDashboardViewHandler(viewRepo))
+		r.Get("/dashboard-views", listDashboardViewsHandler(viewSvc))
+		r.Post("/dashboard-views", createDashboardViewHandler(viewSvc))
+		r.Get("/dashboard-views/{id}", getDashboardViewHandler(viewSvc))
+		r.Put("/dashboard-views/{id}", updateDashboardViewHandler(viewSvc))
+		r.Delete("/dashboard-views/{id}", deleteDashboardViewHandler(viewSvc))
+		r.Post("/dashboard-views/{id}/use", touchDashboardViewHandler(viewSvc))
 	})
 
 	r.Get("/ws", wsHandler(rm, wsMaxConns))
@@ -93,19 +92,20 @@ func NewRouter(rm *service.RoomManager, cc *warwick.ClassroomClient, favRepo db.
 
 	r.Handle("/*", spaFallbackHandler())
 
-	return r
+	return r, rl
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if allowedOrigin == "" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		origin := r.Header.Get("Origin")
-		if allowedOrigin == "*" {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-		} else if origin == allowedOrigin {
+func corsMiddleware(corsOrigin string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if corsOrigin == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			origin := r.Header.Get("Origin")
+			if corsOrigin == "*" {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			} else if origin == corsOrigin {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Add("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -122,6 +122,17 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+	}
+}
+
+type healthResponse struct {
+	Message string       `json:"message"`
+	Cache   healthCache  `json:"cache"`
+}
+
+type healthCache struct {
+	Size int  `json:"size"`
+	Warm bool `json:"warm"`
 }
 
 func healthHandler(c *cache.Cache, refresher *service.DataRefresher) http.HandlerFunc {
@@ -134,12 +145,9 @@ func healthHandler(c *cache.Cache, refresher *service.DataRefresher) http.Handle
 		if refresher != nil {
 			cacheWarm = refresher.IsWarm()
 		}
-		writeJSON(w, http.StatusOK, successResponse(map[string]interface{}{
-			"message": "QR Command Center API is running!",
-			"cache": map[string]interface{}{
-				"size": cacheSize,
-				"warm": cacheWarm,
-			},
+		writeJSON(w, http.StatusOK, successResponse(healthResponse{
+			Message: "QR Command Center API is running!",
+			Cache:   healthCache{Size: cacheSize, Warm: cacheWarm},
 		}))
 	}
 }

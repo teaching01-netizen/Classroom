@@ -2,9 +2,30 @@ package domain
 
 import (
 	"fmt"
-	"log"
 	"time"
 )
+
+// ErrInvalidDateFormat is returned when a date string cannot be parsed.
+type ErrInvalidDateFormat struct {
+	Field string
+	Value string
+	Err   error
+}
+
+func (e *ErrInvalidDateFormat) Error() string {
+	return fmt.Sprintf("invalid date format for %s: %q: %v", e.Field, e.Value, e.Err)
+}
+
+func (e *ErrInvalidDateFormat) Unwrap() error { return e.Err }
+
+// ErrUnknownSessionStatus is returned for unrecognized session status values.
+type ErrUnknownSessionStatus struct {
+	Status string
+}
+
+func (e *ErrUnknownSessionStatus) Error() string {
+	return fmt.Sprintf("unknown session status: %q", e.Status)
+}
 
 type CourseStatus string
 
@@ -132,37 +153,34 @@ type CourseAttendanceReport struct {
 	DurationMs int64               `json:"durationMs"`
 }
 
-func GetCourseStatus(startDate, endDate string) CourseStatus {
+func GetCourseStatus(startDate, endDate string) (CourseStatus, error) {
 	now := time.Now()
 	const layout = "2006-01-02"
 
 	start, err := time.Parse(layout, startDate)
 	if err != nil {
-		log.Printf("GetCourseStatus: invalid startDate %q: %v", startDate, err)
-		return CourseStatusActive
+		return "", &ErrInvalidDateFormat{Field: "startDate", Value: startDate, Err: err}
 	}
 
 	end, err := time.Parse(layout, endDate)
 	if err != nil {
-		log.Printf("GetCourseStatus: invalid endDate %q: %v", endDate, err)
-		return CourseStatusActive
+		return "", &ErrInvalidDateFormat{Field: "endDate", Value: endDate, Err: err}
 	}
 
 	if now.Before(start) {
-		return CourseStatusUpcoming
+		return CourseStatusUpcoming, nil
 	}
 	if now.After(end) {
-		return CourseStatusFinished
+		return CourseStatusFinished, nil
 	}
-	return CourseStatusActive
+	return CourseStatusActive, nil
 }
 
-func GetSessionStatus(status string) string {
+func GetSessionStatus(status string) (string, error) {
 	switch status {
 	case "active", "done", "not_started", "auth_error":
-		return status
+		return status, nil
 	default:
-		fmt.Printf("unknown session status %q, defaulting to 'not_started'\n", status)
-		return "not_started"
+		return "", &ErrUnknownSessionStatus{Status: status}
 	}
 }

@@ -57,10 +57,13 @@ var (
 	)
 )
 
-// QueueDepthFunc is set by the persister to expose queue depth to Prometheus.
+// queueDepthFunc is a function that returns the current persist queue depth.
+// Set exactly once during startup via SetQueueDepthFunc — not a mutable runtime toggle.
 var queueDepthFunc func() int
 
-// SetQueueDepthFunc registers a function that returns the current queue depth.
+// SetQueueDepthFunc registers a function that Prometheus calls at scrape time
+// to get the current queue depth. Must be called exactly once during startup
+// (before the HTTP server starts serving /metrics).
 func SetQueueDepthFunc(fn func() int) {
 	queueDepthFunc = fn
 }

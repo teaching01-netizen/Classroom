@@ -10,16 +10,6 @@ import (
 	"qr-command-center/internal/domain"
 )
 
-// SessionDataSource abstracts where session student data comes from for the
-// attendance report. Implementations include:
-//   - DBSessionDataSource: reads pre-warmed data from the session_checkins table (default)
-//   - LiveSessionDataSource: fetches live from Warwick API (?source=live)
-//
-// Both have the same shape so ComputeCourseAttendanceReport is agnostic to the source.
-type SessionDataSource interface {
-	FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error)
-}
-
 // ComputeCourseAttendanceReport builds a per-student attendance report for a
 // course by fetching each session's student list live via the fetcher.
 //
@@ -29,10 +19,9 @@ type SessionDataSource interface {
 // Students who never appeared in any fetched session are excluded.
 // The denominator for each student is the number of sessions where they appeared
 // (sessions_student_appeared_in), NOT the total course session count.
-// This is the fairest metric for late-add or transferred students.
 func ComputeCourseAttendanceReport(
 	ctx context.Context,
-	source SessionDataSource,
+	source domain.SessionFetcher,
 	course *domain.CourseDetail,
 	threshold int,
 ) *domain.CourseAttendanceReport {
@@ -148,12 +137,9 @@ func ComputeCourseAttendanceReport(
 		cancelled = true
 	}
 
-	// Aggregate per-student data.
-	// Only done sessions count toward both attended and total.
-	// Rate = attended_done / total_done. At-risk when rate < threshold.
 	type studentAccum struct {
-		attended int    // done sessions where this student checked in
-		total    int    // done sessions where this student appeared
+		attended int
+		total    int
 		detail   domain.StudentCheckin
 	}
 
@@ -172,9 +158,7 @@ func ComputeCourseAttendanceReport(
 				})
 			}
 		case "empty":
-			// Session fetched but no students — don't count for anyone.
 		case "ok":
-			// Only count done sessions.
 			isDone := sess.Status == domain.SessionStatusDone
 			for _, s := range r.detail.Students {
 				acc, ok := accum[s.StudentID]
@@ -192,9 +176,6 @@ func ComputeCourseAttendanceReport(
 		}
 	}
 
-	// Build student list, excluding those who never appeared in any done session.
-	// AttendanceRate = attended_done / total_done.
-	// AtRisk when absences >= threshold (number of absences allowed).
 	students := make([]domain.StudentAttendance, 0, len(accum))
 	for _, acc := range accum {
 		if acc.total == 0 {
@@ -215,7 +196,6 @@ func ComputeCourseAttendanceReport(
 		})
 	}
 
-	// Build per-session cells for each student.
 	for si := range students {
 		cells := make([]domain.SessionCell, len(sessions))
 		for j, sess := range sessions {
@@ -230,7 +210,6 @@ func ComputeCourseAttendanceReport(
 		students[si].PerSession = cells
 	}
 
-	// Now fill in the per-session checked-in status from results.
 	for _, r := range results {
 		if r.state == "ok" && r.detail != nil {
 			for _, s := range r.detail.Students {
@@ -245,10 +224,9 @@ func ComputeCourseAttendanceReport(
 		}
 	}
 
-	// Sort: at-risk first, then by rate asc, then by name.
 	sort.Slice(students, func(i, j int) bool {
 		if students[i].AtRisk != students[j].AtRisk {
-			return students[i].AtRisk // at-risk first
+			return students[i].AtRisk
 		}
 		if students[i].AttendanceRate != students[j].AttendanceRate {
 			return students[i].AttendanceRate < students[j].AttendanceRate

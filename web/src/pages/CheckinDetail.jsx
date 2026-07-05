@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { useCheckins } from '../hooks/useCheckins';
+import { useSessionStore } from '../store/useSessionStore';
 import { StatsBar } from '../components/StatsBar';
 import { StudentTable } from '../components/StudentTable';
 import { Pagination } from '../components/Pagination';
@@ -10,6 +11,7 @@ import { BackBreadcrumb } from '../components/BackBreadcrumb';
 export function CheckinDetail() {
   const { courseId, sessionId } = useParams();
   const { students, currentSession, isLoading, isRefreshing, error, toggleCheckin } = useCheckins(courseId, sessionId);
+  const courseName = useSessionStore((state) => state.courseName);
   const [showQR, setShowQR] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
@@ -326,9 +328,9 @@ export function CheckinDetail() {
       <BackBreadcrumb to={`/courses/${courseId}/sessions`} label="Back to Sessions" />
 
       <h2 style={{ fontSize: '1.5rem', fontWeight: '600', color: 'var(--color-text-primary, #111113)', marginBottom: 'var(--space-1, 4px)' }}>
-        {currentSession?.name || 'Session'}
+        {courseName || 'Course'}
       </h2>
-      <p style={{ color: 'var(--color-text-secondary, #4F5056)', marginBottom: 'var(--space-6, 24px)' }}>Course ID: {courseId}</p>
+      <p style={{ color: 'var(--color-text-secondary, #4F5056)', marginBottom: 'var(--space-6, 24px)' }}>{currentSession?.name || 'Session'}</p>
 
       <StatsBar stats={stats} />
 

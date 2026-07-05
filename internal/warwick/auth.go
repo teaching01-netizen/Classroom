@@ -121,28 +121,39 @@ func (a *WarwickAuth) IsStaleGeneration(gen uint64) bool {
 	return gen < a.currentGen.Load()
 }
 
-func (a *WarwickAuth) performLogin() (*sessionState, error) {
+// login performs the HTTP POST login flow and returns the session cookie.
+// Both WarwickAuth and SessionPool use this shared primitive.
+func login(client *http.Client, loginURL, email, password string) (string, error) {
 	form := url.Values{}
-	form.Set("email", a.email)
-	form.Set("password", a.password)
-	resp, err := a.client.Post(a.loginURL, "application/x-www-form-urlencoded",
+	form.Set("email", email)
+	form.Set("password", password)
+	resp, err := client.Post(loginURL, "application/x-www-form-urlencoded",
 		strings.NewReader(form.Encode()))
 	if err != nil {
-		return nil, fmt.Errorf("login request failed: %w", err)
+		return "", fmt.Errorf("login request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		if err != nil {
-			return nil, fmt.Errorf("reading login response: %w", err)
+			return "", fmt.Errorf("reading login response: %w", err)
 		}
 		if isLoginPage(string(body)) {
-			return nil, fmt.Errorf("Warwick login returned 200 OK but with login page HTML. Check WARWICK_EMAIL and WARWICK_PASSWORD")
+			return "", fmt.Errorf("login returned 200 OK but with login page HTML — check credentials")
 		}
 	}
 
 	cookieValue, err := extractSessionCookie(resp.Header)
+	if err != nil {
+		return "", err
+	}
+
+	return cookieValue, nil
+}
+
+func (a *WarwickAuth) performLogin() (*sessionState, error) {
+	cookieValue, err := login(a.client, a.loginURL, a.email, a.password)
 	if err != nil {
 		return nil, err
 	}

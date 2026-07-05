@@ -3,8 +3,8 @@ package warwick
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,255 +12,9 @@ import (
 	"qr-command-center/internal/domain"
 )
 
-// stubCheckinRepo implements SessionCheckinRepository for unit tests.
-type stubCheckinRepo struct {
-	students map[string][]domain.StudentCheckin
-	err      error
-}
-
-func (r *stubCheckinRepo) GetStudentsBySession(_ context.Context, sessionID string) ([]domain.StudentCheckin, error) {
-	if r.err != nil {
-		return nil, r.err
-	}
-	return r.students[sessionID], nil
-}
-
-func TestDBSessionDataSource_FetchSessionDetailLive_HappyPath(t *testing.T) {
-	repo := &stubCheckinRepo{
-		students: map[string][]domain.StudentCheckin{
-			"sess-1": {
-				{StudentID: "s1", Name: "Alice", CheckedIn: true},
-				{StudentID: "s2", Name: "Bob", CheckedIn: false},
-			},
-		},
-	}
-	src := NewDBSessionDataSource(repo)
-
-	detail, err := src.FetchSessionDetailLive(context.Background(), "sess-1")
-	require.NoError(t, err)
-	require.NotNil(t, detail)
-	assert.Equal(t, "sess-1", detail.SessionSummary.SessionID)
-	assert.Len(t, detail.Students, 2)
-	assert.Equal(t, "Alice", detail.Students[0].Name)
-}
-
-func TestDBSessionDataSource_FetchSessionDetailLive_EmptyStudents(t *testing.T) {
-	repo := &stubCheckinRepo{
-		students: map[string][]domain.StudentCheckin{
-			"sess-empty": {},
-		},
-	}
-	src := NewDBSessionDataSource(repo)
-
-	detail, err := src.FetchSessionDetailLive(context.Background(), "sess-empty")
-	require.NoError(t, err)
-	require.NotNil(t, detail)
-	assert.Empty(t, detail.Students)
-}
-
-func TestDBSessionDataSource_FetchSessionDetailLive_UnknownSession(t *testing.T) {
-	repo := &stubCheckinRepo{students: map[string][]domain.StudentCheckin{}}
-	src := NewDBSessionDataSource(repo)
-
-	detail, err := src.FetchSessionDetailLive(context.Background(), "sess-unknown")
-	require.NoError(t, err)
-	require.NotNil(t, detail)
-	assert.Nil(t, detail.Students, "unknown session must return nil students")
-}
-
-func TestDBSessionDataSource_FetchSessionDetailLive_DBError(t *testing.T) {
-	repo := &stubCheckinRepo{err: errors.New("connection refused")}
-	src := NewDBSessionDataSource(repo)
-
-	detail, err := src.FetchSessionDetailLive(context.Background(), "sess-1")
-	require.Error(t, err)
-	assert.Nil(t, detail)
-	assert.Contains(t, err.Error(), "connection refused")
-}
-
-func TestDBSessionDataSource_FetchSessionDetailLive_SetsSessionID(t *testing.T) {
-	repo := &stubCheckinRepo{
-		students: map[string][]domain.StudentCheckin{
-			"my-session": {{StudentID: "s1"}},
-		},
-	}
-	src := NewDBSessionDataSource(repo)
-
-	detail, err := src.FetchSessionDetailLive(context.Background(), "my-session")
-	require.NoError(t, err)
-	assert.Equal(t, "my-session", detail.SessionSummary.SessionID)
-}
-
-func TestDBSessionDataSource_FetchSessionDetailLive_SetsDateToToday(t *testing.T) {
-	repo := &stubCheckinRepo{
-		students: map[string][]domain.StudentCheckin{
-			"sess-today": {{StudentID: "s1"}},
-		},
-	}
-	src := NewDBSessionDataSource(repo)
-
-	detail, err := src.FetchSessionDetailLive(context.Background(), "sess-today")
-	require.NoError(t, err)
-
-	today := time.Now().Format("2006-01-02")
-	assert.Equal(t, today, detail.SessionSummary.Date, "DB source must set date to today")
-}
-
-// --- Integration-style test: full report flow with DB source ---
-
-// TestCompute_FirstDoneSession_StudentInDB reproduces the reported bug:
-// a course with only a first "done" session should show student data
-// if the DB has the students pre-warmed.
-func TestCompute_FirstDoneSession_StudentInDB(t *testing.T) {
-	repo := &stubCheckinRepo{
-		students: map[string][]domain.StudentCheckin{
-			"sess-1": {
-				{StudentID: "s1", Name: "Alice", CheckedIn: true},
-				{StudentID: "s2", Name: "Bob", CheckedIn: true},
-			},
-		},
-	}
-	src := NewDBSessionDataSource(repo)
-
-	sessions := []domain.SessionSummary{
-		sessWithStatus(1, 1, "Wk 1", domain.SessionStatusDone),
-	}
-	course := makeCourse("c1", "Test Course", sessions)
-
-	report := ComputeCourseAttendanceReport(context.Background(), src, course, 2)
-
-	require.Len(t, report.Students, 2, "both students should appear in report")
-	alice := findStudent(report.Students, "s1")
-	require.NotNil(t, alice)
-	assert.Equal(t, 1, alice.TotalSessions)
-	assert.Equal(t, 1, alice.AttendedSessions)
-	assert.Equal(t, 1.0, alice.AttendanceRate)
-
-	bob := findStudent(report.Students, "s2")
-	require.NotNil(t, bob)
-	assert.Equal(t, 1, bob.TotalSessions)
-	assert.Equal(t, 1, bob.AttendedSessions)
-	assert.Equal(t, 1.0, bob.AttendanceRate)
-}
-
-// TestCompute_FirstDoneSession_DBEmpty reproduces the exact reported bug:
-// a course with only a first "done" session shows NO data when the DB
-// hasn't been prewarmed yet. This is the empty-report scenario.
-func TestCompute_FirstDoneSession_DBEmpty(t *testing.T) {
-	// Empty DB — prewarmer hasn't synced yet.
-	repo := &stubCheckinRepo{
-		students: map[string][]domain.StudentCheckin{},
-	}
-	src := NewDBSessionDataSource(repo)
-
-	sessions := []domain.SessionSummary{
-		sessWithStatus(1, 1, "Wk 1", domain.SessionStatusDone),
-	}
-	course := makeCourse("c1", "Test Course", sessions)
-
-	report := ComputeCourseAttendanceReport(context.Background(), src, course, 2)
-
-	assert.Empty(t, report.Students, "empty DB should produce empty student list")
-	assert.Empty(t, report.Errors, "no errors — session existed but had no data")
-}
-
-// TestCompute_FirstDoneSession_PartialPrewarm tests the scenario where
-// only some students were prewarmed (e.g. prewarmer ran mid-sync).
-func TestCompute_FirstDoneSession_PartialPrewarm(t *testing.T) {
-	repo := &stubCheckinRepo{
-		students: map[string][]domain.StudentCheckin{
-			"sess-1": {
-				{StudentID: "s1", Name: "Alice", CheckedIn: true},
-				// Bob not yet synced — prewarmer was mid-sync.
-			},
-		},
-	}
-	src := NewDBSessionDataSource(repo)
-
-	sessions := []domain.SessionSummary{
-		sessWithStatus(1, 1, "Wk 1", domain.SessionStatusDone),
-	}
-	course := makeCourse("c1", "Test Course", sessions)
-
-	report := ComputeCourseAttendanceReport(context.Background(), src, course, 2)
-
-	// Only Alice appears — Bob hasn't been prewarmed yet.
-	require.Len(t, report.Students, 1)
-	assert.Equal(t, "s1", report.Students[0].StudentID)
-	assert.Equal(t, 1, report.Students[0].TotalSessions)
-	assert.Equal(t, 1.0, report.Students[0].AttendanceRate)
-}
-
-// TestCompute_FirstDoneSession_FallbackToLive verifies the fix for the
-// reported bug: when the DB source returns 0 students for a session
-// (prewarmer hasn't synced), the report handler should detect this and
-// re-fetch from the live source. This test exercises the detection logic.
-func TestCompute_FirstDoneSession_FallbackToLive(t *testing.T) {
-	// DB has no students for sess-1 (prewarmer hasn't synced).
-	dbRepo := &stubCheckinRepo{
-		students: map[string][]domain.StudentCheckin{},
-	}
-	dbSrc := NewDBSessionDataSource(dbRepo)
-
-	// Live source HAS the students (Warwick has the data).
-	liveSrc := &stubSessionDataSource{
-		detail: &domain.SessionDetail{
-			SessionSummary: domain.SessionSummary{SessionID: "sess-1"},
-			Students: []domain.StudentCheckin{
-				{StudentID: "s1", Name: "Alice", CheckedIn: true},
-				{StudentID: "s2", Name: "Bob", CheckedIn: true},
-			},
-		},
-	}
-
-	sessions := []domain.SessionSummary{
-		sessWithStatus(1, 1, "Wk 1", domain.SessionStatusDone),
-	}
-	course := makeCourse("c1", "Test Course", sessions)
-
-	// Step 1: Compute with DB source → empty students.
-	report := ComputeCourseAttendanceReport(context.Background(), dbSrc, course, 2)
-	assert.Empty(t, report.Students, "DB source should return empty when prewarmer hasn't synced")
-
-	// Step 2: Detect empty sessions and re-fetch from live.
-	// This simulates what the report handler should do.
-	emptySessions := findEmptySessions(report, sessions)
-	require.Len(t, emptySessions, 1, "should detect sess-1 as empty")
-	assert.Equal(t, "sess-1", emptySessions[0].SessionID)
-
-	// Step 3: Re-compute with live source for the empty sessions.
-	liveReport := ComputeCourseAttendanceReport(context.Background(), liveSrc, course, 2)
-	require.Len(t, liveReport.Students, 2, "live source should return students")
-}
-
-// findEmptySessions returns sessions that had no student data in the report.
-func findEmptySessions(report *domain.CourseAttendanceReport, sessions []domain.SessionSummary) []domain.SessionSummary {
-	// A session is "empty" if it's in the report's Sessions list but no student
-	// has a non-"error" status for it.
-	empty := make(map[string]bool)
-	for _, s := range sessions {
-		empty[s.SessionID] = true
-	}
-	// Remove sessions where at least one student has data.
-	for _, st := range report.Students {
-		for _, cell := range st.PerSession {
-			if cell.Status == "ok" {
-				delete(empty, cell.SessionID)
-			}
-		}
-	}
-	var result []domain.SessionSummary
-	for _, s := range sessions {
-		if empty[s.SessionID] {
-			result = append(result, s)
-		}
-	}
-	return result
-}
-
 // --- LiveSessionDataSource tests ---
 
-// stubSessionDataSource implements SessionDataSource for testing the wrapper.
+// stubSessionDataSource implements domain.SessionFetcher for testing the wrapper.
 type stubSessionDataSource struct {
 	detail *domain.SessionDetail
 	err    error
@@ -420,4 +174,34 @@ type sessionIDCapturer struct {
 
 func (c *sessionIDCapturer) FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error) {
 	return c.fn(ctx, sessionID)
+}
+
+// --- helpers (mirrored from report_test.go) ---
+
+func makeCourse(id, name string, sessions []domain.SessionSummary) *domain.CourseDetail {
+	return &domain.CourseDetail{
+		CourseSummary: domain.CourseSummary{
+			CourseID: id,
+			Name:     name,
+		},
+		Sessions: sessions,
+	}
+}
+
+func sessWithStatus(id, number int, name string, status domain.SessionStatus) domain.SessionSummary {
+	return domain.SessionSummary{
+		SessionID:     fmt.Sprintf("sess-%d", id),
+		SessionNumber: number,
+		Name:          name,
+		Status:        status,
+	}
+}
+
+func findStudent(students []domain.StudentAttendance, id string) *domain.StudentAttendance {
+	for i := range students {
+		if students[i].StudentID == id {
+			return &students[i]
+		}
+	}
+	return nil
 }

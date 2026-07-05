@@ -1,9 +1,7 @@
-package warwick
-
-import "qr-command-center/internal/domain"
+package domain
 
 // buildGUIDToWCodeMap creates a lookup from StudentGuid (UUID) to StudentID (wcode).
-func buildGUIDToWCodeMap(profiles []domain.StudentProfile) map[string]string {
+func buildGUIDToWCodeMap(profiles []StudentProfile) map[string]string {
 	m := make(map[string]string, len(profiles))
 	for _, p := range profiles {
 		if p.StudentID != "" && p.StudentGuid != "" {
@@ -16,7 +14,7 @@ func buildGUIDToWCodeMap(profiles []domain.StudentProfile) map[string]string {
 // EnrichStudentIDWithWCode replaces UUID-based StudentIDs in StudentAttendance
 // records with the Warwick StudentID (wcode) from student profiles.
 // Students whose UUID is not found in profiles keep their original ID.
-func EnrichStudentIDWithWCode(students []domain.StudentAttendance, profiles []domain.StudentProfile) []domain.StudentAttendance {
+func EnrichStudentIDWithWCode(students []StudentAttendance, profiles []StudentProfile) []StudentAttendance {
 	guidMap := buildGUIDToWCodeMap(profiles)
 	if len(guidMap) == 0 {
 		return students
@@ -31,7 +29,7 @@ func EnrichStudentIDWithWCode(students []domain.StudentAttendance, profiles []do
 
 // EnrichCheckinStudentIDWithWCode replaces UUID-based StudentIDs in StudentCheckin
 // records with the Warwick StudentID (wcode) from student profiles.
-func EnrichCheckinStudentIDWithWCode(students []domain.StudentCheckin, profiles []domain.StudentProfile) []domain.StudentCheckin {
+func EnrichCheckinStudentIDWithWCode(students []StudentCheckin, profiles []StudentProfile) []StudentCheckin {
 	guidMap := buildGUIDToWCodeMap(profiles)
 	if len(guidMap) == 0 {
 		return students

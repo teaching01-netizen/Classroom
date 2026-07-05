@@ -7,7 +7,7 @@ import { useWsReconnect } from './useWebSocket';
 const POLL_INTERVAL_MS = 10000;
 
 export const useCheckins = (courseId, sessionId) => {
-  const { students, currentSession, isInitialLoading, isRefreshing, error, setStudents, setCurrentSession, updateStudentCheckin, setInitialLoading, setRefreshing, setError, reset } = useSessionStore();
+  const { students, currentSession, isInitialLoading, isRefreshing, error, setStudents, setCourseName, setCurrentSession, updateStudentCheckin, setInitialLoading, setRefreshing, setError, reset } = useSessionStore();
 
   const abortRef = useRef(null);
   const hasLoadedRef = useRef(false);
@@ -36,7 +36,7 @@ export const useCheckins = (courseId, sessionId) => {
         setError(err.message || 'Network error');
       }
     }
-  }, [courseId, sessionId, setInitialLoading, setRefreshing, setCurrentSession, setStudents, setError]);
+  }, [courseId, sessionId, setInitialLoading, setRefreshing, setCurrentSession, setStudents, setCourseName, setError]);
 
   const fetchStudentsNoAbort = useCallback(() => {
     fetchStudents(undefined);
@@ -78,6 +78,20 @@ export const useCheckins = (courseId, sessionId) => {
     fetchStudents(abortRef.current.signal);
     return () => abortRef.current?.abort();
   }, [courseId, sessionId, fetchStudents, reset, setInitialLoading]);
+
+  useEffect(() => {
+    if (!courseId) return;
+    const controller = new AbortController();
+    fetch(`/api/teacher/courses/${courseId}`, { signal: controller.signal })
+      .then(res => res.json())
+      .then(result => {
+        if (result.success && result.data?.name) {
+          setCourseName(result.data.name);
+        }
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [courseId, setCourseName]);
 
   const isActive = !!(courseId && sessionId);
 

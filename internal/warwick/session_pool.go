@@ -2,11 +2,8 @@ package warwick
 
 import (
 	"fmt"
-	"io"
 	"math/rand"
 	"net/http"
-	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -504,27 +501,7 @@ func (p *SessionPool) ensureValidSession(s *pooledSession) (string, uint64, erro
 // doLoginLocked performs the login flow and updates the session.
 // Caller must hold s.mu write lock.
 func (p *SessionPool) doLoginLocked(s *pooledSession) (string, uint64, error) {
-	form := url.Values{}
-	form.Set("email", s.email)
-	form.Set("password", s.password)
-	resp, err := s.client.Post(s.loginURL, "application/x-www-form-urlencoded",
-		strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", 0, fmt.Errorf("login request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		if err != nil {
-			return "", 0, fmt.Errorf("reading login response: %w", err)
-		}
-		if isLoginPage(string(body)) {
-			return "", 0, fmt.Errorf("login returned 200 OK but with login page HTML — check credentials")
-		}
-	}
-
-	cookieValue, err := extractSessionCookie(resp.Header)
+	cookieValue, err := login(s.client, s.loginURL, s.email, s.password)
 	if err != nil {
 		return "", 0, err
 	}
