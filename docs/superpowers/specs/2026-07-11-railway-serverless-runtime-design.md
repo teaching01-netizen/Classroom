@@ -38,9 +38,9 @@ A serverless environment flag could disable refreshers and pre-warming for the p
 
 The web process could sleep while a dedicated worker performs refreshes. This isolates workloads well but keeps the worker bill running and adds another deployment and failure domain.
 
-### Activity-gated runtime (selected)
+### Demand-driven serverless runtime (selected after production audit)
 
-Speculative workers run during active use and stop after a short quiet period. The design retains active-user performance while creating a deterministic outbound-free window for Railway.
+Serverless mode disables periodic warmers and detached stale-while-revalidate. Business requests refresh data synchronously through the existing cache → PostgreSQL → Warwick fallback, while the activity controller owns only the QR-room idle lease. This sacrifices some cache-hit latency to make the outbound-free window deterministic. Normal deployments retain the existing warmers.
 
 ## Architecture
 
@@ -88,7 +88,7 @@ type ManagedWorker interface {
 }
 ```
 
-The controller creates one child context for the current active generation and runs each configured worker with it. Cancelling that context stops the data refresher and session pre-warmer. Starting a later generation receives a fresh context. Workers remain independently testable through their existing `Run` behavior.
+The controller supports managed worker generations, but production serverless wiring supplies no periodic workers. Normal mode runs the existing data refresher and pre-warmer outside the controller. This prevents context-free Warwick sweeps from delaying the idle transition.
 
 #### Activity middleware
 
@@ -130,10 +130,10 @@ The Warwick session pool is safe to construct at boot because it does not log in
 
 | Variable | Default | Meaning |
 |---|---:|---|
-| `SERVERLESS_ENABLED` | `true` when `RAILWAY_ENVIRONMENT` is present; otherwise `false` | Enables activity-gated workers and zero-minimum DB pooling. |
+| `SERVERLESS_ENABLED` | `true` when Railway's `RAILWAY_ENVIRONMENT_ID` is present; otherwise `false` | Enables demand-only refresh, QR idle cleanup, and zero-minimum DB pooling. |
 | `SERVERLESS_IDLE_GRACE` | `2m` | Quiet period before speculative workers and rooms stop. Must be below Railway's ten-minute inactivity window. |
 
-Invalid booleans or durations fail configuration loading rather than silently enabling a surprising runtime mode. An idle grace outside `30s..8m` is rejected. The upper bound reserves at least two minutes for in-flight traffic and connection draining.
+Invalid booleans or durations fail configuration loading rather than silently enabling a surprising runtime mode. An idle grace outside `30s..6m` is rejected. The upper bound reserves at least four minutes for in-flight traffic and connection draining.
 
 ## State Model
 
@@ -192,8 +192,8 @@ Tests use a fake clock/timer only at the time boundary and fakes for external Wa
 
 ## Acceptance Criteria
 
-- With serverless mode enabled, no data refresher or pre-warmer runs before business activity.
-- Business activity activates both speculative workers once.
+- With serverless mode enabled, no periodic data refresher, pre-warmer, or detached stale refresh runs.
+- Business activity activates the QR-room idle lease without starting speculative outbound workers.
 - After two minutes without business activity, speculative workers and QR workers stop even if a WebSocket remains open.
 - PostgreSQL retains zero minimum connections and drains idle connections within the grace budget.
 - Durable writes and queued report persistence are not cancelled by the idle transition.

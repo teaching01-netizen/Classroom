@@ -23,7 +23,7 @@ func TestMetricsEndpoint_ReturnsPrometheusFormat(t *testing.T) {
 	cc := warwick.NewClassroomClient(nil, c)
 	ts := service.NewTeacherService(cc, &stubFetcher{})
 
-	router, rl := NewRouter(rm, ts, nil, c, nil, 100, nil, "")
+	router, rl := NewRouter(rm, ts, nil, c, nil, nil, RouterOptions{WSMaxConns: 100})
 	defer rl.Stop()
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -45,7 +45,7 @@ func TestMetricsEndpoint_ContainsOurMetrics(t *testing.T) {
 	cc := warwick.NewClassroomClient(nil, c)
 	ts := service.NewTeacherService(cc, &stubFetcher{})
 
-	router, rl := NewRouter(rm, ts, nil, c, nil, 100, nil, "")
+	router, rl := NewRouter(rm, ts, nil, c, nil, nil, RouterOptions{WSMaxConns: 100})
 	defer rl.Stop()
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)

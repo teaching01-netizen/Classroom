@@ -13,7 +13,7 @@ func TestWSGuard_RejectsWhenAtLimit(t *testing.T) {
 	wsConnCount.Store(3)
 	defer wsConnCount.Store(0)
 
-	handler := wsHandler(nil, 3)
+	handler := wsHandler(nil, 3, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	rec := httptest.NewRecorder()
@@ -28,7 +28,7 @@ func TestWSGuard_AllowsUnderLimit(t *testing.T) {
 	wsConnCount.Store(0)
 	defer wsConnCount.Store(0)
 
-	handler := wsHandler(nil, 10)
+	handler := wsHandler(nil, 10, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	rec := httptest.NewRecorder()
@@ -45,7 +45,7 @@ func TestWSGuard_CounterIncrementsAndDecrements(t *testing.T) {
 	wsConnCount.Store(0)
 	defer wsConnCount.Store(0)
 
-	handler := wsHandler(nil, 10)
+	handler := wsHandler(nil, 10, nil)
 
 	// Capture counter just before the call (should be 0)
 	before := wsConnCount.Load()

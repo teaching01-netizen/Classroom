@@ -31,7 +31,7 @@ func (c *ClassroomClient) FetchStudentProfiles() ([]domain.StudentProfile, error
 		}
 
 		if stale, ok := c.cache.GetStale(profilesKey); ok {
-			if c.pool != nil {
+			if c.pool != nil && !c.disableAsyncRefresh {
 				c.tryRefresh(profilesKey, c.refreshStudentProfilesCache)
 				return stale.([]domain.StudentProfile), nil
 			}

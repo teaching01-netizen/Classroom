@@ -71,7 +71,6 @@ type SessionDetailResult struct {
 // GetSessionDetail fetches session detail and student profiles concurrently.
 func (s *TeacherService) GetSessionDetail(ctx context.Context, courseID, sessionID string) (*SessionDetailResult, error) {
 
-
 	type detailResult struct {
 		detail *domain.SessionDetail
 		err    error
@@ -94,6 +93,8 @@ func (s *TeacherService) GetSessionDetail(ctx context.Context, courseID, session
 
 	res := <-detailCh
 	if res.err != nil {
+		// Join the sibling request so no Warwick call outlives this request.
+		<-profileCh
 		return nil, res.err
 	}
 
@@ -161,7 +162,6 @@ type BatchCourseResult struct {
 // GetBatchAttendance returns attendance reports for multiple courses.
 func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []string, threshold int) (*BatchAttendanceResult, error) {
 
-
 	type courseResult struct {
 		report *domain.CourseAttendanceReport
 		err    error
@@ -218,7 +218,6 @@ type dashboardCourseResult struct {
 
 // GetAbsenceDashboard computes a cross-course absence dashboard.
 func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain.DashboardFilters) (*DashboardResult, error) {
-
 
 	threshold := filters.Threshold
 

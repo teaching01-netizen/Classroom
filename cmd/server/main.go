@@ -23,7 +23,11 @@ func main() {
 
 	slog.Info("Starting QR Command Center server...")
 
-	cfg := app.LoadConfig()
+	cfg, err := app.LoadConfig()
+	if err != nil {
+		slog.Error("Invalid configuration", "error", err)
+		os.Exit(1)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -43,9 +47,7 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	if deps.Refresher != nil {
-		go deps.Refresher.Run(ctx)
-	}
+	backgroundDone := app.StartBackgroundRuntime(ctx, cfg.ServerlessEnabled, deps.Background)
 
 	go func() {
 		slog.Info("Server running", "addr", cfg.Port)
@@ -72,6 +74,12 @@ func main() {
 		if err := deps.ReportPersister.Flush(flushCtx); err != nil {
 			slog.Warn("report persister flush timeout", "error", err)
 		}
+	}
+
+	select {
+	case <-backgroundDone:
+	case <-time.After(12 * time.Second):
+		slog.Warn("background runtime shutdown timeout")
 	}
 
 	deps.RateLimiters.Stop()

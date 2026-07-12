@@ -4,6 +4,8 @@
     "builder": "DOCKERFILE"
   },
   "deploy": {
+    "numReplicas": 1,
+    "sleepApplication": true,
     "restartPolicyType": "ALWAYS",
     "healthcheckPath": "/api/",
     "healthcheckTimeout": 300

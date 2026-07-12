@@ -64,7 +64,7 @@ func (c *ClassroomClient) getCourseDetailWithPool(courseID string) (*domain.Cour
 		}
 
 		// Stale fallback + async refresh (deduplicated via tryRefresh)
-		if stale, ok := c.cache.GetStale(key); ok {
+		if stale, ok := c.cache.GetStale(key); ok && !c.disableAsyncRefresh {
 			c.tryRefresh(key, func() { c.refreshCourseDetailCache(courseID) })
 			return stale.(*domain.CourseDetail), nil
 		}
@@ -241,6 +241,9 @@ func (c *ClassroomClient) getSessionFromFreshCache(key string) *domain.SessionDe
 // or (nil, err) on fatal error.
 func (c *ClassroomClient) getSessionFromStaleCheck(key string, sessionID string) (*domain.SessionDetail, error) {
 	if c.cache == nil {
+		return nil, nil
+	}
+	if c.disableAsyncRefresh {
 		return nil, nil
 	}
 	stale, ok := c.cache.GetStale(key)

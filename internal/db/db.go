@@ -20,17 +20,30 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-func NewPool(databaseURL string) (*pgxpool.Pool, error) {
+func ParsePoolConfig(databaseURL string, serverless bool) (*pgxpool.Config, error) {
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, err
 	}
 	config.MaxConns = 25
-	config.MinConns = 5
+	if serverless {
+		config.MinConns = 0
+		config.MaxConnIdleTime = 2 * time.Minute
+	} else {
+		config.MinConns = 5
+		config.MaxConnIdleTime = 5 * time.Minute
+	}
 	config.MaxConnLifetime = 30 * time.Minute
-	config.MaxConnIdleTime = 5 * time.Minute
 	// Disable prepared statement cache (required for Supabase pooler)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	return config, nil
+}
+
+func NewPool(databaseURL string, serverless bool) (*pgxpool.Pool, error) {
+	config, err := ParsePoolConfig(databaseURL, serverless)
+	if err != nil {
+		return nil, err
+	}
 	return pgxpool.NewWithConfig(context.Background(), config)
 }
 

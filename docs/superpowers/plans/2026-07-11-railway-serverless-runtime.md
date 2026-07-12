@@ -178,13 +178,13 @@ Expected: PASS.
 
 - [ ] **Step 1: Write configuration RED**
 
-Test explicit booleans, Railway auto-enable, local default disable, default `2m`, malformed booleans, and grace values outside `30s..8m`.
+Test explicit booleans, Railway auto-enable, local default disable, default `2m`, malformed booleans, and grace values outside `30s..6m`.
 
 Run: `go test ./internal/app -run '^TestLoadConfig_' -count=1`
 
 - [ ] **Step 2: Implement strict configuration and verify GREEN**
 
-Add `ServerlessEnabled bool` and `ServerlessIdleGrace time.Duration`. Change `LoadConfig` to `(Config, error)`. Default enablement from `RAILWAY_ENVIRONMENT`; reject invalid explicit values and grace bounds. Update `main` to log and exit on error.
+Add `ServerlessEnabled bool` and `ServerlessIdleGrace time.Duration`. Change `LoadConfig` to `(Config, error)`. Default enablement from Railway's `RAILWAY_ENVIRONMENT_ID`; reject invalid explicit values and grace bounds. Update `main` to log and exit on error.
 
 Run: `go test ./internal/app -run '^TestLoadConfig_' -count=1`
 
@@ -226,11 +226,11 @@ Run: `go test ./internal/app -run '^TestStartBackgroundRuntime_' -count=1`
 
 - [ ] **Step 2: Make speculative dependencies explicit**
 
-Return `PreWarmer`, `ActivityController`, and the `BackgroundRuntime` in `ServerDeps`. Do not start pre-warming inside `Wire`. Skip boot hydration and `WarmOnce` only in serverless mode. Construct the controller with refresher and pre-warmer plus two idle handlers: one calls `RoomManager.StopAllActiveRooms` with a bounded context, and one calls the shared Warwick transport's `CloseIdleConnections`. Pass the controller into `RouterOptions`.
+Return `PreWarmer`, `ActivityController`, and the `BackgroundRuntime` in `ServerDeps`. Do not start pre-warming inside `Wire`. Skip boot hydration, `WarmOnce`, periodic refreshers, and detached stale-while-revalidate only in serverless mode. Construct the controller with no speculative workers in serverless mode and two idle handlers: one calls `RoomManager.StopAllActiveRooms` with a bounded context, and one calls the shared Warwick transport's `CloseIdleConnections`. Pass the controller into `RouterOptions`.
 
 - [ ] **Step 3: Implement runtime selection and verify**
 
-Serverless mode runs the controller. Normal mode starts refresher and pre-warmer immediately. `ReportPersister` remains always running because an empty queue does no I/O.
+Serverless mode runs the idle controller with demand-only request reads. Normal mode starts refresher and pre-warmer immediately. `ReportPersister` remains always running because an empty queue does no I/O.
 
 Run: `go test ./internal/app ./cmd/server -count=1`
 

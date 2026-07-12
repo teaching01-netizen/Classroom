@@ -26,7 +26,7 @@ var _ service.TeacherDataProvider = (*warwick.ClassroomClient)(nil)
 type ServerDeps struct {
 	Router          *chi.Mux
 	RateLimiters    *api.RateLimiters
-	Refresher       *service.DataRefresher
+	Background      BackgroundRuntime
 	ReportPersister *service.ReportPersister
 	DBPool          *pgxpool.Pool
 }
@@ -50,13 +50,15 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 	var qrClient *warwick.WarwickQrClient
 	var classroomClient *warwick.ClassroomClient
 	var refresher *service.DataRefresher
+	var prewarmer *service.SessionPreWarmer
 	if sessionPool != nil {
 		qrClient = warwick.NewWarwickQrClientFromPool(sessionPool, warwick.TierQR)
 		qrClient.SetBaseURL(cfg.WarwickBaseURL)
+		qrClient.SetTransport(sharedTransport)
 	}
 
 	// Database
-	dbPool, err := db.NewPool(cfg.DatabaseURL)
+	dbPool, err := db.NewPool(cfg.DatabaseURL, cfg.ServerlessEnabled)
 	if err != nil {
 		return nil, fmt.Errorf("connect to database: %w", err)
 	}
@@ -72,6 +74,14 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 	if err := rm.LoadRoomsFromDB(); err != nil {
 		return nil, fmt.Errorf("load rooms from database: %w", err)
 	}
+	if cfg.ServerlessEnabled {
+		recoveryCtx, recoveryCancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := rm.RecoverLoadedRooms(recoveryCtx); err != nil {
+			recoveryCancel()
+			return nil, fmt.Errorf("recover persisted room states: %w", err)
+		}
+		recoveryCancel()
+	}
 
 	favRepo := db.NewPgFavouriteRepository(dbPool)
 	favSvc := service.NewFavouriteService(favRepo)
@@ -85,6 +95,8 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 		sessionCheckinRepo = db.NewPgSessionCheckinRepository(dbPool)
 		classroomClient = warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher, sharedCache, sessionCheckinRepo)
 		classroomClient.SetBaseURL(cfg.WarwickBaseURL)
+		classroomClient.SetTransport(sharedTransport)
+		classroomClient.SetAsyncRefreshEnabled(!cfg.ServerlessEnabled)
 		if cfg.UserID != "" {
 			classroomClient.SetUserID(cfg.UserID)
 		}
@@ -99,15 +111,12 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 		} else {
 			prewarmClient := warwick.NewClassroomClientFromPool(sessionPool, warwick.TierPreWarm, cache.New(), sessionCheckinRepo)
 			prewarmClient.SetBaseURL(cfg.WarwickBaseURL)
+			prewarmClient.SetTransport(sharedTransport)
 			if cfg.UserID != "" {
 				prewarmClient.SetUserID(cfg.UserID)
 			}
 			prewarmClient.SetRateLimiter(rate.NewLimiter(rate.Limit(2), 2))
-			prewarmer := service.NewSessionPreWarmer(prewarmClient, prewarmClient, sessionCheckinRepo, cfg.PreWarmInterval)
-			go func() {
-				prewarmer.Run(ctx)
-			}()
-			slog.Info("session prewarmer started", "prewarm_sessions", cfg.PreWarmSessions, "interval", cfg.PreWarmInterval)
+			prewarmer = service.NewSessionPreWarmer(prewarmClient, prewarmClient, sessionCheckinRepo, cfg.PreWarmInterval)
 		}
 
 		// Report persister
@@ -118,20 +127,21 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 			reportPersister.Run(ctx)
 		}()
 
-		// Boot hydration
-		hydrator := service.NewReportHydrator(attendanceReportRepo, reportCache)
-		hydratorCtx, hydratorCancel := context.WithTimeout(ctx, 10*time.Second)
-		if err := hydrator.Hydrate(hydratorCtx, 200); err != nil {
-			slog.Warn("initial report hydration failed, will retry on demand", "error", err)
-		}
-		hydratorCancel()
+		if !cfg.ServerlessEnabled {
+			// Preserve the existing warm startup for non-serverless deployments.
+			hydrator := service.NewReportHydrator(attendanceReportRepo, reportCache)
+			hydratorCtx, hydratorCancel := context.WithTimeout(ctx, 10*time.Second)
+			if err := hydrator.Hydrate(hydratorCtx, 200); err != nil {
+				slog.Warn("initial report hydration failed, will retry on demand", "error", err)
+			}
+			hydratorCancel()
 
-		// Sync warmup
-		warmupCtx, warmupCancel := context.WithTimeout(ctx, 10*time.Second)
-		if err := refresher.WarmOnce(warmupCtx); err != nil {
-			slog.Warn("initial cache warmup failed, will retry in background", "error", err)
+			warmupCtx, warmupCancel := context.WithTimeout(ctx, 10*time.Second)
+			if err := refresher.WarmOnce(warmupCtx); err != nil {
+				slog.Warn("initial cache warmup failed, will retry in background", "error", err)
+			}
+			warmupCancel()
 		}
-		warmupCancel()
 	}
 
 	var defaultFetcher domain.SessionFetcher
@@ -143,12 +153,49 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 		defaultFetcher = warwick.NewLiveSessionDataSource(classroomClient)
 	}
 	teacherService := service.NewTeacherService(classroomClient, defaultFetcher)
-	router, rateLimiters := api.NewRouter(rm, teacherService, favSvc, sharedCache, refresher, cfg.WSMaxConns, viewSvc, cfg.CORSOrigin)
+
+	workers := make([]service.ManagedWorker, 0, 2)
+	if refresher != nil {
+		workers = append(workers, refresher)
+	}
+	if prewarmer != nil {
+		workers = append(workers, prewarmer)
+	}
+	idleHandlers := []service.IdleHandler{
+		service.IdleHandlerFunc(func(context.Context) error {
+			idleCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			return rm.StopAllActiveRooms(idleCtx)
+		}),
+		service.IdleHandlerFunc(func(context.Context) error {
+			sharedTransport.CloseIdleConnections()
+			return nil
+		}),
+	}
+	managedWorkers := workers
+	if cfg.ServerlessEnabled {
+		// Serverless mode is request-driven: periodic warmers would extend Railway's
+		// outbound-traffic window and context-free upstream calls cannot be drained safely.
+		managedWorkers = nil
+	}
+	activityController := service.NewActivityController(cfg.ServerlessIdleGrace, managedWorkers, idleHandlers)
+	var activityRecorder service.ActivityRecorder
+	if cfg.ServerlessEnabled {
+		activityRecorder = activityController
+	}
+	router, rateLimiters := api.NewRouter(rm, teacherService, favSvc, sharedCache, refresher, viewSvc, api.RouterOptions{
+		WSMaxConns:       cfg.WSMaxConns,
+		CORSOrigin:       cfg.CORSOrigin,
+		ActivityRecorder: activityRecorder,
+	})
 
 	return &ServerDeps{
-		Router:          router,
-		RateLimiters:    rateLimiters,
-		Refresher:       refresher,
+		Router:       router,
+		RateLimiters: rateLimiters,
+		Background: BackgroundRuntime{
+			Controller: activityController,
+			AlwaysOn:   workers,
+		},
 		ReportPersister: reportPersister,
 		DBPool:          dbPool,
 	}, nil

@@ -25,6 +25,12 @@ type RateLimiters struct {
 	room    *middleware.IPRateLimiter
 }
 
+type RouterOptions struct {
+	WSMaxConns       int64
+	CORSOrigin       string
+	ActivityRecorder service.ActivityRecorder
+}
+
 // Stop shuts down all rate limiter cleanup goroutines.
 func (rl *RateLimiters) Stop() {
 	rl.teacher.Stop()
@@ -32,16 +38,16 @@ func (rl *RateLimiters) Stop() {
 	rl.room.Stop()
 }
 
-func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *service.FavouriteService, c *cache.Cache, refresher *service.DataRefresher, wsMaxConns int64, viewSvc *service.DashboardViewService, corsOrigin string) (*chi.Mux, *RateLimiters) {
+func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *service.FavouriteService, c *cache.Cache, refresher *service.DataRefresher, viewSvc *service.DashboardViewService, options RouterOptions) (*chi.Mux, *RateLimiters) {
 	rl := &RateLimiters{
-		teacher: middleware.NewIPRateLimiter(5, 10), // teacher/courses browsing: 5 req/s, burst 10
-		toggle:  middleware.NewIPRateLimiter(2, 3),  // POST toggle-checkin: 2 req/s, burst 3
+		teacher: middleware.NewIPRateLimiter(5, 10),  // teacher/courses browsing: 5 req/s, burst 10
+		toggle:  middleware.NewIPRateLimiter(2, 3),   // POST toggle-checkin: 2 req/s, burst 3
 		room:    middleware.NewIPRateLimiter(10, 20), // rooms API: 10 req/s, burst 20
 	}
 
 	r := chi.NewRouter()
 	r.Use(chimiddleware.Logger)
-	r.Use(corsMiddleware(corsOrigin))
+	r.Use(corsMiddleware(options.CORSOrigin))
 
 	r.Get("/api", healthHandler(c, refresher))
 	r.Get("/api/", healthHandler(c, refresher))
@@ -51,6 +57,7 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 
 	r.Route("/api/rooms", func(r chi.Router) {
 		r.Use(rl.room.Middleware)
+		r.Use(admittedActivityMiddleware(options.ActivityRecorder))
 
 		r.Get("/", getRoomsHandler(rm))
 		r.Post("/", createRoomHandler(rm))
@@ -63,6 +70,7 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 
 	r.Route("/api/teacher", func(r chi.Router) {
 		r.Use(rl.teacher.Middleware)
+		r.Use(admittedActivityMiddleware(options.ActivityRecorder))
 
 		r.Get("/courses", getCoursesHandler(ts))
 		r.Get("/courses/{courseId}", getCourseDetailHandler(ts))
@@ -87,12 +95,63 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 		r.Post("/dashboard-views/{id}/use", touchDashboardViewHandler(viewSvc))
 	})
 
-	r.Get("/ws", wsHandler(rm, wsMaxConns))
-	r.Get("/ws/", wsHandler(rm, wsMaxConns))
+	r.Get("/ws", wsHandler(rm, options.WSMaxConns, options.ActivityRecorder))
+	r.Get("/ws/", wsHandler(rm, options.WSMaxConns, options.ActivityRecorder))
 
 	r.Handle("/*", spaFallbackHandler())
 
 	return r, rl
+}
+
+type responseStatusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *responseStatusRecorder) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseStatusRecorder) Write(payload []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(payload)
+}
+
+func admittedActivityMiddleware(recorder service.ActivityRecorder) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if recorder == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			var lease service.ActivityLease
+			if tracker, ok := recorder.(service.ActivityTracker); ok {
+				lease = tracker.BeginActivity()
+			}
+			statusWriter := &responseStatusRecorder{ResponseWriter: w}
+			if lease != nil {
+				defer func() {
+					status := statusWriter.status
+					if status == 0 {
+						status = http.StatusOK
+					}
+					lease.Finish(status >= 200 && status < 400)
+				}()
+			}
+			next.ServeHTTP(statusWriter, r)
+			status := statusWriter.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			success := status >= 200 && status < 400
+			if lease == nil && success {
+				recorder.RecordActivity()
+			}
+		})
+	}
 }
 
 func corsMiddleware(corsOrigin string) func(http.Handler) http.Handler {
@@ -106,28 +165,28 @@ func corsMiddleware(corsOrigin string) func(http.Handler) http.Handler {
 			if corsOrigin == "*" {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 			} else if origin == corsOrigin {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Add("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-		} else {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Add("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+			} else {
+				next.ServeHTTP(w, r)
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			next.ServeHTTP(w, r)
-			return
-		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Max-Age", "86400")
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+		})
 	}
 }
 
 type healthResponse struct {
-	Message string       `json:"message"`
-	Cache   healthCache  `json:"cache"`
+	Message string      `json:"message"`
+	Cache   healthCache `json:"cache"`
 }
 
 type healthCache struct {
@@ -276,5 +335,3 @@ func createRoomFromSessionHandler(rm *service.RoomManager) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, successResponse(room))
 	}
 }
-
-

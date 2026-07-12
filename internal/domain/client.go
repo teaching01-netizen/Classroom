@@ -4,8 +4,8 @@ import "context"
 
 // QrClient defines the interface for fetching QR codes from an attendance system.
 type QrClient interface {
-	FetchQR(classID string) (QrResponse, error)
-	FetchQRWithFreshAuth(classID string) (QrResponse, error)
+	FetchQRContext(ctx context.Context, classID string) (QrResponse, error)
+	FetchQRWithFreshAuthContext(ctx context.Context, classID string) (QrResponse, error)
 }
 
 // ReportPersistence abstracts the async report persistence so that

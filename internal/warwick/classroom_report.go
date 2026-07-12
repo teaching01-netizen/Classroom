@@ -26,7 +26,7 @@ func (c *ClassroomClient) GetCourseAttendanceReport(ctx context.Context, courseI
 	}
 
 	// Check for stale data (TTL expired but entry still exists).
-	if c.reportCache != nil {
+	if c.reportCache != nil && !c.disableAsyncRefresh {
 		if cached, ok := c.reportCache.GetStale(cacheKey); ok {
 			metrics.ReportCacheHits.WithLabelValues("stale").Inc()
 			staleReport := cached.(*domain.CourseAttendanceReport)
@@ -42,21 +42,21 @@ func (c *ClassroomClient) GetCourseAttendanceReport(ctx context.Context, courseI
 
 	// Cache miss — compute fresh.
 	metrics.ReportCacheHits.WithLabelValues("miss").Inc()
-	return c.computeAndCacheReport(courseID, courseName, sessions, threshold, source, persister)
+	return c.computeAndCacheReport(ctx, courseID, courseName, sessions, threshold, source, persister)
 }
 
 // refreshReportAsync triggers an async report computation. Uses singleflight
 // to deduplicate concurrent refreshes for the same course.
 func (c *ClassroomClient) refreshReportAsync(courseID, courseName string, sessions []domain.SessionSummary, threshold int, source domain.SessionFetcher, persister domain.ReportPersistence) {
 	_, _, _ = c.ReportFlight.Do("refresh:"+courseID, func() (interface{}, error) {
-		c.computeAndCacheReport(courseID, courseName, sessions, threshold, source, persister)
+		c.computeAndCacheReport(context.Background(), courseID, courseName, sessions, threshold, source, persister)
 		return nil, nil
 	})
 }
 
 // computeAndCacheReport computes a fresh report, caches it, and enqueues
 // for async DB persistence.
-func (c *ClassroomClient) computeAndCacheReport(courseID, courseName string, sessions []domain.SessionSummary, threshold int, source domain.SessionFetcher, persister domain.ReportPersistence) (*domain.CourseAttendanceReport, error) {
+func (c *ClassroomClient) computeAndCacheReport(ctx context.Context, courseID, courseName string, sessions []domain.SessionSummary, threshold int, source domain.SessionFetcher, persister domain.ReportPersistence) (*domain.CourseAttendanceReport, error) {
 	cacheKey := "report:" + courseID
 
 	// Determine source label for metrics.
@@ -74,7 +74,7 @@ func (c *ClassroomClient) computeAndCacheReport(courseID, courseName string, ses
 			Sessions: sessions,
 		}
 		start := time.Now()
-		report := ComputeCourseAttendanceReport(context.Background(), source, course, threshold)
+		report := ComputeCourseAttendanceReport(ctx, source, course, threshold)
 		metrics.ReportComputeDuration.WithLabelValues(sourceLabel).Observe(time.Since(start).Seconds())
 
 		// Cache the result (30s TTL).

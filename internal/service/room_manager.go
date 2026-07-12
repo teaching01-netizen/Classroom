@@ -26,13 +26,16 @@ type RoomManagerEvent struct {
 }
 
 type RoomState struct {
-	room       domain.Room
-	ctx        context.Context
-	cancel     context.CancelFunc
-	lastQrTime uint64 // actual QrTime from last successful fetch (seconds)
+	room               domain.Room
+	cancel             context.CancelFunc
+	done               chan struct{}
+	persistWG          sync.WaitGroup
+	stopPersistPending bool
+	lastQrTime         uint64 // actual QrTime from last successful fetch (seconds)
 }
 
 type RoomManager struct {
+	lifecycleMu   sync.Mutex
 	mu            sync.RWMutex
 	rooms         map[string]*RoomState
 	eventCh       chan RoomManagerEvent
@@ -104,6 +107,40 @@ func (rm *RoomManager) LoadRoomsFromDB() error {
 	return nil
 }
 
+// RecoverLoadedRooms normalizes persisted active/transient states after a cold start.
+// In-process QR workers cannot survive a rebuild, so those states must not remain active-looking.
+func (rm *RoomManager) RecoverLoadedRooms(ctx context.Context) error {
+	rm.lifecycleMu.Lock()
+	defer rm.lifecycleMu.Unlock()
+
+	rm.mu.Lock()
+	pending := make([]*RoomState, 0)
+	for _, state := range rm.rooms {
+		if state.room.Status == domain.Idle || state.room.Status == domain.Stopped {
+			continue
+		}
+		if err := state.room.TransitionTo(domain.Stopped); err != nil {
+			rm.mu.Unlock()
+			return fmt.Errorf("recover room %s: %w", state.room.RoomID, err)
+		}
+		state.stopPersistPending = true
+		pending = append(pending, state)
+	}
+	rm.mu.Unlock()
+
+	var errs []error
+	for _, state := range pending {
+		if _, err := rm.repository.UpdateRoom(ctx, state.room); err != nil {
+			errs = append(errs, fmt.Errorf("persist recovered room %s: %w", state.room.RoomID, err))
+			continue
+		}
+		rm.mu.Lock()
+		state.stopPersistPending = false
+		rm.mu.Unlock()
+	}
+	return errors.Join(errs...)
+}
+
 func (rm *RoomManager) CreateRoom(roomID string, classID string, name *string) (domain.Room, error) {
 	// Check for existing room first (dedup)
 	existing, err := rm.repository.GetRoom(roomID)
@@ -127,6 +164,9 @@ func (rm *RoomManager) CreateRoom(roomID string, classID string, name *string) (
 }
 
 func (rm *RoomManager) DeleteRoom(roomID string) error {
+	rm.lifecycleMu.Lock()
+	defer rm.lifecycleMu.Unlock()
+
 	if err := rm.repository.DeleteRoom(roomID); err != nil {
 		return err
 	}
@@ -169,6 +209,9 @@ func (rm *RoomManager) GetAllRooms() []domain.Room {
 }
 
 func (rm *RoomManager) StartRoom(roomID string) error {
+	rm.lifecycleMu.Lock()
+	defer rm.lifecycleMu.Unlock()
+
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
@@ -189,19 +232,26 @@ func (rm *RoomManager) StartRoom(roomID string) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	state.ctx = ctx
 	state.cancel = cancel
+	state.done = make(chan struct{})
+	done := state.done
 	if err := state.room.TransitionTo(domain.Running); err != nil {
 		slog.Warn("invalid transition", "error", err)
 	}
 
 	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: state.room})
 
-	go rm.runRoomWorker(state)
+	go func() {
+		defer close(done)
+		rm.runRoomWorker(ctx, state)
+	}()
 	return nil
 }
 
 func (rm *RoomManager) StopRoom(roomID string) error {
+	rm.lifecycleMu.Lock()
+	defer rm.lifecycleMu.Unlock()
+
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
@@ -220,11 +270,7 @@ func (rm *RoomManager) StopRoom(roomID string) error {
 	}
 	room := state.room
 
-	go func() {
-		if _, err := rm.repository.UpdateRoom(room); err != nil {
-			slog.Error("failed to persist room stop", "error", err)
-		}
-	}()
+	rm.persistRoomUpdate(state, room)
 
 	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: room})
 	return nil
@@ -264,16 +310,82 @@ func (rm *RoomManager) handleNoQRClient(state *RoomState) {
 	_ = state.room.TransitionTo(domain.Stopped)
 	roomCopy := state.room
 	rm.mu.Unlock()
-	rm.persistRoomUpdate(roomCopy)
+	rm.persistRoomUpdate(state, roomCopy)
 	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
 }
 
-func (rm *RoomManager) persistRoomUpdate(room domain.Room) {
+func (rm *RoomManager) persistRoomUpdate(state *RoomState, room domain.Room) {
+	state.persistWG.Add(1)
 	go func() {
-		if _, err := rm.repository.UpdateRoom(room); err != nil {
+		defer state.persistWG.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := rm.repository.UpdateRoom(ctx, room); err != nil {
 			slog.Error("failed to persist room update", "error", err, "room_id", room.RoomID)
 		}
 	}()
+}
+
+// StopAllActiveRooms cancels active QR workers and durably records their stopped state.
+// It returns only after every cancelled worker has exited or ctx is cancelled.
+func (rm *RoomManager) StopAllActiveRooms(ctx context.Context) error {
+	rm.lifecycleMu.Lock()
+	defer rm.lifecycleMu.Unlock()
+
+	type stoppedRoom struct {
+		room  domain.Room
+		state *RoomState
+		done  <-chan struct{}
+	}
+
+	rm.mu.Lock()
+	stopped := make([]stoppedRoom, 0)
+	for _, state := range rm.rooms {
+		if state.cancel == nil && !state.stopPersistPending {
+			continue
+		}
+		if state.cancel != nil {
+			state.cancel()
+			state.cancel = nil
+			if err := state.room.TransitionTo(domain.Stopped); err != nil {
+				rm.mu.Unlock()
+				return fmt.Errorf("stop room %s: %w", state.room.RoomID, err)
+			}
+			state.stopPersistPending = true
+		}
+		stopped = append(stopped, stoppedRoom{room: state.room, state: state, done: state.done})
+	}
+	rm.mu.Unlock()
+
+	var errs []error
+	for _, item := range stopped {
+		// Persist immediately so a slow upstream fetch cannot leave durable state Running.
+		if _, err := rm.repository.UpdateRoom(ctx, item.room); err != nil {
+			errs = append(errs, fmt.Errorf("persist stopped room %s: %w", item.room.RoomID, err))
+		}
+		if item.done != nil {
+			select {
+			case <-item.done:
+			case <-ctx.Done():
+				return errors.Join(append(errs, ctx.Err())...)
+			}
+		}
+		// Older asynchronous writes are individually bounded to five seconds.
+		item.state.persistWG.Wait()
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		// Reassert Stopped after all older writes so durable ordering is deterministic.
+		if _, err := rm.repository.UpdateRoom(ctx, item.room); err != nil {
+			errs = append(errs, fmt.Errorf("persist stopped room %s: %w", item.room.RoomID, err))
+		} else {
+			rm.mu.Lock()
+			item.state.stopPersistPending = false
+			rm.mu.Unlock()
+		}
+		rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: item.room})
+	}
+	return errors.Join(errs...)
 }
 
 // shouldFetchQR determines if the QR code needs refreshing.
@@ -304,7 +416,7 @@ func (rm *RoomManager) handleRoomFetchSuccess(state *RoomState, resp *domain.QrR
 	state.room.ErrorMessage = nil
 	roomCopy := state.room
 	rm.mu.Unlock()
-	rm.persistRoomUpdate(roomCopy)
+	rm.persistRoomUpdate(state, roomCopy)
 	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
 }
 
@@ -315,24 +427,24 @@ func (rm *RoomManager) handleNonRecoverableError(state *RoomState, err error) {
 	state.room.WarningMessage = &msg
 	roomCopy := state.room
 	rm.mu.Unlock()
-	rm.persistRoomUpdate(roomCopy)
+	rm.persistRoomUpdate(state, roomCopy)
 	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
 }
 
 // recoveryLoop attempts to re-authenticate and re-fetch the QR code with
 // exponential backoff. Returns true if recovery succeeded.
-func (rm *RoomManager) recoveryLoop(state *RoomState, classID string) bool {
+func (rm *RoomManager) recoveryLoop(ctx context.Context, state *RoomState, classID string) bool {
 	backoff := roomRecoveryInitialBackoff
 	for attempts := 0; attempts < roomRecoveryMaxAttempts; attempts++ {
 		select {
-		case <-state.ctx.Done():
+		case <-ctx.Done():
 			return false
 		case <-time.After(backoff):
-			resp, err := rm.qrClient.FetchQRWithFreshAuth(classID)
+			resp, err := rm.qrClient.FetchQRWithFreshAuthContext(ctx, classID)
 			if err == nil {
 				rm.mu.Lock()
 				select {
-				case <-state.ctx.Done():
+				case <-ctx.Done():
 					rm.mu.Unlock()
 					return false
 				default:
@@ -354,7 +466,7 @@ func (rm *RoomManager) recoveryLoop(state *RoomState, classID string) bool {
 				}
 				roomCopy := state.room
 				rm.mu.Unlock()
-				rm.persistRoomUpdate(roomCopy)
+				rm.persistRoomUpdate(state, roomCopy)
 				rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
 				return true
 			}
@@ -367,7 +479,7 @@ func (rm *RoomManager) recoveryLoop(state *RoomState, classID string) bool {
 				state.room.TransitionTo(domain.Warning)
 				roomCopy := state.room
 				rm.mu.Unlock()
-				rm.persistRoomUpdate(roomCopy)
+				rm.persistRoomUpdate(state, roomCopy)
 				rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
 				return false
 			}
@@ -375,9 +487,9 @@ func (rm *RoomManager) recoveryLoop(state *RoomState, classID string) bool {
 			if errors.Is(err, domain.ErrPoolExhausted) {
 				slog.Debug("pool exhausted, retrying", "room_id", state.room.RoomID)
 				select {
-				case <-state.ctx.Done():
+				case <-ctx.Done():
 					return false
-				case <-time.After(time.Duration(500 + rand.Intn(500)) * time.Millisecond):
+				case <-time.After(time.Duration(500+rand.Intn(500)) * time.Millisecond):
 				}
 				attempts--
 				continue
@@ -393,7 +505,7 @@ func (rm *RoomManager) recoveryLoop(state *RoomState, classID string) bool {
 				}
 				roomCopy := state.room
 				rm.mu.Unlock()
-				rm.persistRoomUpdate(roomCopy)
+				rm.persistRoomUpdate(state, roomCopy)
 				rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
 				return false
 			}
@@ -412,12 +524,12 @@ func (rm *RoomManager) recoveryLoop(state *RoomState, classID string) bool {
 	state.cancel = nil
 	roomCopy := state.room
 	rm.mu.Unlock()
-	rm.persistRoomUpdate(roomCopy)
+	rm.persistRoomUpdate(state, roomCopy)
 	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
 	return false
 }
 
-func (rm *RoomManager) runRoomWorker(state *RoomState) {
+func (rm *RoomManager) runRoomWorker(ctx context.Context, state *RoomState) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("room worker panicked", "room_id", state.room.RoomID, "error", r)
@@ -431,9 +543,9 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 
 	for {
 		select {
-		case <-state.ctx.Done():
+		case <-ctx.Done():
 			return
-		case <-time.After(time.Duration(500 + rand.Intn(1000)) * time.Millisecond):
+		case <-time.After(time.Duration(500+rand.Intn(1000)) * time.Millisecond):
 			now := time.Now()
 			rm.mu.RLock()
 			expiresAt := state.room.ExpiresAt
@@ -452,7 +564,12 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 			rm.mu.Unlock()
 			rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: fetchingRoom})
 
-			resp, err := rm.qrClient.FetchQR(classID)
+			resp, err := rm.qrClient.FetchQRContext(ctx, classID)
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			if err != nil {
 				rm.mu.Lock()
 				var fetchErr *domain.FetchError
@@ -471,10 +588,10 @@ func (rm *RoomManager) runRoomWorker(state *RoomState) {
 					state.room.ErrorMessage = nil
 					roomCopy := state.room
 					rm.mu.Unlock()
-					rm.persistRoomUpdate(roomCopy)
+					rm.persistRoomUpdate(state, roomCopy)
 					rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
 
-					if rm.recoveryLoop(state, classID) {
+					if rm.recoveryLoop(ctx, state, classID) {
 						continue
 					}
 					return

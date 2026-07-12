@@ -1,0 +1,54 @@
+package app
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"qr-command-center/internal/service"
+)
+
+type runtimeWorker struct {
+	mu      sync.Mutex
+	running bool
+}
+
+func (w *runtimeWorker) Run(ctx context.Context) {
+	w.mu.Lock()
+	w.running = true
+	w.mu.Unlock()
+	<-ctx.Done()
+	w.mu.Lock()
+	w.running = false
+	w.mu.Unlock()
+}
+
+func (w *runtimeWorker) IsRunning() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.running
+}
+
+func TestStartBackgroundRuntime_ServerlessWaitsForActivity(t *testing.T) {
+	worker := &runtimeWorker{}
+	controller := service.NewActivityController(time.Minute, []service.ManagedWorker{worker}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	StartBackgroundRuntime(ctx, true, BackgroundRuntime{Controller: controller})
+	require.Never(t, worker.IsRunning, 20*time.Millisecond, time.Millisecond)
+	controller.RecordActivity()
+	require.Eventually(t, worker.IsRunning, time.Second, time.Millisecond)
+}
+
+func TestStartBackgroundRuntime_NormalModeStartsImmediately(t *testing.T) {
+	worker := &runtimeWorker{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	StartBackgroundRuntime(ctx, false, BackgroundRuntime{AlwaysOn: []service.ManagedWorker{worker}})
+	require.Eventually(t, worker.IsRunning, time.Second, time.Millisecond)
+}

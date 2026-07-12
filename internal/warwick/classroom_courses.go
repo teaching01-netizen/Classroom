@@ -27,7 +27,7 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 		// Only spawn refresh when pool is available — refreshCoursesCache calls
 		// getCoursesWithPool which would nil-deref on pool-less clients.
 		if stale, ok := c.cache.GetStale("courses"); ok {
-			if c.pool != nil {
+			if c.pool != nil && !c.disableAsyncRefresh {
 				c.tryRefresh("courses", c.refreshCoursesCache)
 				return stale.([]domain.CourseSummary), nil
 			}

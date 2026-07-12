@@ -1,6 +1,6 @@
 # Check-in QR Command Center
 
-## Quick Start (Docker)
+## Quick Start
 
 The easiest way to deploy is with Docker:
 
@@ -22,7 +22,7 @@ This will:
 docker-compose -f docker-compose.prod.yml up -d --build
 ```
 
-### Option 2: Native Build
+### Option 2: Native Go Build
 
 1. Build everything:
 ```bash
@@ -43,7 +43,7 @@ DATABASE_URL=postgres://user:password@host:port/dbname
 
 ### Backend
 ```bash
-cargo run -p qr-command-center-server
+go run ./cmd/server
 ```
 
 ### Frontend
@@ -56,3 +56,34 @@ npm run dev
 
 - `build.sh`: Builds frontend and backend
 - `deploy.sh`: Deploys using Docker Compose (or native if Docker not available)
+
+## Railway Serverless
+
+The service supports Railway Serverless (formerly App Sleeping) without leaving periodic Warwick or PostgreSQL traffic running while nobody is using the app.
+
+Set these service variables in Railway:
+
+```env
+SERVERLESS_ENABLED=true
+SERVERLESS_IDLE_GRACE=2m
+```
+
+When enabled:
+
+- Teacher, room, and WebSocket requests activate the idle lease; data is refreshed on demand within the request path.
+- Repeated business requests extend the activity deadline.
+- Periodic cache/session warmers and detached stale-while-revalidate jobs remain disabled in serverless mode; active QR rooms are safely persisted as stopped after the idle grace, Warwick keep-alive connections close, and PostgreSQL connections drain to zero.
+- Health checks, Prometheus scrapes, and static files do not activate background work.
+- A later business request starts a fresh active generation automatically.
+
+Railway detects inactivity after ten minutes without outbound packets. The two-minute application grace leaves time for in-flight requests and database connections to finish draining. The first request after sleep can have cold-boot latency and Railway may return a first-request 502; this occurs before the application can respond.
+
+`railway.json` enables Serverless and pins the deployment to one replica. Single-replica operation is required because QR room ownership is currently held in process memory. You can also inspect or change the platform toggle in **Service Settings → Deploy → Serverless**. See [Railway Serverless documentation](https://docs.railway.com/deployments/serverless).
+
+To roll back to the previous always-on behavior:
+
+```env
+SERVERLESS_ENABLED=false
+```
+
+`SERVERLESS_IDLE_GRACE` accepts values from `30s` through `6m`. Invalid values fail startup instead of silently selecting an unsafe configuration. The six-minute ceiling preserves at least four minutes of Railway's ten-minute quiet budget for cleanup and connection draining.

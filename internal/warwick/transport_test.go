@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"qr-command-center/internal/cache"
 )
 
 // TestNewSharedTransport_ConfiguresAllTuningFields pins down the production
@@ -89,4 +91,15 @@ func TestNewSharedTransport_PropagatesIntoPooledSessions(t *testing.T) {
 			"tier %d must use the shared transport, not a per-session DefaultTransport", tier)
 		pool.Release(ref)
 	}
+}
+
+func TestWarwickClientsCanShareOwnedTransport(t *testing.T) {
+	transport := NewSharedTransport(10)
+	qr := NewWarwickQrClientFromPool(nil, TierQR)
+	qr.SetTransport(transport)
+	classroom := NewClassroomClientFromPool(nil, TierTeacher, cache.New())
+	classroom.SetTransport(transport)
+
+	assert.Same(t, transport, qr.client.Transport)
+	assert.Same(t, transport, classroom.client.Transport)
 }

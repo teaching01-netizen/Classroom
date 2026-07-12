@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -25,8 +26,10 @@ type Config struct {
 	PreWarmSessions     int
 
 	// --- Timing ---
-	CacheInterval   time.Duration
-	PreWarmInterval time.Duration
+	CacheInterval       time.Duration
+	PreWarmInterval     time.Duration
+	ServerlessEnabled   bool
+	ServerlessIdleGrace time.Duration
 
 	// --- Database ---
 	DatabaseURL string
@@ -39,33 +42,74 @@ type Config struct {
 	CORSOrigin string
 }
 
-// LoadConfig reads environment variables and returns a Config with defaults.
-// Exits on missing required config.
-func LoadConfig() Config {
+// LoadConfig reads environment variables and returns a validated Config.
+func LoadConfig() (Config, error) {
+	serverlessEnabled, err := getServerlessEnabled()
+	if err != nil {
+		return Config{}, err
+	}
+	serverlessIdleGrace, err := getServerlessIdleGrace()
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
-		Email:              os.Getenv("WARWICK_EMAIL"),
-		Password:           os.Getenv("WARWICK_PASSWORD"),
-		UserID:             os.Getenv("WARWICK_USER_ID"),
-		QRSessions:         getEnvInt("WARWICK_QR_SESSIONS", 2),
-		TeacherSessions:    getEnvInt("WARWICK_TEACHER_SESSIONS", 2),
+		Email:               os.Getenv("WARWICK_EMAIL"),
+		Password:            os.Getenv("WARWICK_PASSWORD"),
+		UserID:              os.Getenv("WARWICK_USER_ID"),
+		QRSessions:          getEnvInt("WARWICK_QR_SESSIONS", 2),
+		TeacherSessions:     getEnvInt("WARWICK_TEACHER_SESSIONS", 2),
 		InteractiveSessions: getEnvInt("WARWICK_INTERACTIVE_SESSIONS", 2),
-		ConnsPerHost:       getEnvInt("WARWICK_CONNS_PER_HOST", 50),
-		PreWarmSessions:    getEnvInt("WARWICK_PREWARM_SESSIONS", 1),
-		CacheInterval:      getEnvDuration("WARWICK_CACHE_INTERVAL", 30*time.Second),
-		PreWarmInterval:    getEnvDuration("WARWICK_PREWARM_INTERVAL", 20*time.Second),
-		DatabaseURL:        os.Getenv("DATABASE_URL"),
-		Port:               resolvePort(),
-		WSMaxConns:         int64(getEnvInt("WARWICK_MAX_CONCURRENT_WS", 500)),
-		CORSOrigin:         os.Getenv("CORS_ORIGIN"),
-		WarwickBaseURL: getEnvStr("WARWICK_BASE_URL", "https://warwick.humantix.cloud"),
+		ConnsPerHost:        getEnvInt("WARWICK_CONNS_PER_HOST", 50),
+		PreWarmSessions:     getEnvInt("WARWICK_PREWARM_SESSIONS", 1),
+		CacheInterval:       getEnvDuration("WARWICK_CACHE_INTERVAL", 30*time.Second),
+		PreWarmInterval:     getEnvDuration("WARWICK_PREWARM_INTERVAL", 20*time.Second),
+		ServerlessEnabled:   serverlessEnabled,
+		ServerlessIdleGrace: serverlessIdleGrace,
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		Port:                resolvePort(),
+		WSMaxConns:          int64(getEnvInt("WARWICK_MAX_CONCURRENT_WS", 500)),
+		CORSOrigin:          os.Getenv("CORS_ORIGIN"),
+		WarwickBaseURL:      getEnvStr("WARWICK_BASE_URL", "https://warwick.humantix.cloud"),
 	}
 
 	if cfg.DatabaseURL == "" {
-		slog.Error("DATABASE_URL must be set")
-		os.Exit(1)
+		return Config{}, fmt.Errorf("DATABASE_URL must be set")
 	}
 
-	return cfg
+	return cfg, nil
+}
+
+func getServerlessEnabled() (bool, error) {
+	value := os.Getenv("SERVERLESS_ENABLED")
+	if value == "" {
+		return os.Getenv("RAILWAY_ENVIRONMENT_ID") != "", nil
+	}
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("SERVERLESS_ENABLED must be a boolean: %w", err)
+	}
+	return enabled, nil
+}
+
+func getServerlessIdleGrace() (time.Duration, error) {
+	const (
+		defaultGrace = 2 * time.Minute
+		minimumGrace = 30 * time.Second
+		maximumGrace = 6 * time.Minute
+	)
+	value := os.Getenv("SERVERLESS_IDLE_GRACE")
+	if value == "" {
+		return defaultGrace, nil
+	}
+	grace, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("SERVERLESS_IDLE_GRACE must be a duration: %w", err)
+	}
+	if grace < minimumGrace || grace > maximumGrace {
+		return 0, fmt.Errorf("SERVERLESS_IDLE_GRACE must be between %s and %s", minimumGrace, maximumGrace)
+	}
+	return grace, nil
 }
 
 func resolvePort() string {

@@ -14,7 +14,7 @@ type RoomRepository interface {
 	CreateRoom(room domain.Room) (domain.Room, error)
 	GetRoom(roomID string) (domain.Room, error)
 	GetAllRooms() ([]domain.Room, error)
-	UpdateRoom(room domain.Room) (domain.Room, error)
+	UpdateRoom(ctx context.Context, room domain.Room) (domain.Room, error)
 	DeleteRoom(roomID string) error
 }
 
@@ -73,9 +73,9 @@ func (r *PgRoomRepository) GetAllRooms() ([]domain.Room, error) {
 	return rooms, nil
 }
 
-func (r *PgRoomRepository) UpdateRoom(room domain.Room) (domain.Room, error) {
+func (r *PgRoomRepository) UpdateRoom(ctx context.Context, room domain.Room) (domain.Room, error) {
 	statusStr := roomStatusToString(room.Status)
-	result, err := r.pool.Exec(context.Background(),
+	result, err := r.pool.Exec(ctx,
 		`UPDATE rooms SET class_id=$2, name=$3, status=$4::room_status, qr_url=$5, expires_at=$6, last_updated_at=$7, warning_message=$8, error_message=$9, last_fetch_at=$10
 		 WHERE room_id = $1`,
 		room.RoomID, room.ClassID, room.Name, statusStr,

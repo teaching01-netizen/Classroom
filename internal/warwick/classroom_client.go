@@ -34,9 +34,9 @@ type CachedSession struct {
 
 // ClassroomClient proxies requests to the Warwick admin panel's DataTables API endpoints.
 type ClassroomClient struct {
-	auth    *WarwickAuth  // kept for backward compatibility; nil when pool is used
-	pool    *SessionPool  // new — used when pool is set
-	tier    SessionTier   // new — tier for pool acquisition
+	auth    *WarwickAuth // kept for backward compatibility; nil when pool is used
+	pool    *SessionPool // new — used when pool is set
+	tier    SessionTier  // new — tier for pool acquisition
 	client  *http.Client
 	baseURL string
 	cache   *cache.Cache // in-memory TTL cache for course/session data
@@ -49,7 +49,8 @@ type ClassroomClient struct {
 
 	// refreshing tracks in-flight async cache refreshes keyed by cache key.
 	// Prevents thundering-herd goroutine creation on stale cache hits.
-	refreshing sync.Map
+	refreshing          sync.Map
+	disableAsyncRefresh bool
 
 	// rateLimiter gates live session-detail fetches (e.g. from the attendance
 	// report) to protect upstream Warwick from fan-out storms. nil = no limiting.
@@ -66,7 +67,7 @@ func NewClassroomClient(auth *WarwickAuth, sharedCache *cache.Cache) *ClassroomC
 	return &ClassroomClient{
 		auth: auth,
 		client: &http.Client{
-			Timeout:       30 * time.Second,
+			Timeout: 30 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -105,6 +106,16 @@ func (c *ClassroomClient) SetReportCache(rc *cache.Cache) {
 	c.reportCache = rc
 }
 
+func (c *ClassroomClient) SetTransport(transport http.RoundTripper) {
+	if transport != nil {
+		c.client.Transport = transport
+	}
+}
+
+func (c *ClassroomClient) SetAsyncRefreshEnabled(enabled bool) {
+	c.disableAsyncRefresh = !enabled
+}
+
 // GetReportCache returns the report cache (may be nil).
 func (c *ClassroomClient) GetReportCache() *cache.Cache {
 	return c.reportCache
@@ -118,6 +129,9 @@ func (c *ClassroomClient) Auth() *WarwickAuth {
 // tryRefresh spawns an async refresh fn for key if one isn't already running.
 // Returns true if the refresh was started, false if one was already in-flight.
 func (c *ClassroomClient) tryRefresh(key string, fn func()) bool {
+	if c.disableAsyncRefresh {
+		return false
+	}
 	if _, loaded := c.refreshing.LoadOrStore(key, true); loaded {
 		return false
 	}

@@ -16,7 +16,7 @@ import (
 
 var wsConnCount atomic.Int64
 
-func wsHandler(rm *service.RoomManager, maxConns int64) http.HandlerFunc {
+func wsHandler(rm *service.RoomManager, maxConns int64, activityRecorder service.ActivityRecorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if wsConnCount.Load() >= maxConns {
 			http.Error(w, "too many WebSocket connections", http.StatusServiceUnavailable)
@@ -29,6 +29,9 @@ func wsHandler(rm *service.RoomManager, maxConns int64) http.HandlerFunc {
 		if err != nil {
 			slog.Error("ws accept failed", "error", err)
 			return
+		}
+		if activityRecorder != nil {
+			activityRecorder.RecordActivity()
 		}
 		defer func() {
 			_ = conn.Close(websocket.StatusNormalClosure, "done")

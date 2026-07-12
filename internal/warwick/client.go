@@ -1,6 +1,7 @@
 package warwick
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,9 +17,9 @@ import (
 const defaultQREndpoint = "https://warwick.humantix.cloud/admin/ClassAttendance/GetQRCode"
 
 type WarwickQrClient struct {
-	auth       *WarwickAuth   // kept for backward compatibility; nil when pool is used
-	pool       *SessionPool   // new — used when pool is set
-	tier       SessionTier    // new — tier for pool acquisition
+	auth       *WarwickAuth // kept for backward compatibility; nil when pool is used
+	pool       *SessionPool // new — used when pool is set
+	tier       SessionTier  // new — tier for pool acquisition
 	client     *http.Client
 	qrEndpoint string
 }
@@ -39,6 +40,12 @@ func NewWarwickQrClient(auth *WarwickAuth) *WarwickQrClient {
 // SetBaseURL updates the QR endpoint URL base. Must be called before use.
 func (c *WarwickQrClient) SetBaseURL(baseURL string) {
 	c.qrEndpoint = baseURL + "/admin/ClassAttendance/GetQRCode"
+}
+
+func (c *WarwickQrClient) SetTransport(transport http.RoundTripper) {
+	if transport != nil {
+		c.client.Transport = transport
+	}
 }
 
 func NewWarwickQrClientWithEndpoint(auth *WarwickAuth, endpoint string) *WarwickQrClient {
@@ -77,6 +84,10 @@ func (c *WarwickQrClient) Auth() *WarwickAuth {
 // FetchQR fetches a QR code. Uses the session pool if configured, otherwise
 // falls back to the single WarwickAuth session.
 func (c *WarwickQrClient) FetchQR(classID string) (domain.QrResponse, error) {
+	return c.FetchQRContext(context.Background(), classID)
+}
+
+func (c *WarwickQrClient) FetchQRContext(ctx context.Context, classID string) (domain.QrResponse, error) {
 	if c.pool != nil {
 		ref, err := c.pool.Acquire(c.tier)
 		if err != nil {
@@ -89,19 +100,23 @@ func (c *WarwickQrClient) FetchQR(classID string) (domain.QrResponse, error) {
 			return domain.QrResponse{}, domain.ErrAuthExpired
 		}
 		defer c.pool.Release(ref)
-		return c.doFetch(classID, ref.Cookie)
+		return c.doFetchContext(ctx, classID, ref.Cookie)
 	}
 
 	cookie, _, err := c.auth.GetValidSession()
 	if err != nil {
 		return domain.QrResponse{}, domain.ErrAuthExpired
 	}
-	return c.doFetch(classID, cookie)
+	return c.doFetchContext(ctx, classID, cookie)
 }
 
 // FetchQRWithFreshAuth forces a fresh login and fetches the QR code.
 // With the pool, only the acquired session is refreshed — other sessions unaffected.
 func (c *WarwickQrClient) FetchQRWithFreshAuth(classID string) (domain.QrResponse, error) {
+	return c.FetchQRWithFreshAuthContext(context.Background(), classID)
+}
+
+func (c *WarwickQrClient) FetchQRWithFreshAuthContext(ctx context.Context, classID string) (domain.QrResponse, error) {
 	if c.pool != nil {
 		ref, err := c.pool.Acquire(c.tier)
 		if err != nil {
@@ -121,19 +136,23 @@ func (c *WarwickQrClient) FetchQRWithFreshAuth(classID string) (domain.QrRespons
 			}
 			return domain.QrResponse{}, domain.ErrAuthExpired
 		}
-		return c.doFetch(classID, ref.Cookie)
+		return c.doFetchContext(ctx, classID, ref.Cookie)
 	}
 
 	cookie, _, err := c.auth.ForceRefresh()
 	if err != nil {
 		return domain.QrResponse{}, domain.ErrAuthExpired
 	}
-	return c.doFetch(classID, cookie)
+	return c.doFetchContext(ctx, classID, cookie)
 }
 
 func (c *WarwickQrClient) doFetch(classID string, cookie string) (domain.QrResponse, error) {
+	return c.doFetchContext(context.Background(), classID, cookie)
+}
+
+func (c *WarwickQrClient) doFetchContext(ctx context.Context, classID string, cookie string) (domain.QrResponse, error) {
 	body := fmt.Sprintf("id=%s", url.QueryEscape(classID))
-	req, err := http.NewRequest("POST", c.qrEndpoint, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.qrEndpoint, strings.NewReader(body))
 	if err != nil {
 		return domain.QrResponse{}, domain.NewNetworkError(err.Error())
 	}
