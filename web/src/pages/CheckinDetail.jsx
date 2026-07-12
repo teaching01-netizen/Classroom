@@ -133,8 +133,12 @@ export function CheckinDetail() {
   }, [sessionId]);
 
   const filteredStudents = useMemo(() => {
+    const q = searchQuery.toLowerCase();
     return students.filter((student) => {
-      const matchesSearch = student.name.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesSearch =
+        student.name.toLowerCase().includes(q) ||
+        (student.nickname && student.nickname.toLowerCase().includes(q)) ||
+        student.student_id.toLowerCase().includes(q);
       const matchesFilter =
         filterStatus === 'all' ||
         (filterStatus === 'checked' && student.checked_in) ||
