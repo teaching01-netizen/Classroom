@@ -579,6 +579,19 @@ func (c *ClassroomClient) populateCourseName(detail *domain.CourseDetail) {
 			}
 		}
 	}
+	// Courses cache miss — fetch courses to populate the cache, then retry.
+	// This handles the case where a user navigates directly to a course
+	// detail page without first visiting the dashboard.
+	courses, err := c.GetCourses()
+	if err != nil {
+		return
+	}
+	for _, course := range courses {
+		if course.CourseID == detail.CourseID {
+			detail.Name = course.Name
+			return
+		}
+	}
 }
 
 // equalTimePtr compares two *time.Time pointers for equality.
