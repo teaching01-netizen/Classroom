@@ -15,7 +15,7 @@ import (
 // serialize and deserialize this — if the keys change, persisted reports
 // become unreadable on the next deploy. The contract is:
 //
-//   course_id, computed_at, threshold, duration_ms, payload
+//	course_id, computed_at, threshold, duration_ms, payload
 //
 // plus payload being opaque JSONB (the domain.CourseAttendanceReport shape).
 func TestAttendanceReport_JSONKeysPinContract(t *testing.T) {

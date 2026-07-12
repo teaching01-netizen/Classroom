@@ -17,11 +17,11 @@ import (
 // stubCourseLister implements the prewarmer's CourseLister interface.
 // It records GetCourses / GetCourseDetail calls and returns canned data.
 type stubCourseLister struct {
-	mu       sync.Mutex
-	courses  []domain.CourseSummary
-	details  map[string]*domain.CourseDetail // key: course_id
-	listN    atomic.Uint64
-	detailN  atomic.Uint64
+	mu      sync.Mutex
+	courses []domain.CourseSummary
+	details map[string]*domain.CourseDetail // key: course_id
+	listN   atomic.Uint64
+	detailN atomic.Uint64
 }
 
 func (s *stubCourseLister) GetCourses() ([]domain.CourseSummary, error) {
@@ -40,10 +40,10 @@ func (s *stubCourseLister) GetCourseDetail(courseID string) (*domain.CourseDetai
 
 // stubSessionFetcher returns canned SessionDetails or errors per sessionID.
 type stubSessionFetcher struct {
-	mu       sync.Mutex
-	details  map[string]*domain.SessionDetail
-	errs     map[string]error
-	calls    []string
+	mu      sync.Mutex
+	details map[string]*domain.SessionDetail
+	errs    map[string]error
+	calls   []string
 }
 
 func (s *stubSessionFetcher) FetchSessionDetailLive(_ context.Context, sessionID string) (*domain.SessionDetail, error) {
@@ -73,9 +73,9 @@ type stubCheckinPersister struct {
 }
 
 type stubUpsert struct {
-	SessionID    string
-	SessionDate  time.Time
-	Students     []domain.StudentCheckin
+	SessionID   string
+	SessionDate time.Time
+	Students    []domain.StudentCheckin
 }
 
 func (s *stubCheckinPersister) UpsertFromWarwick(_ context.Context, sessionID string, sessionDate time.Time, students []domain.StudentCheckin) error {

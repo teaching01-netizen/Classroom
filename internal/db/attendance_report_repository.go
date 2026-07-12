@@ -16,10 +16,10 @@ import (
 // (Phase 5). Payload is stored as JSONB so it can be queried, but the
 // application treats it as an opaque CourseAttendanceReport blob.
 type AttendanceReport struct {
-	CourseID   string          `json:"course_id"`
-	ComputedAt time.Time       `json:"computed_at"`
-	Threshold  int             `json:"threshold"`
-	DurationMs int64           `json:"duration_ms"`
+	CourseID   string    `json:"course_id"`
+	ComputedAt time.Time `json:"computed_at"`
+	Threshold  int       `json:"threshold"`
+	DurationMs int64     `json:"duration_ms"`
 	// Payload is the marshaled domain.CourseAttendanceReport. We use
 	// json.RawMessage (a []byte alias) so encoding/json emits it as a
 	// nested object instead of base64, AND so pgx encodes it as JSONB

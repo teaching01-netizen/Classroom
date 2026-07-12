@@ -274,8 +274,8 @@ func TestUpsertFromWarwick_SetsLastWarwickSyncAt(t *testing.T) {
 	defer rows.Close()
 
 	type row struct {
-		id      string
-		syncAt  time.Time
+		id     string
+		syncAt time.Time
 	}
 	var got []row
 	for rows.Next() {

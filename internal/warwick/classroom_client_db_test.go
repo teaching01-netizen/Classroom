@@ -20,9 +20,9 @@ import (
 // mockCheckinRepo implements db.SessionCheckinRepository for testing DB-backed cache behavior.
 type mockCheckinRepo struct {
 	mu           sync.Mutex
-	students     map[string][]domain.StudentCheckin        // sessionID -> students
-	toggledAt    map[string]map[string]time.Time            // sessionID -> studentID -> toggledAt
-	maxToggledAt map[string]*time.Time                      // sessionID -> max toggled at (legacy, kept for compat)
+	students     map[string][]domain.StudentCheckin // sessionID -> students
+	toggledAt    map[string]map[string]time.Time    // sessionID -> studentID -> toggledAt
+	maxToggledAt map[string]*time.Time              // sessionID -> max toggled at (legacy, kept for compat)
 }
 
 func (m *mockCheckinRepo) GetStudentsBySession(ctx context.Context, sessionID string) ([]domain.StudentCheckin, error) {

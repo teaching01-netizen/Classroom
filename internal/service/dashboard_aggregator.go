@@ -256,12 +256,12 @@ func (s *TeacherService) aggregateDashboard(
 	topAtRisk := extractTopAtRisk(students, 5)
 
 	return &domain.DashboardReport{
-		GeneratedAt:       time.Now(),
-		TotalStudents:     totalStudents,
-		TotalCourses:      len(courses),
-		AtRiskCount:       len(topAtRisk),
-		TopAtRisk:         topAtRisk,
-		Students:          students,
-		Sessions:          sessions,
+		GeneratedAt:   time.Now(),
+		TotalStudents: totalStudents,
+		TotalCourses:  len(courses),
+		AtRiskCount:   len(topAtRisk),
+		TopAtRisk:     topAtRisk,
+		Students:      students,
+		Sessions:      sessions,
 	}, nil
 }

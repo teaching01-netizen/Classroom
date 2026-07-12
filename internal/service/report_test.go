@@ -17,7 +17,7 @@ import (
 // mockFetcher is a test double that returns pre-configured session details
 // keyed by session ID.
 type mockFetcher struct {
-	mu       sync.Mutex
+	mu        sync.Mutex
 	responses map[string]*mockResponse
 	calls     []string // recorded call order
 }
@@ -1099,8 +1099,8 @@ func TestCompute_ThresholdDefaultsTo20Percent(t *testing.T) {
 	// Bob: absent from 3 sessions (3 absences, threshold=2 → at-risk)
 	for i := 1; i <= 10; i++ {
 		fetcher.set(fmt.Sprintf("sess-%d", i), makeDetail([]domain.StudentCheckin{
-			makeStudent("s1", "Alice", i > 1),    // absent session 1 only
-			makeStudent("s2", "Bob", i > 3),       // absent first 3
+			makeStudent("s1", "Alice", i > 1), // absent session 1 only
+			makeStudent("s2", "Bob", i > 3),   // absent first 3
 		}), nil)
 	}
 

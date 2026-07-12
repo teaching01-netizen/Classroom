@@ -159,7 +159,7 @@ func getDashboardViewHandler(svc *service.DashboardViewService) http.HandlerFunc
 func createDashboardViewHandler(svc *service.DashboardViewService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Name    string                `json:"name"`
+			Name    string                  `json:"name"`
 			Filters domain.DashboardFilters `json:"filters"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -191,7 +191,7 @@ func updateDashboardViewHandler(svc *service.DashboardViewService) http.HandlerF
 		}
 
 		var req struct {
-			Name    string                `json:"name"`
+			Name    string                  `json:"name"`
 			Filters domain.DashboardFilters `json:"filters"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -293,8 +293,8 @@ func getBatchAttendanceHandler(ts *service.TeacherService) http.HandlerFunc {
 		}
 
 		var req struct {
-			CourseIds  []string `json:"course_ids"`
-			Threshold  int      `json:"threshold"`
+			CourseIds []string `json:"course_ids"`
+			Threshold int      `json:"threshold"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))

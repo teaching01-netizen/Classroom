@@ -9,20 +9,20 @@ import (
 
 // DataTablesRequest represents the server-side DataTables protocol parameters.
 type DataTablesRequest struct {
-	Draw    int               `json:"draw"`
-	Start   int               `json:"start"`
-	Length  int               `json:"length"`
-	Search  DataTablesSearch  `json:"search"`
-	Order   []DataTablesOrder `json:"order"`
+	Draw    int                `json:"draw"`
+	Start   int                `json:"start"`
+	Length  int                `json:"length"`
+	Search  DataTablesSearch   `json:"search"`
+	Order   []DataTablesOrder  `json:"order"`
 	Columns []DataTablesColumn `json:"columns"`
 }
 
 // DataTablesColumn represents a column definition in a DataTables request.
 type DataTablesColumn struct {
-	Data       string          `json:"data"`
-	Name       string          `json:"name"`
-	Searchable bool            `json:"searchable"`
-	Orderable  bool            `json:"orderable"`
+	Data       string           `json:"data"`
+	Name       string           `json:"name"`
+	Searchable bool             `json:"searchable"`
+	Orderable  bool             `json:"orderable"`
 	Search     DataTablesSearch `json:"search"`
 }
 
@@ -58,9 +58,9 @@ type ClassAttendanceRow struct {
 
 // ClassAttendanceDetailResponse is the DataTables response for the ClassAttendance detail search endpoint.
 type ClassAttendanceDetailResponse struct {
-	Draw            int                       `json:"draw"`
-	RecordsTotal    int                       `json:"recordsTotal"`
-	RecordsFiltered int                       `json:"recordsFiltered"`
+	Draw            int                        `json:"draw"`
+	RecordsTotal    int                        `json:"recordsTotal"`
+	RecordsFiltered int                        `json:"recordsFiltered"`
 	Data            []ClassAttendanceDetailRow `json:"data"`
 }
 

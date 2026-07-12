@@ -169,7 +169,7 @@ func NewSessionPool(email, password, loginURL string, qrSessions, teacherSession
 			cli.Transport = sharedTransport
 		}
 		sessions[i] = &pooledSession{
-			client: cli,
+			client:   cli,
 			email:    email,
 			password: password,
 			loginURL: loginURL,
@@ -413,12 +413,12 @@ func (p *SessionPool) SetPreWarmSize(n int) error {
 		}
 		tmpl := p.sessions[0]
 		s := &pooledSession{
-			client:    tmpl.client,
-			email:     tmpl.email,
-			password:  tmpl.password,
-			loginURL:  tmpl.loginURL,
+			client:     tmpl.client,
+			email:      tmpl.email,
+			password:   tmpl.password,
+			loginURL:   tmpl.loginURL,
 			obtainedAt: time.Time{},
-			expiresAt: time.Now().Add(-time.Duration(rand.Intn(300)) * time.Second),
+			expiresAt:  time.Now().Add(-time.Duration(rand.Intn(300)) * time.Second),
 		}
 		p.sessions = append(p.sessions, s)
 	}

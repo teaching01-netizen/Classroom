@@ -33,7 +33,7 @@ type WarwickAuth struct {
 	sessionMu sync.RWMutex
 	session   *sessionState
 
-	forceRefreshMu sync.Mutex  // serializes ForceRefresh calls
+	forceRefreshMu sync.Mutex    // serializes ForceRefresh calls
 	currentGen     atomic.Uint64 // incremented on each successful ForceRefresh login
 }
 

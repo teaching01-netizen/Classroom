@@ -25,8 +25,8 @@ func (l *LiveSessionDataSource) FetchSessionDetailLive(ctx context.Context, sess
 // FallbackSessionDataSource wraps a primary (DB) source and falls back to
 // a secondary (live) source when the primary returns zero students.
 type FallbackSessionDataSource struct {
-	primary   domain.SessionFetcher
-	fallback  domain.SessionFetcher
+	primary  domain.SessionFetcher
+	fallback domain.SessionFetcher
 }
 
 // NewFallbackSessionDataSource creates a data source that tries primary first,

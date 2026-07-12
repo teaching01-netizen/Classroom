@@ -58,10 +58,10 @@ func ComputeCourseAttendanceReport(
 	sessions = uniqueSessions
 
 	type sessionResult struct {
-		index   int
-		detail  *domain.SessionDetail
-		err     error
-		state   string // "ok", "error", "empty"
+		index  int
+		detail *domain.SessionDetail
+		err    error
+		state  string // "ok", "error", "empty"
 	}
 
 	results := make([]sessionResult, len(sessions))
