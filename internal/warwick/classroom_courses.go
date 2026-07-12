@@ -155,6 +155,36 @@ func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
 	return nil, lastErr
 }
 
+// fetchCoursesRaw fetches the course list from Warwick without enrichment.
+// This is used by populateCourseName to avoid circular dependencies
+// (GetCourses -> enrichCourses -> GetCourseDetail -> populateCourseName -> GetCourses).
+func (c *ClassroomClient) fetchCoursesRaw() ([]domain.CourseSummary, error) {
+	if c.pool != nil {
+		return c.getCoursesWithPool()
+	}
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		cookie, _, err := c.auth.GetValidSession()
+		if err != nil {
+			return nil, domain.ErrAuthExpired
+		}
+		courses, err := c.fetchCourses(cookie)
+		if err == nil {
+			return courses, nil
+		}
+		var fe *domain.FetchError
+		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
+			lastErr = err
+			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
+				return nil, domain.ErrAuthExpired
+			}
+			continue
+		}
+		return nil, err
+	}
+	return nil, lastErr
+}
+
 func (c *ClassroomClient) refreshCoursesCache() {
 	courses, err := c.getCoursesWithPool()
 	if err != nil {

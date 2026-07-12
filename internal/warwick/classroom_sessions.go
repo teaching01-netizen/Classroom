@@ -579,12 +579,16 @@ func (c *ClassroomClient) populateCourseName(detail *domain.CourseDetail) {
 			}
 		}
 	}
-	// Courses cache miss — fetch courses to populate the cache, then retry.
-	// This handles the case where a user navigates directly to a course
-	// detail page without first visiting the dashboard.
-	courses, err := c.GetCourses()
+	// Courses cache miss — fetch raw course list (without enrichment) to
+	// populate the cache, then retry the lookup. This handles the case
+	// where a user navigates directly to a course detail page without
+	// first visiting the dashboard.
+	courses, err := c.fetchCoursesRaw()
 	if err != nil {
 		return
+	}
+	if c.cache != nil {
+		c.cache.Set("courses", courses, 30*time.Second)
 	}
 	for _, course := range courses {
 		if course.CourseID == detail.CourseID {
