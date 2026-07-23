@@ -282,11 +282,7 @@ func TestCompute_429SingleRetry(t *testing.T) {
 
 	// sess-1: first call returns 429, second succeeds (simulating retry).
 	// sess-2: succeeds immediately.
-	callCount := 0
-	var mu sync.Mutex
-	originalSet := fetcher.set
 
-	_ = originalSet // we override via custom fetcher
 
 	fetcher.set("sess-2", makeDetail([]domain.StudentCheckin{
 		makeStudent("s1", "Alice", true),
@@ -335,8 +331,6 @@ func TestCompute_429SingleRetry(t *testing.T) {
 	assert.Equal(t, 0.5, bob.AttendanceRate)
 
 	// sess-1 should have been called twice (first 429, then success).
-	_ = mu
-	_ = callCount
 }
 
 func TestCompute_StudentNeverAppeared(t *testing.T) {
