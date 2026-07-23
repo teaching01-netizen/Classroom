@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,20 +9,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"qr-command-center/internal/cache"
-	"qr-command-center/internal/db"
 	"qr-command-center/internal/service"
 	"qr-command-center/internal/warwick"
 )
 
 func TestMetricsEndpoint_ReturnsPrometheusFormat(t *testing.T) {
-	c := cache.New()
-
 	rm := service.NewRoomManager(nil, nil)
-	cc := warwick.NewClassroomClient(nil, c)
+	cc := warwick.NewClassroomClient(nil)
 	ts := service.NewTeacherService(cc, &stubFetcher{})
 
-	router, rl := NewRouter(rm, ts, nil, c, nil, nil, RouterOptions{WSMaxConns: 100})
+	router, rl := NewRouter(rm, ts, nil, nil, RouterOptions{WSMaxConns: 100})
 	defer rl.Stop()
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -38,14 +33,12 @@ func TestMetricsEndpoint_ReturnsPrometheusFormat(t *testing.T) {
 		"/metrics must contain Prometheus metric families")
 }
 
-func TestMetricsEndpoint_ContainsOurMetrics(t *testing.T) {
-	c := cache.New()
-
+func TestMetricsEndpoint_ExcludesRemovedCacheMetrics(t *testing.T) {
 	rm := service.NewRoomManager(nil, nil)
-	cc := warwick.NewClassroomClient(nil, c)
+	cc := warwick.NewClassroomClient(nil)
 	ts := service.NewTeacherService(cc, &stubFetcher{})
 
-	router, rl := NewRouter(rm, ts, nil, c, nil, nil, RouterOptions{WSMaxConns: 100})
+	router, rl := NewRouter(rm, ts, nil, nil, RouterOptions{WSMaxConns: 100})
 	defer rl.Stop()
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -57,20 +50,7 @@ func TestMetricsEndpoint_ContainsOurMetrics(t *testing.T) {
 		"report_persist_dropped_total",
 		"report_persist_queue_depth",
 	} {
-		assert.Contains(t, body, metric,
-			"/metrics must expose custom metric: %s", metric)
+		assert.NotContains(t, body, metric,
+			"/metrics must not expose removed cache metric: %s", metric)
 	}
-}
-
-// stubMetricsReportRepo satisfies db.AttendanceReportRepository minimally.
-type stubMetricsReportRepo struct{}
-
-func (r *stubMetricsReportRepo) Upsert(_ context.Context, _ *db.AttendanceReport) error {
-	return nil
-}
-func (r *stubMetricsReportRepo) Get(_ context.Context, _ string) (*db.AttendanceReport, error) {
-	return nil, nil
-}
-func (r *stubMetricsReportRepo) ListRecent(_ context.Context, _ int) ([]*db.AttendanceReport, error) {
-	return nil, nil
 }

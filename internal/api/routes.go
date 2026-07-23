@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"qr-command-center/internal/cache"
 	"qr-command-center/internal/domain"
 	"qr-command-center/internal/middleware"
 	"qr-command-center/internal/service"
@@ -38,7 +37,7 @@ func (rl *RateLimiters) Stop() {
 	rl.room.Stop()
 }
 
-func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *service.FavouriteService, c *cache.Cache, refresher *service.DataRefresher, viewSvc *service.DashboardViewService, options RouterOptions) (*chi.Mux, *RateLimiters) {
+func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *service.FavouriteService, viewSvc *service.DashboardViewService, options RouterOptions) (*chi.Mux, *RateLimiters) {
 	rl := &RateLimiters{
 		teacher: middleware.NewIPRateLimiter(5, 10),  // teacher/courses browsing: 5 req/s, burst 10
 		toggle:  middleware.NewIPRateLimiter(2, 3),   // POST toggle-checkin: 2 req/s, burst 3
@@ -49,8 +48,8 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 	r.Use(chimiddleware.Logger)
 	r.Use(corsMiddleware(options.CORSOrigin))
 
-	r.Get("/api", healthHandler(c, refresher))
-	r.Get("/api/", healthHandler(c, refresher))
+	r.Get("/api", healthHandler())
+	r.Get("/api/", healthHandler())
 
 	// Prometheus metrics endpoint.
 	r.Handle("/metrics", promhttp.Handler())
@@ -185,28 +184,13 @@ func corsMiddleware(corsOrigin string) func(http.Handler) http.Handler {
 }
 
 type healthResponse struct {
-	Message string      `json:"message"`
-	Cache   healthCache `json:"cache"`
+	Message string `json:"message"`
 }
 
-type healthCache struct {
-	Size int  `json:"size"`
-	Warm bool `json:"warm"`
-}
-
-func healthHandler(c *cache.Cache, refresher *service.DataRefresher) http.HandlerFunc {
+func healthHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cacheSize := 0
-		cacheWarm := false
-		if c != nil {
-			cacheSize = c.Size()
-		}
-		if refresher != nil {
-			cacheWarm = refresher.IsWarm()
-		}
 		writeJSON(w, http.StatusOK, successResponse(healthResponse{
 			Message: "QR Command Center API is running!",
-			Cache:   healthCache{Size: cacheSize, Warm: cacheWarm},
 		}))
 	}
 }

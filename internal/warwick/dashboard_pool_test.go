@@ -10,15 +10,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"qr-command-center/internal/cache"
 )
 
 // TestGetCourseDetail_ConcurrentCalls_WithLimitedPool verifies that multiple
 // concurrent GetCourseDetail calls complete successfully even when the pool
 // has fewer sessions than concurrent callers (some will wait for a session).
 func TestGetCourseDetail_ConcurrentCalls_WithLimitedPool(t *testing.T) {
-	mc := cache.New()
 	loginServer := newDashboardLoginServer(t)
 
 	var mu sync.Mutex
@@ -52,7 +49,7 @@ func TestGetCourseDetail_ConcurrentCalls_WithLimitedPool(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	// Launch 3 concurrent GetCourseDetail calls — only 1 session available.
@@ -85,7 +82,6 @@ func TestGetCourseDetail_ConcurrentCalls_WithLimitedPool(t *testing.T) {
 // TestGetCourseDetail_PoolExhaustion_DoesNotPanic verifies the client
 // handles pool exhaustion gracefully without panicking.
 func TestGetCourseDetail_PoolExhaustion_DoesNotPanic(t *testing.T) {
-	mc := cache.New()
 	loginServer := newDashboardLoginServer(t)
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -104,7 +100,7 @@ func TestGetCourseDetail_PoolExhaustion_DoesNotPanic(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	// First call: should succeed (1 session available).

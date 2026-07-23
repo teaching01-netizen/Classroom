@@ -8,12 +8,6 @@ type QrClient interface {
 	FetchQRWithFreshAuthContext(ctx context.Context, classID string) (QrResponse, error)
 }
 
-// ReportPersistence abstracts the async report persistence so that
-// GetCourseAttendanceReport can enqueue without importing the service package.
-type ReportPersistence interface {
-	Enqueue(courseID string, report *CourseAttendanceReport)
-}
-
 // SessionFetcher abstracts the source of session student data for attendance reports.
 type SessionFetcher interface {
 	FetchSessionDetailLive(ctx context.Context, sessionID string) (*SessionDetail, error)

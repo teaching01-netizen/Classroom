@@ -19,8 +19,7 @@ type TeacherDataProvider interface {
 	GetSessionDetail(courseID, sessionID string) (*domain.SessionDetail, error)
 	FetchStudentProfiles() ([]domain.StudentProfile, error)
 	ToggleCheckin(courseID, sessionID, studentID string, checked bool) error
-	GetCourseAttendanceReport(ctx context.Context, courseID, courseName string, sessions []domain.SessionSummary, threshold int, source domain.SessionFetcher, persister domain.ReportPersistence) (*domain.CourseAttendanceReport, error)
-	MarkStaleReport(courseID string)
+	GetCourseAttendanceReport(ctx context.Context, courseID, courseName string, sessions []domain.SessionSummary, threshold int, source domain.SessionFetcher) (*domain.CourseAttendanceReport, error)
 	FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error)
 }
 
@@ -41,15 +40,6 @@ func NewTeacherService(dp TeacherDataProvider, defaultFetcher domain.SessionFetc
 		panic("TeacherService: defaultFetcher must not be nil")
 	}
 	return &TeacherService{dp: dp, defaultFetcher: defaultFetcher}
-}
-
-// liveDataSourceAdapter wraps TeacherDataProvider as a SessionFetcher for source=live.
-type liveDataSourceAdapter struct {
-	dp TeacherDataProvider
-}
-
-func (a *liveDataSourceAdapter) FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error) {
-	return a.dp.FetchSessionDetailLive(ctx, sessionID)
 }
 
 // GetCourses returns the list of courses from Warwick.
@@ -111,22 +101,11 @@ func (s *TeacherService) ToggleCheckin(ctx context.Context, courseID, sessionID,
 	return s.dp.ToggleCheckin(courseID, sessionID, studentID, checked)
 }
 
-// MarkReportStale marks the attendance report for a course as stale
-// (triggers async refresh on next access).
-func (s *TeacherService) MarkReportStale(courseID string) {
-	s.dp.MarkStaleReport(courseID)
-}
-
-// AttendanceReportResult holds the result of fetching an attendance report.
-type AttendanceReportResult struct {
-	Report *domain.CourseAttendanceReport
-}
-
-// GetAttendanceReport returns a cached or freshly computed attendance report.
+// GetAttendanceReport computes an attendance report from live session data.
 func (s *TeacherService) GetAttendanceReport(ctx context.Context, courseID string, threshold int, source string) (*domain.CourseAttendanceReport, error) {
 	fetcher := s.defaultFetcher
 	if source == "live" {
-		fetcher = &liveDataSourceAdapter{dp: s.dp}
+		fetcher = s.dp
 	}
 
 	// Fetch course detail for the session list.
@@ -135,7 +114,7 @@ func (s *TeacherService) GetAttendanceReport(ctx context.Context, courseID strin
 		return nil, err
 	}
 
-	report, err := s.dp.GetCourseAttendanceReport(ctx, courseID, courseDetail.Name, courseDetail.Sessions, threshold, fetcher, nil)
+	report, err := s.dp.GetCourseAttendanceReport(ctx, courseID, courseDetail.Name, courseDetail.Sessions, threshold, fetcher)
 	if err != nil {
 		return nil, err
 	}
@@ -167,23 +146,23 @@ func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []str
 		err    error
 	}
 
-	results := make(map[string]courseResult, len(courseIDs))
+	results := make([]courseResult, len(courseIDs))
 	sem := make(chan struct{}, 2)
 
-	for _, courseID := range courseIDs {
+	for index, courseID := range courseIDs {
 		sem <- struct{}{}
-		go func(cid string) {
+		go func(idx int, cid string) {
 			defer func() { <-sem }()
 
 			detail, err := s.dp.GetCourseDetail(cid)
 			if err != nil {
-				results[cid] = courseResult{err: err}
+				results[idx] = courseResult{err: err}
 				return
 			}
 
 			report := ComputeReport(ctx, s.defaultFetcher, detail, threshold)
-			results[cid] = courseResult{report: report}
-		}(courseID)
+			results[idx] = courseResult{report: report}
+		}(index, courseID)
 	}
 
 	// Drain semaphore.
@@ -196,9 +175,10 @@ func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []str
 	}
 
 	batchResult := &BatchAttendanceResult{
-		Courses: make(map[string]BatchCourseResult, len(results)),
+		Courses: make(map[string]BatchCourseResult, len(courseIDs)),
 	}
-	for cid, res := range results {
+	for index, cid := range courseIDs {
+		res := results[index]
 		batchResult.Courses[cid] = BatchCourseResult{Report: res.report, Err: res.err}
 	}
 

@@ -11,10 +11,8 @@ import (
 	"golang.org/x/time/rate"
 
 	"qr-command-center/internal/api"
-	"qr-command-center/internal/cache"
 	"qr-command-center/internal/db"
 	"qr-command-center/internal/domain"
-	"qr-command-center/internal/metrics"
 	"qr-command-center/internal/service"
 	"qr-command-center/internal/warwick"
 )
@@ -24,11 +22,10 @@ var _ service.TeacherDataProvider = (*warwick.ClassroomClient)(nil)
 
 // ServerDeps holds all wired-up components needed to run the server.
 type ServerDeps struct {
-	Router          *chi.Mux
-	RateLimiters    *api.RateLimiters
-	Background      BackgroundRuntime
-	ReportPersister *service.ReportPersister
-	DBPool          *pgxpool.Pool
+	Router       *chi.Mux
+	RateLimiters *api.RateLimiters
+	Background   BackgroundRuntime
+	DBPool       *pgxpool.Pool
 }
 
 // Wire creates all dependencies from config and returns a ready-to-use ServerDeps.
@@ -45,12 +42,8 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 		sessionPool = pool
 	}
 
-	sharedCache := cache.New()
-
 	var qrClient *warwick.WarwickQrClient
 	var classroomClient *warwick.ClassroomClient
-	var refresher *service.DataRefresher
-	var prewarmer *service.SessionPreWarmer
 	if sessionPool != nil {
 		qrClient = warwick.NewWarwickQrClientFromPool(sessionPool, warwick.TierQR)
 		qrClient.SetBaseURL(cfg.WarwickBaseURL)
@@ -88,79 +81,23 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 	viewRepo := db.NewPgDashboardViewRepository(dbPool)
 	viewSvc := service.NewDashboardViewService(viewRepo)
 
-	var sessionCheckinRepo db.SessionCheckinRepository
-	var reportPersister *service.ReportPersister
-
 	if sessionPool != nil {
-		sessionCheckinRepo = db.NewPgSessionCheckinRepository(dbPool)
-		classroomClient = warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher, sharedCache, sessionCheckinRepo)
+		classroomClient = warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher)
 		classroomClient.SetBaseURL(cfg.WarwickBaseURL)
 		classroomClient.SetTransport(sharedTransport)
-		classroomClient.SetAsyncRefreshEnabled(!cfg.ServerlessEnabled)
 		if cfg.UserID != "" {
 			classroomClient.SetUserID(cfg.UserID)
 		}
 		classroomClient.SetRateLimiter(rate.NewLimiter(rate.Limit(2), 2))
-		reportCache := cache.New()
-		classroomClient.SetReportCache(reportCache)
-		refresher = service.NewDataRefresher(classroomClient, cfg.CacheInterval)
-
-		// Pre-warm
-		if err := sessionPool.SetPreWarmSize(cfg.PreWarmSessions); err != nil {
-			slog.Warn("failed to configure prewarm pool size, prewarmer disabled", "error", err, "size", cfg.PreWarmSessions)
-		} else {
-			prewarmClient := warwick.NewClassroomClientFromPool(sessionPool, warwick.TierPreWarm, cache.New(), sessionCheckinRepo)
-			prewarmClient.SetBaseURL(cfg.WarwickBaseURL)
-			prewarmClient.SetTransport(sharedTransport)
-			if cfg.UserID != "" {
-				prewarmClient.SetUserID(cfg.UserID)
-			}
-			prewarmClient.SetRateLimiter(rate.NewLimiter(rate.Limit(2), 2))
-			prewarmer = service.NewSessionPreWarmer(prewarmClient, prewarmClient, sessionCheckinRepo, cfg.PreWarmInterval)
-		}
-
-		// Report persister
-		attendanceReportRepo := db.NewPgAttendanceReportRepository(dbPool)
-		reportPersister = service.NewReportPersister(attendanceReportRepo, reportCache, 100)
-		metrics.SetQueueDepthFunc(reportPersister.QueueDepth)
-		go func() {
-			reportPersister.Run(ctx)
-		}()
-
-		if !cfg.ServerlessEnabled {
-			// Preserve the existing warm startup for non-serverless deployments.
-			hydrator := service.NewReportHydrator(attendanceReportRepo, reportCache)
-			hydratorCtx, hydratorCancel := context.WithTimeout(ctx, 10*time.Second)
-			if err := hydrator.Hydrate(hydratorCtx, 200); err != nil {
-				slog.Warn("initial report hydration failed, will retry on demand", "error", err)
-			}
-			hydratorCancel()
-
-			warmupCtx, warmupCancel := context.WithTimeout(ctx, 10*time.Second)
-			if err := refresher.WarmOnce(warmupCtx); err != nil {
-				slog.Warn("initial cache warmup failed, will retry in background", "error", err)
-			}
-			warmupCancel()
-		}
 	}
 
 	var defaultFetcher domain.SessionFetcher
-	if sessionCheckinRepo != nil && sessionPool != nil {
-		dbFetcher := db.NewDBSessionFetcher(sessionCheckinRepo)
-		liveFetcher := warwick.NewLiveSessionDataSource(classroomClient)
-		defaultFetcher = warwick.NewFallbackSessionDataSource(dbFetcher, liveFetcher)
-	} else if classroomClient != nil {
-		defaultFetcher = warwick.NewLiveSessionDataSource(classroomClient)
+	if classroomClient != nil {
+		defaultFetcher = classroomClient
 	}
 	teacherService := service.NewTeacherService(classroomClient, defaultFetcher)
 
-	workers := make([]service.ManagedWorker, 0, 2)
-	if refresher != nil {
-		workers = append(workers, refresher)
-	}
-	if prewarmer != nil {
-		workers = append(workers, prewarmer)
-	}
+	workers := make([]service.ManagedWorker, 0)
 	idleHandlers := []service.IdleHandler{
 		service.IdleHandlerFunc(func(context.Context) error {
 			idleCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -183,7 +120,7 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 	if cfg.ServerlessEnabled {
 		activityRecorder = activityController
 	}
-	router, rateLimiters := api.NewRouter(rm, teacherService, favSvc, sharedCache, refresher, viewSvc, api.RouterOptions{
+	router, rateLimiters := api.NewRouter(rm, teacherService, favSvc, viewSvc, api.RouterOptions{
 		WSMaxConns:       cfg.WSMaxConns,
 		CORSOrigin:       cfg.CORSOrigin,
 		ActivityRecorder: activityRecorder,
@@ -196,7 +133,6 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 			Controller: activityController,
 			AlwaysOn:   workers,
 		},
-		ReportPersister: reportPersister,
-		DBPool:          dbPool,
+		DBPool: dbPool,
 	}, nil
 }

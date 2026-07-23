@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"qr-command-center/internal/cache"
 	"qr-command-center/internal/domain"
 	"qr-command-center/internal/service"
 	"qr-command-center/internal/warwick"
@@ -27,7 +26,7 @@ func (s *stubFetcher) FetchSessionDetailLive(_ context.Context, _ string) (*doma
 // newNonNilTeacherService returns a TeacherService that passes nil checks
 // but will fail on actual API calls (useful for body validation tests).
 func newNonNilTeacherService() *service.TeacherService {
-	cc := warwick.NewClassroomClient(nil, cache.New())
+	cc := warwick.NewClassroomClient(nil)
 	return service.NewTeacherService(cc, &stubFetcher{})
 }
 

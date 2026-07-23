@@ -13,36 +13,15 @@ import (
 	"qr-command-center/internal/domain"
 )
 
-// GetCourses fetches the list of courses from Warwick.
-// Uses the session pool if configured, otherwise falls back to WarwickAuth.
-// After fetching raw courses, it enriches them with session counts from course details
-// before caching. The enrichment runs concurrently with bounded parallelism.
+// GetCourses fetches the list of courses from Warwick and enriches it with
+// request-local session counts. No upstream-owned data is retained locally.
 func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
-	if c.cache != nil {
-		if cached, ok := c.cache.Get("courses"); ok {
-			return cached.([]domain.CourseSummary), nil
-		}
-
-		// Stale fallback + async refresh (deduplicated via tryRefresh)
-		// Only spawn refresh when pool is available — refreshCoursesCache calls
-		// getCoursesWithPool which would nil-deref on pool-less clients.
-		if stale, ok := c.cache.GetStale("courses"); ok {
-			if c.pool != nil && !c.disableAsyncRefresh {
-				c.tryRefresh("courses", c.refreshCoursesCache)
-				return stale.([]domain.CourseSummary), nil
-			}
-		}
-	}
-
 	if c.pool != nil {
 		courses, err := c.getCoursesWithPool()
 		if err != nil {
 			return nil, err
 		}
 		c.enrichCourses(courses)
-		if c.cache != nil {
-			c.cache.Set("courses", courses, 30*time.Second)
-		}
 		return courses, nil
 	}
 
@@ -56,9 +35,6 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 		courses, err := c.fetchCourses(cookie)
 		if err == nil {
 			c.enrichCourses(courses)
-			if c.cache != nil {
-				c.cache.Set("courses", courses, 30*time.Second)
-			}
 			return courses, nil
 		}
 
@@ -77,7 +53,8 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 }
 
 // enrichCourses concurrently fetches course details to populate session counts.
-// Uses GetCourseDetail which handles its own caching — no extra API calls on warm cache.
+// The source course name is passed into the request-local detail fetch so the
+// detail fetch does not recursively request the full course list.
 func (c *ClassroomClient) enrichCourses(courses []domain.CourseSummary) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 2) // match teacher tier capacity (default 2 sessions)
@@ -93,7 +70,7 @@ func (c *ClassroomClient) enrichCourses(courses []domain.CourseSummary) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			detail, err := c.GetCourseDetail(courses[idx].CourseID)
+			detail, err := c.getCourseDetailLive(courses[idx].CourseID, courses[idx].Name)
 			if err != nil {
 				slog.Debug("enrich_course_detail_failed",
 					"course_id", courses[idx].CourseID,
@@ -155,9 +132,8 @@ func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
 	return nil, lastErr
 }
 
-// fetchCoursesRaw fetches the course list from Warwick without enrichment.
-// This is used by populateCourseName to avoid circular dependencies
-// (GetCourses -> enrichCourses -> GetCourseDetail -> populateCourseName -> GetCourses).
+// fetchCoursesRaw fetches the course list from Warwick without enrichment for
+// request-local name lookup during a direct course-detail request.
 func (c *ClassroomClient) fetchCoursesRaw() ([]domain.CourseSummary, error) {
 	if c.pool != nil {
 		return c.getCoursesWithPool()
@@ -183,23 +159,6 @@ func (c *ClassroomClient) fetchCoursesRaw() ([]domain.CourseSummary, error) {
 		return nil, err
 	}
 	return nil, lastErr
-}
-
-func (c *ClassroomClient) refreshCoursesCache() {
-	courses, err := c.getCoursesWithPool()
-	if err != nil {
-		// Pool-level issues (capacity/auth) at Warn; transient fetch errors at Debug
-		if errors.Is(err, domain.ErrAuthConflict) || errors.Is(err, domain.ErrPoolExhausted) || errors.Is(err, domain.ErrAuthExpired) {
-			slog.Warn("cache_refresh_courses_pool_failed", "error", err)
-		} else {
-			slog.Debug("cache_refresh_courses_fetch_failed", "error", err)
-		}
-		return
-	}
-	c.enrichCourses(courses)
-	if c.cache != nil {
-		c.cache.Set("courses", courses, 30*time.Second)
-	}
 }
 
 func (c *ClassroomClient) fetchCourses(cookie string) ([]domain.CourseSummary, error) {

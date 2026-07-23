@@ -67,15 +67,6 @@ func main() {
 		slog.Error("Server shutdown error", "error", err)
 	}
 
-	// Flush remaining reports to DB on shutdown.
-	if deps.ReportPersister != nil {
-		flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer flushCancel()
-		if err := deps.ReportPersister.Flush(flushCtx); err != nil {
-			slog.Warn("report persister flush timeout", "error", err)
-		}
-	}
-
 	select {
 	case <-backgroundDone:
 	case <-time.After(12 * time.Second):

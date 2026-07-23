@@ -118,7 +118,6 @@ func toggleCheckinHandler(ts *service.TeacherService) http.HandlerFunc {
 			NewCount:  0,
 		}))
 
-		ts.MarkReportStale(courseID)
 	}
 }
 

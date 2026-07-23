@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"qr-command-center/internal/cache"
 	"qr-command-center/internal/service"
 )
 
@@ -19,7 +18,7 @@ type activityCounter struct {
 func TestRouter_AdmittedRoomRequestsRecordActivityAfterRateLimit(t *testing.T) {
 	counter := &activityCounter{}
 	roomManager := service.NewRoomManager(nil, nil)
-	router, rateLimiters := NewRouter(roomManager, nil, nil, cache.New(), nil, nil, RouterOptions{
+	router, rateLimiters := NewRouter(roomManager, nil, nil, nil, RouterOptions{
 		WSMaxConns:       100,
 		ActivityRecorder: counter,
 	})

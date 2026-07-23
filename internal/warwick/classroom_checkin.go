@@ -1,15 +1,12 @@
 package warwick
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"qr-command-center/internal/domain"
 )
@@ -28,11 +25,6 @@ func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, c
 		}
 		err = c.doToggleCheckin(cookie, sessionID, studentID, checked)
 		if err == nil {
-			if c.cache != nil {
-				c.cache.Invalidate("course:" + courseID)
-				c.cache.Invalidate("courses")
-				c.cache.Invalidate("session:" + sessionID)
-			}
 			return nil
 		}
 		lastErr = err
@@ -63,23 +55,6 @@ func (c *ClassroomClient) toggleCheckinWithPool(courseID, sessionID, studentID s
 	for attempt := 0; attempt < 2; attempt++ {
 		err = c.doToggleCheckin(ref.Cookie, sessionID, studentID, checked)
 		if err == nil {
-			// On success: persist toggle to DB if DB-backed cache is enabled
-			if c.checkinRepo != nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				// Name intentionally empty — UpsertStudent subquery/COALESCE preserves existing student_name
-				if dbErr := c.checkinRepo.UpsertStudent(ctx, sessionID, domain.StudentCheckin{
-					StudentID: studentID, CheckedIn: checked,
-				}); dbErr != nil {
-					slog.Error("failed to persist toggle to DB", "student_id", studentID, "error", dbErr)
-				}
-				cancel()
-			}
-
-			if c.cache != nil {
-				c.cache.Invalidate("course:" + courseID)
-				c.cache.Invalidate("courses")
-				c.cache.Invalidate("session:" + sessionID)
-			}
 			return nil
 		}
 		lastErr = err

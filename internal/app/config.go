@@ -23,11 +23,8 @@ type Config struct {
 	TeacherSessions     int
 	InteractiveSessions int
 	ConnsPerHost        int
-	PreWarmSessions     int
 
 	// --- Timing ---
-	CacheInterval       time.Duration
-	PreWarmInterval     time.Duration
 	ServerlessEnabled   bool
 	ServerlessIdleGrace time.Duration
 
@@ -61,9 +58,6 @@ func LoadConfig() (Config, error) {
 		TeacherSessions:     getEnvInt("WARWICK_TEACHER_SESSIONS", 2),
 		InteractiveSessions: getEnvInt("WARWICK_INTERACTIVE_SESSIONS", 2),
 		ConnsPerHost:        getEnvInt("WARWICK_CONNS_PER_HOST", 50),
-		PreWarmSessions:     getEnvInt("WARWICK_PREWARM_SESSIONS", 1),
-		CacheInterval:       getEnvDuration("WARWICK_CACHE_INTERVAL", 30*time.Second),
-		PreWarmInterval:     getEnvDuration("WARWICK_PREWARM_INTERVAL", 20*time.Second),
 		ServerlessEnabled:   serverlessEnabled,
 		ServerlessIdleGrace: serverlessIdleGrace,
 		DatabaseURL:         os.Getenv("DATABASE_URL"),
@@ -148,21 +142,4 @@ func getEnvStr(key string, defaultVal string) string {
 		return v
 	}
 	return defaultVal
-}
-
-func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
-	val := os.Getenv(key)
-	if val == "" {
-		return defaultVal
-	}
-	d, err := time.ParseDuration(val)
-	if err != nil {
-		slog.Warn("invalid duration for env var", "key", key, "value", val, "error", err)
-		return defaultVal
-	}
-	if d <= 0 {
-		slog.Warn("non-positive duration for env var, using default", "key", key, "value", val, "default", defaultVal)
-		return defaultVal
-	}
-	return d
 }

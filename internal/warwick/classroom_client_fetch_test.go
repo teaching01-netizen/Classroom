@@ -8,17 +8,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"qr-command-center/internal/cache"
 	"qr-command-center/internal/domain"
 )
 
 func TestFetchCourses_Success(t *testing.T) {
-	mc := cache.New()
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.Contains(r.URL.Path, "ClassAttendanceSearch") {
@@ -42,7 +39,7 @@ func TestFetchCourses_Success(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	courses, err := client.GetCourses()
@@ -58,7 +55,6 @@ func TestFetchCourses_Success(t *testing.T) {
 }
 
 func TestFetchCourses_EmptyData(t *testing.T) {
-	mc := cache.New()
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -75,7 +71,7 @@ func TestFetchCourses_EmptyData(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	courses, err := client.GetCourses()
@@ -84,7 +80,6 @@ func TestFetchCourses_EmptyData(t *testing.T) {
 }
 
 func TestFetchCourses_WarwickReturnsLoginPage(t *testing.T) {
-	mc := cache.New()
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -101,7 +96,7 @@ func TestFetchCourses_WarwickReturnsLoginPage(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	_, err = client.GetCourses()
@@ -109,77 +104,7 @@ func TestFetchCourses_WarwickReturnsLoginPage(t *testing.T) {
 	assert.ErrorIs(t, err, domain.ErrAuthExpired)
 }
 
-func TestFetchCourses_CacheHitSkipsWarwick(t *testing.T) {
-	mc := cache.New()
-
-	mc.Set("courses", []domain.CourseSummary{
-		{CourseID: "cached-1", Name: "Cached Course"},
-	}, 5*time.Minute)
-
-	apiCalls := 0
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiCalls++
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(apiServer.Close)
-
-	loginServer := newTestLoginServer(t)
-	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
-	require.NoError(t, err)
-
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
-	client.baseURL = apiServer.URL
-
-	courses, err := client.GetCourses()
-	require.NoError(t, err)
-	require.Len(t, courses, 1)
-	assert.Equal(t, "Cached Course", courses[0].Name)
-	assert.Equal(t, 0, apiCalls, "should not call Warwick when cache is warm")
-}
-
-func TestFetchCourses_StaleCacheReturnsStaleAndRefreshes(t *testing.T) {
-	mc := cache.New()
-
-	mc.Set("courses", []domain.CourseSummary{
-		{CourseID: "stale-1", Name: "Stale Course"},
-	}, -1*time.Second)
-
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{
-			"draw": 1,
-			"recordsTotal": 1,
-			"recordsFiltered": 1,
-			"data": [
-				{"ID": "fresh-1", "CourseName": "Fresh Course", "Cycle": "", "Enrolled": 10}
-			]
-		}`))
-	}))
-	t.Cleanup(apiServer.Close)
-
-	loginServer := newTestLoginServer(t)
-	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
-	require.NoError(t, err)
-
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
-	client.baseURL = apiServer.URL
-
-	courses, err := client.GetCourses()
-	require.NoError(t, err)
-	require.Len(t, courses, 1)
-	assert.Equal(t, "Stale Course", courses[0].Name)
-
-	time.Sleep(200 * time.Millisecond)
-
-	cached, ok := mc.Get("courses")
-	require.True(t, ok)
-	freshCourses := cached.([]domain.CourseSummary)
-	require.Len(t, freshCourses, 1)
-	assert.Equal(t, "Fresh Course", freshCourses[0].Name)
-}
-
 func TestFetchCourses_EnrichmentPopulatesSessionCounts(t *testing.T) {
-	mc := cache.New()
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -200,7 +125,7 @@ func TestFetchCourses_EnrichmentPopulatesSessionCounts(t *testing.T) {
 				"recordsTotal": 1,
 				"recordsFiltered": 1,
 				"data": [
-					{"ID": "c1", "CourseName": "Math 101", "Cycle": "", "Enrolled": 30, "StartDate": "2026-05-27T09:00:00", "EndDate": "2026-07-03T17:00:00"}
+					{"ID": "c1", "CourseName": "Math 101", "Cycle": "", "Enrolled": 30, "StartDate": "2020-05-27T09:00:00", "EndDate": "2099-07-03T17:00:00"}
 				]
 			}`))
 		}
@@ -211,7 +136,7 @@ func TestFetchCourses_EnrichmentPopulatesSessionCounts(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	courses, err := client.GetCourses()
@@ -222,7 +147,6 @@ func TestFetchCourses_EnrichmentPopulatesSessionCounts(t *testing.T) {
 }
 
 func TestFetchCourses_RecordsTotalPositiveButDataEmpty(t *testing.T) {
-	mc := cache.New()
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -239,7 +163,7 @@ func TestFetchCourses_RecordsTotalPositiveButDataEmpty(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	courses, err := client.GetCourses()
@@ -248,7 +172,6 @@ func TestFetchCourses_RecordsTotalPositiveButDataEmpty(t *testing.T) {
 }
 
 func TestFetchCourses_NilDataField(t *testing.T) {
-	mc := cache.New()
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -264,7 +187,7 @@ func TestFetchCourses_NilDataField(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	courses, err := client.GetCourses()
@@ -273,7 +196,6 @@ func TestFetchCourses_NilDataField(t *testing.T) {
 }
 
 func TestGetCourses_AlwaysFetchesUpstream(t *testing.T) {
-	mc := cache.New()
 	apiCalls := 0
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiCalls++
@@ -289,8 +211,9 @@ func TestGetCourses_AlwaysFetchesUpstream(t *testing.T) {
 	loginServer := newTestLoginServer(t)
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
+	client.SetUserID("test-user")
 
 	first, err := client.GetCourses()
 	require.NoError(t, err)
@@ -303,14 +226,16 @@ func TestGetCourses_AlwaysFetchesUpstream(t *testing.T) {
 }
 
 func TestGetCourseDetail_AlwaysFetchesUpstream(t *testing.T) {
-	mc := cache.New()
-	mc.Set("courses", []domain.CourseSummary{{CourseID: "c1", Name: "Math"}}, time.Hour)
-	apiCalls := 0
+	detailCalls := 0
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiCalls++
 		w.Header().Set("Content-Type", "application/json")
+		if !strings.Contains(r.URL.Path, "ClassAttendanceDetailSearch") {
+			_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":1,"recordsFiltered":1,"data":[{"ID":"c1","CourseName":"Math"}]}`))
+			return
+		}
+		detailCalls++
 		name := "Week 1"
-		if apiCalls == 2 {
+		if detailCalls == 2 {
 			name = "Week 2"
 		}
 		_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":1,"recordsFiltered":1,"data":[{"dID":"s1","dName":"` + name + `","dStatus":"Finished"}]}`))
@@ -320,7 +245,7 @@ func TestGetCourseDetail_AlwaysFetchesUpstream(t *testing.T) {
 	loginServer := newTestLoginServer(t)
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	first, err := client.GetCourseDetail("c1")
@@ -330,11 +255,10 @@ func TestGetCourseDetail_AlwaysFetchesUpstream(t *testing.T) {
 
 	require.Equal(t, "Week 1", first.Sessions[0].Name)
 	require.Equal(t, "Week 2", second.Sessions[0].Name)
-	require.Equal(t, 2, apiCalls)
+	require.Equal(t, 2, detailCalls)
 }
 
 func TestGetSessionDetail_AlwaysFetchesUpstream(t *testing.T) {
-	mc := cache.New()
 	apiCalls := 0
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiCalls++
@@ -350,7 +274,7 @@ func TestGetSessionDetail_AlwaysFetchesUpstream(t *testing.T) {
 	loginServer := newTestLoginServer(t)
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	first, err := client.GetSessionDetail("c1", "s1")
@@ -364,7 +288,6 @@ func TestGetSessionDetail_AlwaysFetchesUpstream(t *testing.T) {
 }
 
 func TestLiveReadError_DoesNotReturnPreviousPayload(t *testing.T) {
-	mc := cache.New()
 	apiCalls := 0
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiCalls++
@@ -380,8 +303,9 @@ func TestLiveReadError_DoesNotReturnPreviousPayload(t *testing.T) {
 	loginServer := newTestLoginServer(t)
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
+	client.SetUserID("test-user")
 
 	_, err = client.GetCourses()
 	require.NoError(t, err)
@@ -392,7 +316,6 @@ func TestLiveReadError_DoesNotReturnPreviousPayload(t *testing.T) {
 }
 
 func TestFetchCourses_CourseStatusComputation(t *testing.T) {
-	mc := cache.New()
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -413,7 +336,7 @@ func TestFetchCourses_CourseStatusComputation(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	courses, err := client.GetCourses()
@@ -448,7 +371,6 @@ func TestSetUserID(t *testing.T) {
 }
 
 func TestFetchCourses_UsesConfiguredUserID(t *testing.T) {
-	mc := cache.New()
 
 	var capturedBody string
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -473,7 +395,7 @@ func TestFetchCourses_UsesConfiguredUserID(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 	client.SetUserID("my-custom-user-id")
 
@@ -488,7 +410,6 @@ func TestFetchCourses_UsesConfiguredUserID(t *testing.T) {
 }
 
 func TestFetchCourses_UsesDefaultUserIDWhenNotConfigured(t *testing.T) {
-	mc := cache.New()
 
 	var capturedBody string
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -513,7 +434,7 @@ func TestFetchCourses_UsesDefaultUserIDWhenNotConfigured(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	_, err = client.GetCourses()
@@ -526,7 +447,6 @@ func TestFetchCourses_UsesDefaultUserIDWhenNotConfigured(t *testing.T) {
 }
 
 func TestFetchStudentProfiles_Success(t *testing.T) {
-	mc := cache.New()
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.Contains(r.URL.Path, "UserGroupSearch") {
@@ -550,7 +470,7 @@ func TestFetchStudentProfiles_Success(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	profiles, err := client.FetchStudentProfiles()
@@ -565,8 +485,6 @@ func TestFetchStudentProfiles_Success(t *testing.T) {
 }
 
 func TestFetchStudentProfiles_Empty(t *testing.T) {
-	mc := cache.New()
-
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"draw":1,"recordsTotal":0,"recordsFiltered":0,"data":[]}`))
@@ -577,7 +495,7 @@ func TestFetchStudentProfiles_Empty(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	profiles, err := client.FetchStudentProfiles()
@@ -586,8 +504,6 @@ func TestFetchStudentProfiles_Empty(t *testing.T) {
 }
 
 func TestFetchStudentProfiles_Pagination(t *testing.T) {
-	mc := cache.New()
-
 	var requestCount int
 	var requestedStarts []int
 
@@ -643,7 +559,7 @@ func TestFetchStudentProfiles_Pagination(t *testing.T) {
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
 
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	profiles, err := client.FetchStudentProfiles()
@@ -659,7 +575,6 @@ func TestFetchStudentProfiles_Pagination(t *testing.T) {
 }
 
 func TestFetchStudentProfiles_AlwaysFetchesUpstream(t *testing.T) {
-	mc := cache.New()
 	apiCalls := 0
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiCalls++
@@ -675,7 +590,7 @@ func TestFetchStudentProfiles_AlwaysFetchesUpstream(t *testing.T) {
 	loginServer := newTestLoginServer(t)
 	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
 	require.NoError(t, err)
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
 	first, err := client.FetchStudentProfiles()
@@ -688,112 +603,12 @@ func TestFetchStudentProfiles_AlwaysFetchesUpstream(t *testing.T) {
 	require.Equal(t, 2, apiCalls)
 }
 
-func TestFetchStudentProfiles_CacheHitSkipsWarwick(t *testing.T) {
-	mc := cache.New()
-
-	mc.Set("student_profiles", []domain.StudentProfile{
-		{StudentID: "W001", StudentGuid: "guid-1", FullName: "Cached Student", School: "Science"},
-	}, 5*time.Minute)
-
-	apiCalls := 0
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiCalls++
-		w.WriteHeader(http.StatusOK)
+func newTestLoginServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "ASP.NET_SessionId=testcookie; path=/; HttpOnly")
+		w.WriteHeader(http.StatusFound)
 	}))
-	t.Cleanup(apiServer.Close)
-
-	loginServer := newTestLoginServer(t)
-	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
-	require.NoError(t, err)
-
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
-	client.baseURL = apiServer.URL
-
-	profiles, err := client.FetchStudentProfiles()
-	require.NoError(t, err)
-	require.Len(t, profiles, 1)
-	assert.Equal(t, "W001", profiles[0].StudentID)
-	assert.Equal(t, 0, apiCalls, "should not call Warwick when cache is warm")
-}
-
-func TestFetchStudentProfiles_StaleCacheReturnsStaleAndRefreshes(t *testing.T) {
-	mc := cache.New()
-
-	mc.Set("student_profiles", []domain.StudentProfile{
-		{StudentID: "W001", StudentGuid: "guid-1", FullName: "Stale Profile", School: "Science"},
-	}, -1*time.Second)
-
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{
-			"draw": 1,
-			"recordsTotal": 1,
-			"recordsFiltered": 1,
-			"data": [
-				{"StudentID": "W999", "StudentGuid": "guid-999", "FullName": "Fresh Profile", "School": "Math", "MobilePhone": "", "ParentPhone": "", "IsActive": true, "TerminateStatus": "", "ExpireDateStr": ""}
-			]
-		}`))
-	}))
-	t.Cleanup(apiServer.Close)
-
-	loginServer := newTestLoginServer(t)
-	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
-	require.NoError(t, err)
-
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
-	client.baseURL = apiServer.URL
-
-	profiles, err := client.FetchStudentProfiles()
-	require.NoError(t, err)
-	require.Len(t, profiles, 1)
-	assert.Equal(t, "W001", profiles[0].StudentID, "should return stale data immediately")
-
-	time.Sleep(200 * time.Millisecond)
-
-	cached, ok := mc.Get("student_profiles")
-	require.True(t, ok)
-	freshProfiles := cached.([]domain.StudentProfile)
-	require.Len(t, freshProfiles, 1)
-	assert.Equal(t, "W999", freshProfiles[0].StudentID, "cache should be refreshed with fresh data")
-}
-
-func TestFetchStudentProfiles_CachesAfterFirstFetch(t *testing.T) {
-	mc := cache.New()
-
-	apiCalls := 0
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiCalls++
-		if !strings.Contains(r.URL.Path, "UserGroupSearch") {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{
-			"draw": 1,
-			"recordsTotal": 2,
-			"recordsFiltered": 2,
-			"data": [
-				{"StudentID": "STU001", "StudentGuid": "guid-a", "FullName": "Alice", "School": "Science", "MobilePhone": "", "ParentPhone": "", "IsActive": true, "TerminateStatus": "", "ExpireDateStr": ""},
-				{"StudentID": "STU002", "StudentGuid": "guid-b", "FullName": "Bob", "School": "Math", "MobilePhone": "", "ParentPhone": "", "IsActive": true, "TerminateStatus": "", "ExpireDateStr": ""}
-			]
-		}`))
-	}))
-	t.Cleanup(apiServer.Close)
-
-	loginServer := newTestLoginServer(t)
-	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
-	require.NoError(t, err)
-
-	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
-	client.baseURL = apiServer.URL
-
-	profiles, err := client.FetchStudentProfiles()
-	require.NoError(t, err)
-	require.Len(t, profiles, 2)
-	assert.Equal(t, 1, apiCalls, "first call should hit Warwick")
-
-	profiles, err = client.FetchStudentProfiles()
-	require.NoError(t, err)
-	require.Len(t, profiles, 2)
-	assert.Equal(t, 1, apiCalls, "second call should use cache, not hit Warwick")
+	t.Cleanup(server.Close)
+	return server
 }

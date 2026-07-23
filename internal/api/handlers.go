@@ -13,6 +13,9 @@ type ApiResponse struct {
 
 func writeJSON(w http.ResponseWriter, status int, resp ApiResponse) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(resp)
 }
