@@ -201,6 +201,12 @@ func ComputeCourseAttendanceReport(
 		})
 	}
 
+	// Build student index map for O(1) per-session cell population.
+	studentIndex := make(map[string]int, len(students))
+	for i := range students {
+		studentIndex[students[i].StudentID] = i
+	}
+
 	for si := range students {
 		cells := make([]domain.SessionCell, len(sessions))
 		for j, sess := range sessions {
@@ -218,12 +224,9 @@ func ComputeCourseAttendanceReport(
 	for _, r := range results {
 		if r.state == "ok" && r.detail != nil {
 			for _, s := range r.detail.Students {
-				for si := range students {
-					if students[si].StudentID == s.StudentID {
-						students[si].PerSession[r.index].CheckedIn = s.CheckedIn
-						students[si].PerSession[r.index].Status = "ok"
-						break
-					}
+				if idx, ok := studentIndex[s.StudentID]; ok {
+					students[idx].PerSession[r.index].CheckedIn = s.CheckedIn
+					students[idx].PerSession[r.index].Status = "ok"
 				}
 			}
 		}
