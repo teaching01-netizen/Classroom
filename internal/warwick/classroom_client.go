@@ -1,6 +1,7 @@
 package warwick
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,9 +80,9 @@ func (c *ClassroomClient) Auth() *WarwickAuth {
 	return c.auth
 }
 
-func (c *ClassroomClient) doRequest(method, path, cookie string, body io.Reader) (*http.Response, error) {
+func (c *ClassroomClient) doRequest(ctx context.Context, method, path, cookie string, body io.Reader) (*http.Response, error) {
 	u := c.baseURL + path
-	req, err := http.NewRequest(method, u, body)
+	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
 		return nil, err
 	}

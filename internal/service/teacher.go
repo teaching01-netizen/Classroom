@@ -14,11 +14,12 @@ import (
 // concrete *warwick.ClassroomClient so TeacherService can be unit-tested
 // without real Warwick infrastructure.
 type TeacherDataProvider interface {
-	GetCourses() ([]domain.CourseSummary, error)
-	GetCourseDetail(courseID string) (*domain.CourseDetail, error)
-	GetSessionDetail(courseID, sessionID string) (*domain.SessionDetail, error)
-	FetchStudentProfiles() ([]domain.StudentProfile, error)
-	ToggleCheckin(courseID, sessionID, studentID string, checked bool) error
+	GetCourses(ctx context.Context) ([]domain.CourseSummary, error)
+	GetCourseDetail(ctx context.Context, courseID string) (*domain.CourseDetail, error)
+	GetCourseDetailWithName(ctx context.Context, courseID, courseName string) (*domain.CourseDetail, error)
+	GetSessionDetail(ctx context.Context, courseID, sessionID string) (*domain.SessionDetail, error)
+	FetchStudentProfiles(ctx context.Context) ([]domain.StudentProfile, error)
+	ToggleCheckin(ctx context.Context, courseID, sessionID, studentID string, checked bool) error
 	GetCourseAttendanceReport(ctx context.Context, courseID, courseName string, sessions []domain.SessionSummary, threshold int, source domain.SessionFetcher) (*domain.CourseAttendanceReport, error)
 	FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error)
 }
@@ -44,12 +45,12 @@ func NewTeacherService(dp TeacherDataProvider, defaultFetcher domain.SessionFetc
 
 // GetCourses returns the list of courses from Warwick.
 func (s *TeacherService) GetCourses(ctx context.Context) ([]domain.CourseSummary, error) {
-	return s.dp.GetCourses()
+	return s.dp.GetCourses(ctx)
 }
 
 // GetCourseDetail returns the sessions for a specific course.
 func (s *TeacherService) GetCourseDetail(ctx context.Context, courseID string) (*domain.CourseDetail, error) {
-	return s.dp.GetCourseDetail(courseID)
+	return s.dp.GetCourseDetail(ctx, courseID)
 }
 
 // SessionDetailResult holds the result of fetching session detail with profiles.
@@ -73,11 +74,11 @@ func (s *TeacherService) GetSessionDetail(ctx context.Context, courseID, session
 	profileCh := make(chan profileResult, 1)
 
 	go func() {
-		d, err := s.dp.GetSessionDetail(courseID, sessionID)
+		d, err := s.dp.GetSessionDetail(ctx, courseID, sessionID)
 		detailCh <- detailResult{detail: d, err: err}
 	}()
 	go func() {
-		p, _ := s.dp.FetchStudentProfiles()
+		p, _ := s.dp.FetchStudentProfiles(ctx)
 		profileCh <- profileResult{profiles: p}
 	}()
 
@@ -98,7 +99,7 @@ func (s *TeacherService) GetSessionDetail(ctx context.Context, courseID, session
 
 // ToggleCheckin toggles a student's check-in status for a session.
 func (s *TeacherService) ToggleCheckin(ctx context.Context, courseID, sessionID, studentID string, checked bool) error {
-	return s.dp.ToggleCheckin(courseID, sessionID, studentID, checked)
+	return s.dp.ToggleCheckin(ctx, courseID, sessionID, studentID, checked)
 }
 
 // GetAttendanceReport computes an attendance report from live session data.
@@ -109,7 +110,7 @@ func (s *TeacherService) GetAttendanceReport(ctx context.Context, courseID strin
 	}
 
 	// Fetch course detail for the session list.
-	courseDetail, err := s.dp.GetCourseDetail(courseID)
+	courseDetail, err := s.dp.GetCourseDetail(ctx, courseID)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +121,7 @@ func (s *TeacherService) GetAttendanceReport(ctx context.Context, courseID strin
 	}
 
 	// Enrich StudentID with Warwick wcode.
-	if profiles, profErr := s.dp.FetchStudentProfiles(); profErr == nil {
+	if profiles, profErr := s.dp.FetchStudentProfiles(ctx); profErr == nil {
 		domain.EnrichStudentIDWithWCode(report.Students, profiles)
 	}
 
@@ -154,7 +155,7 @@ func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []str
 		go func(idx int, cid string) {
 			defer func() { <-sem }()
 
-			detail, err := s.dp.GetCourseDetail(cid)
+			detail, err := s.dp.GetCourseDetail(ctx, cid)
 			if err != nil {
 				results[idx] = courseResult{err: err}
 				return
@@ -202,7 +203,7 @@ func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain
 	threshold := filters.Threshold
 
 	// Fetch all courses.
-	allCourses, err := s.dp.GetCourses()
+	allCourses, err := s.dp.GetCourses(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +246,7 @@ func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain
 			var lastErr error
 			for attempt := 0; attempt < 3; attempt++ {
 				var err error
-				detail, err = s.dp.GetCourseDetail(c.CourseID)
+				detail, err = s.dp.GetCourseDetail(ctx, c.CourseID)
 				if err == nil {
 					lastErr = nil
 					break
@@ -285,5 +286,5 @@ func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain
 	}
 
 	// Aggregate across courses.
-	return s.aggregateDashboard(results, courses, threshold, filters.WCodes)
+	return s.aggregateDashboard(ctx, results, courses, threshold, filters.WCodes)
 }

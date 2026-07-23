@@ -1,6 +1,7 @@
 package warwick
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,13 +16,13 @@ import (
 
 // GetCourses fetches the list of courses from Warwick and enriches it with
 // request-local session counts. No upstream-owned data is retained locally.
-func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
+func (c *ClassroomClient) GetCourses(ctx context.Context) ([]domain.CourseSummary, error) {
 	if c.pool != nil {
-		courses, err := c.getCoursesWithPool()
+		courses, err := c.getCoursesWithPool(ctx)
 		if err != nil {
 			return nil, err
 		}
-		c.enrichCourses(courses)
+		c.enrichCourses(ctx, courses)
 		return courses, nil
 	}
 
@@ -32,9 +33,9 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 			return nil, domain.ErrAuthExpired
 		}
 
-		courses, err := c.fetchCourses(cookie)
+		courses, err := c.fetchCourses(ctx, cookie)
 		if err == nil {
-			c.enrichCourses(courses)
+			c.enrichCourses(ctx, courses)
 			return courses, nil
 		}
 
@@ -55,7 +56,7 @@ func (c *ClassroomClient) GetCourses() ([]domain.CourseSummary, error) {
 // enrichCourses concurrently fetches course details to populate session counts.
 // The source course name is passed into the request-local detail fetch so the
 // detail fetch does not recursively request the full course list.
-func (c *ClassroomClient) enrichCourses(courses []domain.CourseSummary) {
+func (c *ClassroomClient) enrichCourses(ctx context.Context, courses []domain.CourseSummary) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 2) // match teacher tier capacity (default 2 sessions)
 	var mu sync.Mutex
@@ -70,7 +71,7 @@ func (c *ClassroomClient) enrichCourses(courses []domain.CourseSummary) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			detail, err := c.getCourseDetailLive(courses[idx].CourseID, courses[idx].Name)
+			detail, err := c.getCourseDetailLive(ctx, courses[idx].CourseID, courses[idx].Name)
 			if err != nil {
 				slog.Debug("enrich_course_detail_failed",
 					"course_id", courses[idx].CourseID,
@@ -87,14 +88,17 @@ func (c *ClassroomClient) enrichCourses(courses []domain.CourseSummary) {
 	wg.Wait()
 }
 
-func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
-	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
+func (c *ClassroomClient) getCoursesWithPool(ctx context.Context) ([]domain.CourseSummary, error) {
+	ref, err := c.pool.AcquireWithTimeoutContext(ctx, c.tier, 5*time.Second)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return nil, domain.ErrAuthConflict
 		}
 		if errors.Is(err, ErrNoAvailableSessions) {
 			return nil, domain.ErrPoolExhausted
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 		return nil, domain.ErrAuthExpired
 	}
@@ -109,7 +113,7 @@ func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		courses, err := c.fetchCourses(ref.Cookie)
+		courses, err := c.fetchCourses(ctx, ref.Cookie)
 		if err == nil {
 			return courses, nil
 		}
@@ -134,9 +138,9 @@ func (c *ClassroomClient) getCoursesWithPool() ([]domain.CourseSummary, error) {
 
 // fetchCoursesRaw fetches the course list from Warwick without enrichment for
 // request-local name lookup during a direct course-detail request.
-func (c *ClassroomClient) fetchCoursesRaw() ([]domain.CourseSummary, error) {
+func (c *ClassroomClient) fetchCoursesRaw(ctx context.Context) ([]domain.CourseSummary, error) {
 	if c.pool != nil {
-		return c.getCoursesWithPool()
+		return c.getCoursesWithPool(ctx)
 	}
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
@@ -144,7 +148,7 @@ func (c *ClassroomClient) fetchCoursesRaw() ([]domain.CourseSummary, error) {
 		if err != nil {
 			return nil, domain.ErrAuthExpired
 		}
-		courses, err := c.fetchCourses(cookie)
+		courses, err := c.fetchCourses(ctx, cookie)
 		if err == nil {
 			return courses, nil
 		}
@@ -161,14 +165,14 @@ func (c *ClassroomClient) fetchCoursesRaw() ([]domain.CourseSummary, error) {
 	return nil, lastErr
 }
 
-func (c *ClassroomClient) fetchCourses(cookie string) ([]domain.CourseSummary, error) {
+func (c *ClassroomClient) fetchCourses(ctx context.Context, cookie string) ([]domain.CourseSummary, error) {
 	userID := c.effectiveUserID()
 	body := EncodeDataTablesBody(DefaultDataTablesRequest([]string{"CourseName", "Cycle", "Enrolled"}), map[string]string{
 		"keyword": "",
 		"UserID":  userID,
 	})
 
-	resp, err := c.doRequest("POST", "/admin/api/ClassAttendanceSearch", cookie, strings.NewReader(body))
+	resp, err := c.doRequest(ctx, "POST", "/admin/api/ClassAttendanceSearch", cookie, strings.NewReader(body))
 	if err != nil {
 		return nil, domain.NewNetworkError(err.Error())
 	}

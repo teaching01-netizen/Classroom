@@ -1,6 +1,7 @@
 package warwick
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -277,10 +278,11 @@ func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 		tier, end-start)
 }
 
-// AcquireWithTimeout acquires a session for the given tier, waiting up to timeout
-// for one to become available if all are in use. Returns ErrNoAvailableSessions if
-// the timeout expires before a session is free, or if login fails.
-func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration) (*SessionRef, error) {
+// AcquireWithTimeoutContext acquires a session for the given tier, waiting up
+// to timeout for one to become available if all are in use. Returns ctx.Err()
+// if the context is cancelled before a session is available. On login failure,
+// the session's inUse flag is cleared before the error is returned.
+func (p *SessionPool) AcquireWithTimeoutContext(ctx context.Context, tier SessionTier, timeout time.Duration) (*SessionRef, error) {
 	acquireStart := time.Now()
 
 	p.mu.Lock()
@@ -308,7 +310,7 @@ func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration
 	}
 
 	// Timer goroutine broadcasts the cond when the deadline expires,
-	// waking any blocked AcquireWithTimeout callers.
+	// waking any blocked AcquireWithTimeoutContext callers.
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
@@ -325,7 +327,25 @@ func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration
 		}
 	}()
 
+	// Channel to signal context cancellation unblocking.
+	ctxDone := ctx.Done()
+	ctxCancelCh := make(chan struct{}, 1)
+	go func() {
+		select {
+		case <-ctxDone:
+			p.cond.Broadcast()
+			ctxCancelCh <- struct{}{}
+		case <-done:
+		}
+	}()
+
 	for {
+		// Check context cancellation before attempting acquisition.
+		if ctx.Err() != nil {
+			p.mu.Unlock()
+			return nil, ctx.Err()
+		}
+
 		// Round-robin within the tier — only the relevant tier's counter is incremented.
 		var next int
 		switch tier {
@@ -369,9 +389,17 @@ func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration
 				ErrNoAvailableSessions, tier, end-start, timeout)
 		}
 
-		// Wait for a session to be released (or timeout broadcast)
+		// Wait for a session to be released (or timeout/cancel broadcast)
 		p.cond.Wait()
 	}
+}
+
+// AcquireWithTimeout acquires a session for the given tier, waiting up to timeout
+// for one to become available if all are in use. Returns ErrNoAvailableSessions if
+// the timeout expires before a session is free, or if login fails.
+// Delegates to AcquireWithTimeoutContext with context.Background().
+func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration) (*SessionRef, error) {
+	return p.AcquireWithTimeoutContext(context.Background(), tier, timeout)
 }
 
 // Release marks a session as no longer in use so it can be acquired by another caller.

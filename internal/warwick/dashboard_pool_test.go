@@ -1,6 +1,7 @@
 package warwick
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -61,7 +62,7 @@ func TestGetCourseDetail_ConcurrentCalls_WithLimitedPool(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			d, err := client.GetCourseDetail("C1")
+			d, err := client.GetCourseDetail(context.Background(), "C1")
 			errors[idx] = err
 			details[idx] = d != nil
 		}(i)
@@ -104,12 +105,12 @@ func TestGetCourseDetail_PoolExhaustion_DoesNotPanic(t *testing.T) {
 	client.baseURL = apiServer.URL
 
 	// First call: should succeed (1 session available).
-	detail, err := client.GetCourseDetail("C1")
+	detail, err := client.GetCourseDetail(context.Background(), "C1")
 	require.NoError(t, err)
 	require.NotNil(t, detail)
 
 	// Second call: should also succeed (session released after first call).
-	detail2, err := client.GetCourseDetail("C1")
+	detail2, err := client.GetCourseDetail(context.Background(), "C1")
 	require.NoError(t, err)
 	require.NotNil(t, detail2)
 }

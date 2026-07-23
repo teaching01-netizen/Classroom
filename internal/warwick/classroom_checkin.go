@@ -1,6 +1,7 @@
 package warwick
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,9 +13,9 @@ import (
 )
 
 // ToggleCheckin updates a student's check-in status for a session.
-func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, checked bool) error {
+func (c *ClassroomClient) ToggleCheckin(ctx context.Context, courseID, sessionID, studentID string, checked bool) error {
 	if c.pool != nil {
-		return c.toggleCheckinWithPool(courseID, sessionID, studentID, checked)
+		return c.toggleCheckinWithPool(ctx, courseID, sessionID, studentID, checked)
 	}
 
 	var lastErr error
@@ -23,7 +24,7 @@ func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, c
 		if err != nil {
 			return domain.ErrAuthExpired
 		}
-		err = c.doToggleCheckin(cookie, sessionID, studentID, checked)
+		err = c.doToggleCheckin(ctx, cookie, sessionID, studentID, checked)
 		if err == nil {
 			return nil
 		}
@@ -38,7 +39,7 @@ func (c *ClassroomClient) ToggleCheckin(courseID, sessionID, studentID string, c
 	return lastErr
 }
 
-func (c *ClassroomClient) toggleCheckinWithPool(courseID, sessionID, studentID string, checked bool) error {
+func (c *ClassroomClient) toggleCheckinWithPool(ctx context.Context, courseID, sessionID, studentID string, checked bool) error {
 	ref, err := c.pool.Acquire(TierInteractive)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
@@ -53,7 +54,7 @@ func (c *ClassroomClient) toggleCheckinWithPool(courseID, sessionID, studentID s
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		err = c.doToggleCheckin(ref.Cookie, sessionID, studentID, checked)
+		err = c.doToggleCheckin(ctx, ref.Cookie, sessionID, studentID, checked)
 		if err == nil {
 			return nil
 		}
@@ -71,7 +72,7 @@ func (c *ClassroomClient) toggleCheckinWithPool(courseID, sessionID, studentID s
 	return lastErr
 }
 
-func (c *ClassroomClient) doToggleCheckin(cookie, sessionID, studentID string, checked bool) error {
+func (c *ClassroomClient) doToggleCheckin(ctx context.Context, cookie, sessionID, studentID string, checked bool) error {
 	checkedVal := "0"
 	if checked {
 		checkedVal = "1"
@@ -81,7 +82,7 @@ func (c *ClassroomClient) doToggleCheckin(cookie, sessionID, studentID string, c
 	form.Set("studentId", studentID)
 	form.Set("checked", checkedVal)
 
-	resp, err := c.doRequest("POST", "/admin/ClassAttendance/ToggleCheckin", cookie, strings.NewReader(form.Encode()))
+	resp, err := c.doRequest(ctx, "POST", "/admin/ClassAttendance/ToggleCheckin", cookie, strings.NewReader(form.Encode()))
 	if err != nil {
 		return domain.NewNetworkError(err.Error())
 	}

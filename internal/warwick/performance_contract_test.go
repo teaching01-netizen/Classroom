@@ -107,7 +107,7 @@ func newRequestCountFixture(t *testing.T) *requestCountFixture {
 func TestGetCourses_RequestCount_OneCourseList(t *testing.T) {
 	f := newRequestCountFixture(t)
 
-	courses, err := f.client.GetCourses()
+	courses, err := f.client.GetCourses(context.Background())
 	require.NoError(t, err)
 	require.Len(t, courses, 2)
 
@@ -120,7 +120,7 @@ func TestGetCourses_RequestCount_OneCourseList(t *testing.T) {
 func TestGetCourseDetail_RequestCount(t *testing.T) {
 	f := newRequestCountFixture(t)
 
-	detail, err := f.client.GetCourseDetail("c1")
+	detail, err := f.client.GetCourseDetail(context.Background(), "c1")
 	require.NoError(t, err)
 	require.NotNil(t, detail)
 
@@ -133,7 +133,7 @@ func TestGetCourseDetail_RequestCount(t *testing.T) {
 func TestGetSessionDetail_RequestCount(t *testing.T) {
 	f := newRequestCountFixture(t)
 
-	detail, err := f.client.GetSessionDetail("c1", "s1")
+	detail, err := f.client.GetSessionDetail(context.Background(), "c1", "s1")
 	require.NoError(t, err)
 	require.NotNil(t, detail)
 
@@ -174,9 +174,9 @@ func TestRequestCountFixture_LiveReadError(t *testing.T) {
 	client.baseURL = apiServer.URL
 	client.SetUserID("test-user")
 
-	_, err = client.GetCourses()
+	_, err = client.GetCourses(context.Background())
 	require.NoError(t, err)
-	second, err := client.GetCourses()
+	second, err := client.GetCourses(context.Background())
 	require.Error(t, err)
 	require.Nil(t, second)
 	require.Equal(t, 2, apiCalls)
@@ -188,7 +188,7 @@ func TestRequestCountFixture_UpstreamMetricsIncremented(t *testing.T) {
 	f := newRequestCountFixture(t)
 
 	// Trigger a real HTTP request
-	detail, err := f.client.GetCourseDetail("c1")
+	detail, err := f.client.GetCourseDetail(context.Background(), "c1")
 	require.NoError(t, err)
 	require.NotNil(t, detail)
 
@@ -203,7 +203,7 @@ func TestRequestCountFixture_PoolMetricsIncremented(t *testing.T) {
 	f := newRequestCountFixture(t)
 
 	// Trigger a session pool acquisition with a delayed release to force waiting.
-	_, err := f.client.GetCourseDetail("c1")
+	_, err := f.client.GetCourseDetail(context.Background(), "c1")
 	require.NoError(t, err)
 
 	// The pool wait metric should have been observed for the successful acquisition.
@@ -237,9 +237,9 @@ func TestRequestCountFixture_GetCourseDetailAlwaysFetchesUpstream(t *testing.T) 
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	first, err := client.GetCourseDetail("c1")
+	first, err := client.GetCourseDetail(context.Background(), "c1")
 	require.NoError(t, err)
-	second, err := client.GetCourseDetail("c1")
+	second, err := client.GetCourseDetail(context.Background(), "c1")
 	require.NoError(t, err)
 
 	require.Equal(t, "Week 1", first.Sessions[0].Name)
@@ -269,9 +269,9 @@ func TestRequestCountFixture_GetCoursesAlwaysFetchesUpstream(t *testing.T) {
 	client.baseURL = apiServer.URL
 	client.SetUserID("test-user")
 
-	first, err := client.GetCourses()
+	first, err := client.GetCourses(context.Background())
 	require.NoError(t, err)
-	second, err := client.GetCourses()
+	second, err := client.GetCourses(context.Background())
 	require.NoError(t, err)
 
 	require.Equal(t, "Course A", first[0].Name)
@@ -300,9 +300,9 @@ func TestRequestCountFixture_GetSessionDetailAlwaysFetchesUpstream(t *testing.T)
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	first, err := client.GetSessionDetail("c1", "s1")
+	first, err := client.GetSessionDetail(context.Background(), "c1", "s1")
 	require.NoError(t, err)
-	second, err := client.GetSessionDetail("c1", "s1")
+	second, err := client.GetSessionDetail(context.Background(), "c1", "s1")
 	require.NoError(t, err)
 
 	require.Equal(t, "Alice", first.Students[0].Name)
@@ -368,7 +368,7 @@ func TestRequestCountFixture_GetCoursesWith2ActiveCourses(t *testing.T) {
 	f := newRequestCountFixture(t)
 
 	// This also triggers enrichment, which fetches detail for each active course.
-	_, err := f.client.GetCourses()
+	_, err := f.client.GetCourses(context.Background())
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, f.courseListCalls, "GetCourses should make exactly 1 course-list call")
@@ -380,7 +380,7 @@ func TestRequestCountFixture_GetCoursesWith2ActiveCourses(t *testing.T) {
 func TestRequestCountFixture_GetCourseDetailRequestCount(t *testing.T) {
 	f := newRequestCountFixture(t)
 
-	_, err := f.client.GetCourseDetail("c1")
+	_, err := f.client.GetCourseDetail(context.Background(), "c1")
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, f.courseListCalls, "GetCourseDetail should make exactly 1 course-list call")
@@ -393,7 +393,7 @@ func TestEnrichCourses_PassesKnownName(t *testing.T) {
 	f := newRequestCountFixture(t)
 
 	// GetCourses triggers enrichment which should pass known names.
-	_, err := f.client.GetCourses()
+	_, err := f.client.GetCourses(context.Background())
 	require.NoError(t, err)
 
 	// Course list: 1 call. Detail calls: 2 (one per active course).

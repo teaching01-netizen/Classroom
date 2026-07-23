@@ -1,6 +1,7 @@
 package warwick
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,9 +21,9 @@ import (
 var userIDFromJSRegex = regexp.MustCompile(`d\.UserID\s*=\s*['"]([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})['"]`)
 
 // FetchStudentProfiles fetches the list of student profiles from Warwick's UserGroup search.
-func (c *ClassroomClient) FetchStudentProfiles() ([]domain.StudentProfile, error) {
+func (c *ClassroomClient) FetchStudentProfiles(ctx context.Context) ([]domain.StudentProfile, error) {
 	if c.pool != nil {
-		return c.fetchStudentProfilesWithPool()
+		return c.fetchStudentProfilesWithPool(ctx)
 	}
 
 	if c.auth == nil {
@@ -36,7 +37,7 @@ func (c *ClassroomClient) FetchStudentProfiles() ([]domain.StudentProfile, error
 			return nil, domain.ErrAuthExpired
 		}
 
-		profiles, err := c.fetchStudentProfiles(cookie)
+		profiles, err := c.fetchStudentProfiles(ctx, cookie)
 		if err == nil {
 			return profiles, nil
 		}
@@ -55,8 +56,8 @@ func (c *ClassroomClient) FetchStudentProfiles() ([]domain.StudentProfile, error
 	return nil, lastErr
 }
 
-func (c *ClassroomClient) fetchStudentProfilesWithPool() ([]domain.StudentProfile, error) {
-	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
+func (c *ClassroomClient) fetchStudentProfilesWithPool(ctx context.Context) ([]domain.StudentProfile, error) {
+	ref, err := c.pool.AcquireWithTimeoutContext(ctx, c.tier, 5*time.Second)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return nil, domain.ErrAuthConflict
@@ -64,13 +65,16 @@ func (c *ClassroomClient) fetchStudentProfilesWithPool() ([]domain.StudentProfil
 		if errors.Is(err, ErrNoAvailableSessions) {
 			return nil, domain.ErrPoolExhausted
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, domain.ErrAuthExpired
 	}
 	defer c.pool.Release(ref)
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		profiles, err := c.fetchStudentProfiles(ref.Cookie)
+		profiles, err := c.fetchStudentProfiles(ctx, ref.Cookie)
 		if err == nil {
 			return profiles, nil
 		}
@@ -93,7 +97,7 @@ func (c *ClassroomClient) fetchStudentProfilesWithPool() ([]domain.StudentProfil
 	return nil, lastErr
 }
 
-func (c *ClassroomClient) fetchStudentProfiles(cookie string) ([]domain.StudentProfile, error) {
+func (c *ClassroomClient) fetchStudentProfiles(ctx context.Context, cookie string) ([]domain.StudentProfile, error) {
 	const pageSize = 500
 
 	// First request to get total count.
@@ -105,7 +109,7 @@ func (c *ClassroomClient) fetchStudentProfiles(cookie string) ([]domain.StudentP
 		"IsActive": "",
 	})
 
-	resp, err := c.doRequest("POST", "/admin/api/UserGroupSearch", cookie, strings.NewReader(body))
+	resp, err := c.doRequest(ctx, "POST", "/admin/api/UserGroupSearch", cookie, strings.NewReader(body))
 	if err != nil {
 		return nil, domain.NewNetworkError(err.Error())
 	}
@@ -154,7 +158,7 @@ func (c *ClassroomClient) fetchStudentProfiles(cookie string) ([]domain.StudentP
 			"IsActive": "",
 		})
 
-		pageResp, err := c.doRequest("POST", "/admin/api/UserGroupSearch", cookie, strings.NewReader(pageBody))
+		pageResp, err := c.doRequest(ctx, "POST", "/admin/api/UserGroupSearch", cookie, strings.NewReader(pageBody))
 		if err != nil {
 			slog.Warn("warwick_student_profiles_page_failed", "start", start, "error", err)
 			break

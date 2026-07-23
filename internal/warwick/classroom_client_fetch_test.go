@@ -1,6 +1,7 @@
 package warwick
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -42,7 +43,7 @@ func TestFetchCourses_Success(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	courses, err := client.GetCourses()
+	courses, err := client.GetCourses(context.Background())
 	require.NoError(t, err)
 	require.Len(t, courses, 2)
 	assert.Equal(t, "c1", courses[0].CourseID)
@@ -74,7 +75,7 @@ func TestFetchCourses_EmptyData(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	courses, err := client.GetCourses()
+	courses, err := client.GetCourses(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, courses)
 }
@@ -99,7 +100,7 @@ func TestFetchCourses_WarwickReturnsLoginPage(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	_, err = client.GetCourses()
+	_, err = client.GetCourses(context.Background())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, domain.ErrAuthExpired)
 }
@@ -139,7 +140,7 @@ func TestFetchCourses_EnrichmentPopulatesSessionCounts(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	courses, err := client.GetCourses()
+	courses, err := client.GetCourses(context.Background())
 	require.NoError(t, err)
 	require.Len(t, courses, 1)
 	assert.Equal(t, 3, courses[0].TotalSessions)
@@ -166,7 +167,7 @@ func TestFetchCourses_RecordsTotalPositiveButDataEmpty(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	courses, err := client.GetCourses()
+	courses, err := client.GetCourses(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, courses, "should return empty when Warwick returns empty data array even if recordsTotal > 0")
 }
@@ -190,7 +191,7 @@ func TestFetchCourses_NilDataField(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	courses, err := client.GetCourses()
+	courses, err := client.GetCourses(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, courses)
 }
@@ -215,9 +216,9 @@ func TestGetCourses_AlwaysFetchesUpstream(t *testing.T) {
 	client.baseURL = apiServer.URL
 	client.SetUserID("test-user")
 
-	first, err := client.GetCourses()
+	first, err := client.GetCourses(context.Background())
 	require.NoError(t, err)
-	second, err := client.GetCourses()
+	second, err := client.GetCourses(context.Background())
 	require.NoError(t, err)
 
 	require.Equal(t, "Course A", first[0].Name)
@@ -248,9 +249,9 @@ func TestGetCourseDetail_AlwaysFetchesUpstream(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	first, err := client.GetCourseDetail("c1")
+	first, err := client.GetCourseDetail(context.Background(), "c1")
 	require.NoError(t, err)
-	second, err := client.GetCourseDetail("c1")
+	second, err := client.GetCourseDetail(context.Background(), "c1")
 	require.NoError(t, err)
 
 	require.Equal(t, "Week 1", first.Sessions[0].Name)
@@ -277,9 +278,9 @@ func TestGetSessionDetail_AlwaysFetchesUpstream(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	first, err := client.GetSessionDetail("c1", "s1")
+	first, err := client.GetSessionDetail(context.Background(), "c1", "s1")
 	require.NoError(t, err)
-	second, err := client.GetSessionDetail("c1", "s1")
+	second, err := client.GetSessionDetail(context.Background(), "c1", "s1")
 	require.NoError(t, err)
 
 	require.Equal(t, "Alice", first.Students[0].Name)
@@ -307,9 +308,9 @@ func TestLiveReadError_DoesNotReturnPreviousPayload(t *testing.T) {
 	client.baseURL = apiServer.URL
 	client.SetUserID("test-user")
 
-	_, err = client.GetCourses()
+	_, err = client.GetCourses(context.Background())
 	require.NoError(t, err)
-	second, err := client.GetCourses()
+	second, err := client.GetCourses(context.Background())
 	require.Error(t, err)
 	require.Nil(t, second)
 	require.Equal(t, 2, apiCalls)
@@ -339,7 +340,7 @@ func TestFetchCourses_CourseStatusComputation(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	courses, err := client.GetCourses()
+	courses, err := client.GetCourses(context.Background())
 	require.NoError(t, err)
 	require.Len(t, courses, 3)
 
@@ -399,7 +400,7 @@ func TestFetchCourses_UsesConfiguredUserID(t *testing.T) {
 	client.baseURL = apiServer.URL
 	client.SetUserID("my-custom-user-id")
 
-	courses, err := client.GetCourses()
+	courses, err := client.GetCourses(context.Background())
 	require.NoError(t, err)
 	require.Len(t, courses, 1)
 	require.NotEmpty(t, capturedBody, "mock server should have received a courses request body")
@@ -437,7 +438,7 @@ func TestFetchCourses_UsesDefaultUserIDWhenNotConfigured(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	_, err = client.GetCourses()
+	_, err = client.GetCourses(context.Background())
 	require.NoError(t, err)
 	require.NotEmpty(t, capturedBody, "mock server should have received a courses request body")
 	vals, err := url.ParseQuery(capturedBody)
@@ -473,7 +474,7 @@ func TestFetchStudentProfiles_Success(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	profiles, err := client.FetchStudentProfiles()
+	profiles, err := client.FetchStudentProfiles(context.Background())
 	require.NoError(t, err)
 	require.Len(t, profiles, 2)
 	assert.Equal(t, "STU001", profiles[0].StudentID)
@@ -498,7 +499,7 @@ func TestFetchStudentProfiles_Empty(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	profiles, err := client.FetchStudentProfiles()
+	profiles, err := client.FetchStudentProfiles(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, profiles)
 }
@@ -562,7 +563,7 @@ func TestFetchStudentProfiles_Pagination(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	profiles, err := client.FetchStudentProfiles()
+	profiles, err := client.FetchStudentProfiles(context.Background())
 	require.NoError(t, err)
 	assert.Len(t, profiles, 5, "should fetch all 5 profiles across 3 pages")
 	assert.Equal(t, "STU001", profiles[0].StudentID)
@@ -593,9 +594,9 @@ func TestFetchStudentProfiles_AlwaysFetchesUpstream(t *testing.T) {
 	client := NewClassroomClientFromPool(pool, TierTeacher)
 	client.baseURL = apiServer.URL
 
-	first, err := client.FetchStudentProfiles()
+	first, err := client.FetchStudentProfiles(context.Background())
 	require.NoError(t, err)
-	second, err := client.FetchStudentProfiles()
+	second, err := client.FetchStudentProfiles(context.Background())
 	require.NoError(t, err)
 
 	require.Equal(t, "Alice", first[0].FullName)

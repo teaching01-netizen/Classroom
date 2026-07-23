@@ -13,17 +13,25 @@ import (
 )
 
 // GetCourseDetail fetches the sessions for a specific course.
-func (c *ClassroomClient) GetCourseDetail(courseID string) (*domain.CourseDetail, error) {
-	return c.getCourseDetailLive(courseID, "")
+func (c *ClassroomClient) GetCourseDetail(ctx context.Context, courseID string) (*domain.CourseDetail, error) {
+	return c.getCourseDetailLive(ctx, courseID, "")
 }
 
-func (c *ClassroomClient) getCourseDetailLive(courseID, courseName string) (*domain.CourseDetail, error) {
+// GetCourseDetailWithName fetches the sessions for a specific course, using the
+// provided courseName to skip the catalog lookup. When courseName is non-empty,
+// no catalog fetch is performed. When courseName is empty, the catalog is fetched
+// to look up the name.
+func (c *ClassroomClient) GetCourseDetailWithName(ctx context.Context, courseID, courseName string) (*domain.CourseDetail, error) {
+	return c.getCourseDetailLive(ctx, courseID, courseName)
+}
+
+func (c *ClassroomClient) getCourseDetailLive(ctx context.Context, courseID, courseName string) (*domain.CourseDetail, error) {
 	if courseName == "" {
-		courseName = c.lookupCourseName(courseID)
+		courseName = c.lookupCourseName(ctx, courseID)
 	}
 
 	if c.pool != nil {
-		return c.getCourseDetailWithPool(courseID, courseName)
+		return c.getCourseDetailWithPool(ctx, courseID, courseName)
 	}
 
 	var lastErr error
@@ -33,7 +41,7 @@ func (c *ClassroomClient) getCourseDetailLive(courseID, courseName string) (*dom
 			return nil, domain.ErrAuthExpired
 		}
 
-		detail, err := c.fetchCourseDetail(cookie, courseID)
+		detail, err := c.fetchCourseDetail(ctx, cookie, courseID)
 		if err == nil {
 			detail.Name = courseName
 			return detail, nil
@@ -53,12 +61,12 @@ func (c *ClassroomClient) getCourseDetailLive(courseID, courseName string) (*dom
 	return nil, lastErr
 }
 
-func (c *ClassroomClient) getCourseDetailWithPool(courseID, courseName string) (*domain.CourseDetail, error) {
-	return c.fetchCourseDetailWithPool(courseID, courseName)
+func (c *ClassroomClient) getCourseDetailWithPool(ctx context.Context, courseID, courseName string) (*domain.CourseDetail, error) {
+	return c.fetchCourseDetailWithPool(ctx, courseID, courseName)
 }
 
-func (c *ClassroomClient) fetchCourseDetailWithPool(courseID, courseName string) (*domain.CourseDetail, error) {
-	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
+func (c *ClassroomClient) fetchCourseDetailWithPool(ctx context.Context, courseID, courseName string) (*domain.CourseDetail, error) {
+	ref, err := c.pool.AcquireWithTimeoutContext(ctx, c.tier, 5*time.Second)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return nil, domain.ErrAuthConflict
@@ -66,13 +74,16 @@ func (c *ClassroomClient) fetchCourseDetailWithPool(courseID, courseName string)
 		if errors.Is(err, ErrNoAvailableSessions) {
 			return nil, domain.ErrPoolExhausted
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, domain.ErrAuthExpired
 	}
 	defer c.pool.Release(ref)
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		detail, err := c.fetchCourseDetail(ref.Cookie, courseID)
+		detail, err := c.fetchCourseDetail(ctx, ref.Cookie, courseID)
 		if err == nil {
 			detail.Name = courseName
 			return detail, nil
@@ -96,13 +107,13 @@ func (c *ClassroomClient) fetchCourseDetailWithPool(courseID, courseName string)
 	return nil, lastErr
 }
 
-func (c *ClassroomClient) fetchCourseDetail(cookie, courseID string) (*domain.CourseDetail, error) {
+func (c *ClassroomClient) fetchCourseDetail(ctx context.Context, cookie, courseID string) (*domain.CourseDetail, error) {
 	body := EncodeDataTablesBody(DefaultDataTablesRequest([]string{"dName", "dStatus"}), map[string]string{
 		"keyword": "",
 		"CouseID": courseID,
 	})
 
-	resp, err := c.doRequest("POST", "/admin/api/ClassAttendanceDetailSearch", cookie, strings.NewReader(body))
+	resp, err := c.doRequest(ctx, "POST", "/admin/api/ClassAttendanceDetailSearch", cookie, strings.NewReader(body))
 	if err != nil {
 		return nil, domain.NewNetworkError(err.Error())
 	}
@@ -152,9 +163,9 @@ func (c *ClassroomClient) fetchCourseDetail(cookie, courseID string) (*domain.Co
 }
 
 // GetSessionDetail fetches the students and check-in status for a session.
-func (c *ClassroomClient) GetSessionDetail(courseID, sessionID string) (*domain.SessionDetail, error) {
+func (c *ClassroomClient) GetSessionDetail(ctx context.Context, courseID, sessionID string) (*domain.SessionDetail, error) {
 	if c.pool != nil {
-		return c.getSessionDetailWithPool(sessionID)
+		return c.getSessionDetailWithPool(ctx, sessionID)
 	}
 
 	var lastErr error
@@ -164,7 +175,7 @@ func (c *ClassroomClient) GetSessionDetail(courseID, sessionID string) (*domain.
 			return nil, domain.ErrAuthExpired
 		}
 
-		detail, err := c.fetchSessionDetail(cookie, sessionID)
+		detail, err := c.fetchSessionDetail(ctx, cookie, sessionID)
 		if err == nil {
 			return detail, nil
 		}
@@ -183,12 +194,12 @@ func (c *ClassroomClient) GetSessionDetail(courseID, sessionID string) (*domain.
 	return nil, lastErr
 }
 
-func (c *ClassroomClient) getSessionDetailWithPool(sessionID string) (*domain.SessionDetail, error) {
-	return c.fetchSessionDetailWithPool(sessionID)
+func (c *ClassroomClient) getSessionDetailWithPool(ctx context.Context, sessionID string) (*domain.SessionDetail, error) {
+	return c.fetchSessionDetailWithPool(ctx, sessionID)
 }
 
-func (c *ClassroomClient) fetchSessionDetailWithPool(sessionID string) (*domain.SessionDetail, error) {
-	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
+func (c *ClassroomClient) fetchSessionDetailWithPool(ctx context.Context, sessionID string) (*domain.SessionDetail, error) {
+	ref, err := c.pool.AcquireWithTimeoutContext(ctx, c.tier, 5*time.Second)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return nil, domain.ErrAuthConflict
@@ -196,13 +207,16 @@ func (c *ClassroomClient) fetchSessionDetailWithPool(sessionID string) (*domain.
 		if errors.Is(err, ErrNoAvailableSessions) {
 			return nil, domain.ErrPoolExhausted
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, domain.ErrAuthExpired
 	}
 	defer c.pool.Release(ref)
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		detail, err := c.fetchSessionDetail(ref.Cookie, sessionID)
+		detail, err := c.fetchSessionDetail(ctx, ref.Cookie, sessionID)
 		if err == nil {
 			return detail, nil
 		}
@@ -225,13 +239,13 @@ func (c *ClassroomClient) fetchSessionDetailWithPool(sessionID string) (*domain.
 	return nil, lastErr
 }
 
-func (c *ClassroomClient) fetchSessionDetail(cookie, sessionID string) (*domain.SessionDetail, error) {
+func (c *ClassroomClient) fetchSessionDetail(ctx context.Context, cookie, sessionID string) (*domain.SessionDetail, error) {
 	body := EncodeDataTablesBody(DefaultDataTablesRequest([]string{"StudentImg", "StudentName", "StudentNickName", "StudentSchool", "StudentCheckIn", "StudentPPoint", "StudentGivePoint"}), map[string]string{
 		"keyword":          "",
 		"CourseCampaignID": sessionID,
 	})
 
-	resp, err := c.doRequest("POST", "/admin/api/ClassAttendanceStudentCheckInSearch", cookie, strings.NewReader(body))
+	resp, err := c.doRequest(ctx, "POST", "/admin/api/ClassAttendanceStudentCheckInSearch", cookie, strings.NewReader(body))
 	if err != nil {
 		return nil, domain.NewNetworkError(err.Error())
 	}
@@ -292,7 +306,7 @@ func (c *ClassroomClient) FetchSessionDetailLive(ctx context.Context, sessionID 
 		}
 	}
 
-	ref, err := c.pool.AcquireWithTimeout(c.tier, 5*time.Second)
+	ref, err := c.pool.AcquireWithTimeoutContext(ctx, c.tier, 5*time.Second)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return nil, domain.ErrAuthConflict
@@ -300,11 +314,14 @@ func (c *ClassroomClient) FetchSessionDetailLive(ctx context.Context, sessionID 
 		if errors.Is(err, ErrNoAvailableSessions) {
 			return nil, domain.ErrPoolExhausted
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, domain.ErrAuthExpired
 	}
 	defer c.pool.Release(ref)
 
-	detail, err := c.fetchSessionDetail(ref.Cookie, sessionID)
+	detail, err := c.fetchSessionDetail(ctx, ref.Cookie, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -313,8 +330,8 @@ func (c *ClassroomClient) FetchSessionDetailLive(ctx context.Context, sessionID 
 
 // lookupCourseName performs a request-local course-list read for direct
 // course-detail calls because the detail endpoint does not return a name.
-func (c *ClassroomClient) lookupCourseName(courseID string) string {
-	courses, err := c.fetchCoursesRaw()
+func (c *ClassroomClient) lookupCourseName(ctx context.Context, courseID string) string {
+	courses, err := c.fetchCoursesRaw(ctx)
 	if err != nil {
 		return ""
 	}

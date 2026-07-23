@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"sort"
 	"time"
 
@@ -108,9 +109,9 @@ func buildSessionList(allSessions map[string]*domain.DashboardSessionSummary, to
 	return sessions
 }
 
-func loadStudentIDMapping(dp TeacherDataProvider) map[string]string {
+func loadStudentIDMapping(ctx context.Context, dp TeacherDataProvider) map[string]string {
 	m := make(map[string]string)
-	if profiles, err := dp.FetchStudentProfiles(); err == nil {
+	if profiles, err := dp.FetchStudentProfiles(ctx); err == nil {
 		for _, p := range profiles {
 			if p.StudentID != "" && p.StudentGuid != "" {
 				m[p.StudentGuid] = p.StudentID
@@ -238,6 +239,7 @@ func extractTopAtRisk(students []domain.StudentAbsence, limit int) []domain.Stud
 }
 
 func (s *TeacherService) aggregateDashboard(
+	ctx context.Context,
 	results []dashboardCourseResult,
 	courses []domain.CourseSummary,
 	threshold int,
@@ -246,7 +248,7 @@ func (s *TeacherService) aggregateDashboard(
 
 	studentMap, allSessions, totalStudents := aggregatePerCourseResults(results)
 	sessions := buildSessionList(allSessions, totalStudents)
-	guidToStudentID := loadStudentIDMapping(s.dp)
+	guidToStudentID := loadStudentIDMapping(ctx, s.dp)
 	students := buildStudentAbsences(studentMap, sessions, guidToStudentID, threshold)
 
 	if len(wCodes) > 0 {

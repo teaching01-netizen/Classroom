@@ -79,25 +79,25 @@ func newLiveFixture(t *testing.T) *liveFixture {
 func TestLiveSync_SequentialReadsReturnNewUpstreamVersions(t *testing.T) {
 	fixture := newLiveFixture(t)
 
-	courses, err := fixture.client.GetCourses()
+	courses, err := fixture.client.GetCourses(context.Background())
 	require.NoError(t, err)
-	coursesAgain, err := fixture.client.GetCourses()
+	coursesAgain, err := fixture.client.GetCourses(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "Course 1", courses[0].Name)
 	require.Equal(t, "Course 2", coursesAgain[0].Name)
 	require.Equal(t, int32(2), fixture.courseReads.Load())
 
-	detail, err := fixture.client.GetCourseDetail("c1")
+	detail, err := fixture.client.GetCourseDetail(context.Background(), "c1")
 	require.NoError(t, err)
-	detailAgain, err := fixture.client.GetCourseDetail("c1")
+	detailAgain, err := fixture.client.GetCourseDetail(context.Background(), "c1")
 	require.NoError(t, err)
 	require.Equal(t, "Session 1", detail.Sessions[0].Name)
 	require.Equal(t, "Session 2", detailAgain.Sessions[0].Name)
 	require.Equal(t, int32(2), fixture.detailReads.Load())
 
-	profiles, err := fixture.client.FetchStudentProfiles()
+	profiles, err := fixture.client.FetchStudentProfiles(context.Background())
 	require.NoError(t, err)
-	profilesAgain, err := fixture.client.FetchStudentProfiles()
+	profilesAgain, err := fixture.client.FetchStudentProfiles(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "Profile 1", profiles[0].FullName)
 	require.Equal(t, "Profile 2", profilesAgain[0].FullName)
@@ -107,10 +107,10 @@ func TestLiveSync_SequentialReadsReturnNewUpstreamVersions(t *testing.T) {
 func TestLiveSync_UpstreamErrorNeverReturnsPreviousCoursePayload(t *testing.T) {
 	fixture := newLiveFixture(t)
 
-	first, err := fixture.client.GetCourses()
+	first, err := fixture.client.GetCourses(context.Background())
 	require.NoError(t, err)
 	fixture.failCourses.Store(true)
-	second, err := fixture.client.GetCourses()
+	second, err := fixture.client.GetCourses(context.Background())
 	require.Error(t, err)
 	require.Nil(t, second)
 	require.Equal(t, "Course 1", first[0].Name)
@@ -136,13 +136,13 @@ func TestLiveSync_ReportRecomputesAfterUpstreamChange(t *testing.T) {
 func TestLiveSync_ToggleIsFollowedByLiveSessionRead(t *testing.T) {
 	fixture := newLiveFixture(t)
 
-	before, err := fixture.client.GetSessionDetail("c1", "s1")
+	before, err := fixture.client.GetSessionDetail(context.Background(), "c1", "s1")
 	require.NoError(t, err)
 	require.False(t, before.Students[0].CheckedIn)
 
-	require.NoError(t, fixture.client.ToggleCheckin("c1", "s1", "STU001", true))
+	require.NoError(t, fixture.client.ToggleCheckin(context.Background(), "c1", "s1", "STU001", true))
 	fixture.reportState.Store(true)
-	after, err := fixture.client.GetSessionDetail("c1", "s1")
+	after, err := fixture.client.GetSessionDetail(context.Background(), "c1", "s1")
 	require.NoError(t, err)
 	require.True(t, after.Students[0].CheckedIn)
 	require.Equal(t, int32(1), fixture.toggleReads.Load())
