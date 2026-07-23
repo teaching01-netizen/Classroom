@@ -15,4 +15,36 @@ var (
 		},
 		[]string{"source"},
 	)
+
+	// WarwickUpstreamRequestsTotal counts every outbound HTTP request to Warwick.
+	// Labels: endpoint (bounded, low-cardinality path classifier), status (HTTP status code).
+	WarwickUpstreamRequestsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "warwick_upstream_requests_total",
+			Help: "Total number of outbound HTTP requests to Warwick.",
+		},
+		[]string{"endpoint", "status"},
+	)
+
+	// WarwickUpstreamRequestDurationSeconds measures the duration of outbound HTTP
+	// requests to Warwick. Label: endpoint (bounded, low-cardinality path classifier).
+	WarwickUpstreamRequestDurationSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "warwick_upstream_request_duration_seconds",
+			Help:    "Duration of outbound HTTP requests to Warwick in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"endpoint"},
+	)
+
+	// WarwickSessionPoolWaitSeconds measures the time spent waiting to acquire a
+	// session from the pool. Label: tier (bounded, low-cardinality tier value).
+	WarwickSessionPoolWaitSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "warwick_session_pool_wait_seconds",
+			Help:    "Time spent waiting to acquire a session from the pool.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"tier"},
+	)
 )

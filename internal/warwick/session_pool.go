@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"qr-command-center/internal/metrics"
 )
 
 // SessionTier classifies traffic for session assignment.
@@ -17,6 +19,20 @@ const (
 	TierTeacher                        // Teacher browsing + toggle — bursty
 	TierInteractive                    // Toggle check-in — fast, low-latency
 )
+
+// String returns a human-readable name for the tier (bounded, no PII).
+func (t SessionTier) String() string {
+	switch t {
+	case TierQR:
+		return "qr"
+	case TierTeacher:
+		return "teacher"
+	case TierInteractive:
+		return "interactive"
+	default:
+		return "unknown"
+	}
+}
 
 // Staggered re-auth / kicked detection constants.
 const (
@@ -194,6 +210,8 @@ func NewSessionPool(email, password, loginURL string, qrSessions, teacherSession
 // Uses round-robin within the tier. Returns an error if all sessions in the
 // tier are currently in use or if login fails.
 func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
+	acquireStart := time.Now()
+
 	p.mu.Lock()
 
 	var start, end int
@@ -244,6 +262,7 @@ func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 				return nil, fmt.Errorf("warwick: acquire session: %w", err)
 			}
 
+			metrics.WarwickSessionPoolWaitSeconds.WithLabelValues(tier.String()).Observe(time.Since(acquireStart).Seconds())
 			return &SessionRef{
 				Cookie:     cookie,
 				Generation: gen,
@@ -262,6 +281,8 @@ func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 // for one to become available if all are in use. Returns ErrNoAvailableSessions if
 // the timeout expires before a session is free, or if login fails.
 func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration) (*SessionRef, error) {
+	acquireStart := time.Now()
+
 	p.mu.Lock()
 
 	var start, end int
@@ -331,6 +352,7 @@ func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration
 					return nil, fmt.Errorf("warwick: acquire session: %w", err)
 				}
 
+				metrics.WarwickSessionPoolWaitSeconds.WithLabelValues(tier.String()).Observe(time.Since(acquireStart).Seconds())
 				return &SessionRef{
 					Cookie:     cookie,
 					Generation: gen,

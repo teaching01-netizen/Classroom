@@ -10,6 +10,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"qr-command-center/internal/domain"
+	"qr-command-center/internal/metrics"
 )
 
 const (
@@ -91,7 +92,40 @@ func (c *ClassroomClient) doRequest(method, path, cookie string, body io.Reader)
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 	}
 
-	return c.client.Do(req)
+	start := time.Now()
+	resp, err := c.client.Do(req)
+	dur := time.Since(start)
+
+	endpoint := classifyEndpoint(path)
+	status := "error"
+	if err == nil {
+		status = fmt.Sprintf("%d", resp.StatusCode)
+	}
+	metrics.WarwickUpstreamRequestsTotal.WithLabelValues(endpoint, status).Inc()
+	metrics.WarwickUpstreamRequestDurationSeconds.WithLabelValues(endpoint).Observe(dur.Seconds())
+
+	return resp, err
+}
+
+// classifyEndpoint returns a bounded, low-cardinality endpoint label for a given
+// Warwick API path. No PII, student IDs, session IDs, or URLs are included.
+func classifyEndpoint(path string) string {
+	switch {
+	case strings.Contains(path, "ClassAttendanceSearch") && !strings.Contains(path, "Detail"):
+		return "course_list"
+	case strings.Contains(path, "ClassAttendanceDetailSearch"):
+		return "course_detail"
+	case strings.Contains(path, "ClassAttendanceStudentCheckInSearch"):
+		return "session_detail"
+	case strings.Contains(path, "UserGroupSearch"):
+		return "student_profiles"
+	case strings.Contains(path, "ToggleCheckin"):
+		return "toggle_checkin"
+	case strings.Contains(path, "GetQRCode"):
+		return "qr_code"
+	default:
+		return "other"
+	}
 }
 
 func (c *ClassroomClient) checkAuth(resp *http.Response) error {
