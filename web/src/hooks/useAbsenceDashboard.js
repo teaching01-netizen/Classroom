@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
+import { fetchFresh } from '../api/fetchFresh';
 
 export function useAbsenceDashboard() {
   const [data, setData] = useState(null);
@@ -24,7 +25,7 @@ export function useAbsenceDashboard() {
     try {
       const filterParam = encodeURIComponent(JSON.stringify(filters));
       console.log('[Dashboard] Loading dashboard...', { filters });
-      const res = await fetch(
+      const res = await fetchFresh(
         `/api/teacher/absence-dashboard?filters=${filterParam}`,
         { signal: controller.signal }
       );

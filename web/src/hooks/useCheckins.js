@@ -3,6 +3,7 @@ import { useSessionStore } from '../store/useSessionStore';
 import { usePolling } from './usePolling';
 import { useFocusRefetch } from './useFocusRefetch';
 import { useWsReconnect } from './useWebSocket';
+import { fetchFresh } from '../api/fetchFresh';
 
 const POLL_INTERVAL_MS = 10000;
 
@@ -20,7 +21,7 @@ export const useCheckins = (courseId, sessionId) => {
       setInitialLoading();
     }
     try {
-      const response = await fetch(`/api/teacher/courses/${courseId}/sessions/${sessionId}`, { signal });
+      const response = await fetchFresh(`/api/teacher/courses/${courseId}/sessions/${sessionId}`, { signal });
       const result = await response.json();
       if (result.success) {
         setCurrentSession(result.data);
@@ -47,7 +48,7 @@ export const useCheckins = (courseId, sessionId) => {
     // server round-trip completes. Roll back by reverting on error.
     updateStudentCheckin(studentId, checked);
     try {
-      const response = await fetch(`/api/teacher/courses/${courseId}/sessions/${sessionId}/toggle-checkin`, {
+      const response = await fetchFresh(`/api/teacher/courses/${courseId}/sessions/${sessionId}/toggle-checkin`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ student_id: studentId, checked }),
@@ -66,9 +67,8 @@ export const useCheckins = (courseId, sessionId) => {
   useEffect(() => {
     const key = `${courseId}-${sessionId}`;
     if (prevKeyRef.current !== null && prevKeyRef.current !== key) {
-      // Stale-while-revalidate: don't reset students/session — show stale data
-      // while fetching fresh. Only mark loading so the UI knows a refresh is
-      // in-flight. The old data remains visible until the new response arrives.
+      // Preserve the current render state while the new request is in flight;
+      // the next successful response replaces it with the live result.
       hasLoadedRef.current = false;
     }
     prevKeyRef.current = key;
@@ -82,7 +82,7 @@ export const useCheckins = (courseId, sessionId) => {
   useEffect(() => {
     if (!courseId) return;
     const controller = new AbortController();
-    fetch(`/api/teacher/courses/${courseId}`, { signal: controller.signal })
+    fetchFresh(`/api/teacher/courses/${courseId}`, { signal: controller.signal })
       .then(res => res.json())
       .then(result => {
         if (result.success && result.data?.name) {

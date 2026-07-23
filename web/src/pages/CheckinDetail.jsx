@@ -7,6 +7,7 @@ import { StudentTable } from '../components/StudentTable';
 import { Pagination } from '../components/Pagination';
 import { QRModal } from '../components/QRModal';
 import { BackBreadcrumb } from '../components/BackBreadcrumb';
+import { fetchFresh } from '../api/fetchFresh';
 
 export function CheckinDetail() {
   const { courseId, sessionId } = useParams();
@@ -43,7 +44,7 @@ export function CheckinDetail() {
     const autoStart = async () => {
       try {
         // 1. Check if room already exists
-        const roomsRes = await fetch('/api/rooms?lite=true');
+        const roomsRes = await fetchFresh('/api/rooms?lite=true');
         if (!roomsRes.ok) throw new Error(`Failed to fetch rooms: ${roomsRes.status}`);
         let roomsData;
         try {
@@ -65,7 +66,7 @@ export function CheckinDetail() {
 
           // Start worker if not already running
           if (existingRoom.status !== 'Running' && existingRoom.status !== 'Fetching') {
-            const startRes = await fetch(`/api/rooms/${sessionId}/start`, { method: 'POST' });
+            const startRes = await fetchFresh(`/api/rooms/${sessionId}/start`, { method: 'POST' });
             if (!startRes.ok) throw new Error(`Failed to start room: ${startRes.status}`);
             let startResult;
             try {
@@ -92,7 +93,7 @@ export function CheckinDetail() {
               return;
             }
             try {
-              const res = await fetch(`/api/rooms/${sessionId}`);
+              const res = await fetchFresh(`/api/rooms/${sessionId}`);
               let result;
               try {
                 result = await res.json();
@@ -194,7 +195,7 @@ export function CheckinDetail() {
   const handleStartCheckin = async () => {
     setIsStarting(true);
     try {
-      const createRes = await fetch('/api/rooms/from-session', {
+      const createRes = await fetchFresh('/api/rooms/from-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId }),
@@ -218,7 +219,7 @@ export function CheckinDetail() {
       const newRoom = createResult.data;
       setRoom(newRoom);
 
-      const startRes = await fetch(`/api/rooms/${newRoom.room_id}/start`, {
+      const startRes = await fetchFresh(`/api/rooms/${newRoom.room_id}/start`, {
         method: 'POST',
       });
       let startResult;
@@ -256,7 +257,7 @@ export function CheckinDetail() {
           return;
         }
         try {
-          const res = await fetch(`/api/rooms/${newRoom.room_id}`);
+          const res = await fetchFresh(`/api/rooms/${newRoom.room_id}`);
           let result;
           try {
             result = await res.json();

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { fetchFresh } from '../api/fetchFresh';
 
 const VIEWS_URL = '/api/teacher/dashboard-views';
 
@@ -11,7 +12,7 @@ export function useDashboardViews() {
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetch(VIEWS_URL);
+      const res = await fetchFresh(VIEWS_URL);
       const result = await res.json();
       if (result.success) {
         setViews(result.data || []);
@@ -31,7 +32,7 @@ export function useDashboardViews() {
   }, [fetchViews]);
 
   const createView = useCallback(async (name, filters) => {
-    const res = await fetch(VIEWS_URL, {
+    const res = await fetchFresh(VIEWS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, filters }),
@@ -45,7 +46,7 @@ export function useDashboardViews() {
   }, []);
 
   const updateView = useCallback(async (id, name, filters) => {
-    const res = await fetch(`${VIEWS_URL}/${id}`, {
+    const res = await fetchFresh(`${VIEWS_URL}/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, filters }),
@@ -59,7 +60,7 @@ export function useDashboardViews() {
   }, []);
 
   const deleteView = useCallback(async (id) => {
-    const res = await fetch(`${VIEWS_URL}/${id}`, { method: 'DELETE' });
+    const res = await fetchFresh(`${VIEWS_URL}/${id}`, { method: 'DELETE' });
     const result = await res.json();
     if (!res.ok || !result.success) {
       throw new Error(result.error || 'Failed to delete view');
@@ -68,7 +69,7 @@ export function useDashboardViews() {
   }, []);
 
   const touchView = useCallback(async (id) => {
-    await fetch(`${VIEWS_URL}/${id}/use`, { method: 'POST' });
+    await fetchFresh(`${VIEWS_URL}/${id}/use`, { method: 'POST' });
   }, []);
 
   return {

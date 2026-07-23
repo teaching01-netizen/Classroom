@@ -1,5 +1,6 @@
 import React from 'react';
 import { useCountdown } from '../hooks/useCountdown';
+import { fetchFresh } from '../api/fetchFresh';
 
 const getStatusColor = (status) => {
   switch (status) {
@@ -22,7 +23,7 @@ export const RoomCard = ({ room }) => {
 
   const handleStart = async () => {
     try {
-      const response = await fetch(`/api/rooms/${room.room_id}/start`, {
+      const response = await fetchFresh(`/api/rooms/${room.room_id}/start`, {
         method: 'POST',
       });
       const result = await response.json();
@@ -37,7 +38,7 @@ export const RoomCard = ({ room }) => {
 
   const handleStop = async () => {
     try {
-      const response = await fetch(`/api/rooms/${room.room_id}/stop`, {
+      const response = await fetchFresh(`/api/rooms/${room.room_id}/stop`, {
         method: 'POST',
       });
       const result = await response.json();
@@ -53,7 +54,7 @@ export const RoomCard = ({ room }) => {
   const handleDelete = async () => {
     if (!confirm('Are you sure you want to delete this room?')) return;
     try {
-      const response = await fetch(`/api/rooms/${room.room_id}`, {
+      const response = await fetchFresh(`/api/rooms/${room.room_id}`, {
         method: 'DELETE',
       });
       const result = await response.json();

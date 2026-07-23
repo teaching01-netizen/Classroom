@@ -162,7 +162,7 @@ describe('useDashboardViews', () => {
 
     expect(global.fetch).toHaveBeenCalledWith(
       '/api/teacher/dashboard-views/1/use',
-      { method: 'POST' }
+      { method: 'POST', cache: 'no-store' }
     );
   });
 });

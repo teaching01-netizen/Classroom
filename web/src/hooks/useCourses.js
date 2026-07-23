@@ -2,6 +2,7 @@ import { useEffect, useCallback } from 'react';
 import { useCourseStore } from '../store/useCourseStore';
 import { useFocusRefetch } from './useFocusRefetch';
 import { useWsReconnect } from './useWebSocket';
+import { fetchFresh } from '../api/fetchFresh';
 
 export const useCourses = () => {
   const { courses, isInitialLoading, isRefreshing, error, setCourses, setInitialLoading, setRefreshing, setError } = useCourseStore();
@@ -13,7 +14,7 @@ export const useCourses = () => {
       setInitialLoading();
     }
     try {
-      const res = await fetch('/api/teacher/courses');
+      const res = await fetchFresh('/api/teacher/courses');
       const result = await res.json();
       if (result.success) {
         setCourses(result.data.courses);

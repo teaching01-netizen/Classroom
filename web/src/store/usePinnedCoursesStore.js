@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { fetchFresh } from '../api/fetchFresh';
 
 const FAVOURITES_URL = '/api/teacher/favourites';
 
@@ -9,7 +10,7 @@ export const usePinnedCoursesStore = create((set, get) => ({
   loadFavourites: async () => {
     set({ isLoading: true });
     try {
-      const res = await fetch(FAVOURITES_URL);
+      const res = await fetchFresh(FAVOURITES_URL);
       const result = await res.json();
       if (result.success) {
         set({ pinnedCourseIds: result.data.favourite_ids, isLoading: false });
@@ -25,7 +26,7 @@ export const usePinnedCoursesStore = create((set, get) => ({
   pinCourse: async (courseId) => {
     set({ isLoading: true });
     try {
-      const res = await fetch(FAVOURITES_URL, {
+      const res = await fetchFresh(FAVOURITES_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ course_id: courseId }),
@@ -48,7 +49,7 @@ export const usePinnedCoursesStore = create((set, get) => ({
   unpinCourse: async (courseId) => {
     set({ isLoading: true });
     try {
-      const res = await fetch(`${FAVOURITES_URL}/${courseId}`, { method: 'DELETE' });
+      const res = await fetchFresh(`${FAVOURITES_URL}/${courseId}`, { method: 'DELETE' });
       if (!res.ok) {
         throw new Error(`Unpin failed: ${res.status}`);
       }

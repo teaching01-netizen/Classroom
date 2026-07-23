@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { fetchFresh } from '../api/fetchFresh';
 
 export function useCourseAttendance(courseId, { threshold = 0 } = {}) {
   const [data, setData] = useState(null);
@@ -19,7 +20,7 @@ export function useCourseAttendance(courseId, { threshold = 0 } = {}) {
     setError(null);
 
     try {
-      const res = await fetch(
+      const res = await fetchFresh(
         `/api/teacher/courses/${courseId}/attendance-report?threshold=${threshold}`,
         { signal: controller.signal }
       );

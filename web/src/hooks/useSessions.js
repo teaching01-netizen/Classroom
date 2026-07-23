@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useSessionStore } from '../store/useSessionStore';
 import { useFocusRefetch } from './useFocusRefetch';
 import { useWsReconnect } from './useWebSocket';
+import { fetchFresh } from '../api/fetchFresh';
 
 export const useSessions = (courseId) => {
   const { sessions, isInitialLoading, isRefreshing, error, setSessions, setCourseName, setInitialLoading, setRefreshing, setError, reset } = useSessionStore();
@@ -16,7 +17,7 @@ export const useSessions = (courseId) => {
       setInitialLoading();
     }
     try {
-      const res = await fetch(`/api/teacher/courses/${courseId}`);
+      const res = await fetchFresh(`/api/teacher/courses/${courseId}`);
       const result = await res.json();
       if (result.success) {
         setSessions(result.data.sessions || []);

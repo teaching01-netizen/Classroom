@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { fetchFresh } from '../api/fetchFresh';
 
 export function useBatchAttendance(courseIds, { threshold = 0 } = {}) {
   const [data, setData] = useState(null);
@@ -28,7 +29,7 @@ export function useBatchAttendance(courseIds, { threshold = 0 } = {}) {
       setError(null);
 
       try {
-        const res = await fetch('/api/teacher/courses/attendance-batch', {
+        const res = await fetchFresh('/api/teacher/courses/attendance-batch', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ course_ids: courseIds, threshold }),
