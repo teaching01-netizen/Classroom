@@ -70,9 +70,9 @@ SERVERLESS_IDLE_GRACE=2m
 
 When enabled:
 
-- Teacher, room, and WebSocket requests activate the idle lease; data is refreshed on demand within the request path.
+- Teacher, room, and WebSocket requests activate the idle lease; Warwick-owned data is read live within the request path.
 - Repeated business requests extend the activity deadline.
-- Periodic cache/session warmers and detached stale-while-revalidate jobs remain disabled in serverless mode; active QR rooms are safely persisted as stopped after the idle grace, Warwick keep-alive connections close, and PostgreSQL connections drain to zero.
+- No background Warwick data refreshers or detached stale-data jobs run; active QR rooms are safely persisted as stopped after the idle grace, Warwick keep-alive connections close, and PostgreSQL connections drain to zero.
 - Health checks, Prometheus scrapes, and static files do not activate background work.
 - A later business request starts a fresh active generation automatically.
 
@@ -87,3 +87,9 @@ SERVERLESS_ENABLED=false
 ```
 
 `SERVERLESS_IDLE_GRACE` accepts values from `30s` through `6m`. Invalid values fail startup instead of silently selecting an unsafe configuration. The six-minute ceiling preserves at least four minutes of Railway's ten-minute quiet budget for cleanup and connection draining.
+
+## Data freshness contract
+
+Warwick is the source of truth for courses, sessions, student profiles, check-ins, and attendance reports. Each admitted read fetches the current upstream value through the bounded Warwick session pool; live errors are returned without stale or PostgreSQL snapshot fallback. Reports are computed per request and are not persisted as upstream replicas.
+
+PostgreSQL retains room state, teacher favourites, and saved dashboard views. API JSON responses send `Cache-Control: no-store, no-cache, must-revalidate, max-age=0`, `Pragma: no-cache`, and `Expires: 0`; frontend API calls use browser `cache: 'no-store'`.

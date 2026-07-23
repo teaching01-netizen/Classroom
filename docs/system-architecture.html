@@ -239,7 +239,6 @@ flowchart TB
     subgraph External["External Services"]
         Warwick[Warwick HumanTix]
         PostgreSQL[(PostgreSQL)]
-        Cache[(In-Memory Cache)]
     end
     
     UI --> Store
@@ -253,7 +252,6 @@ flowchart TB
     Services --> Domain
     Services --> Warwick
     Services --> PostgreSQL
-    Services --> Cache
     
     style Frontend fill:#1e40af,stroke:#3b82f6,stroke-width:2px
     style Backend fill:#065f46,stroke:#10b981,stroke-width:2px
@@ -294,10 +292,7 @@ flowchart LR
     
     subgraph Service["service/"]
         RM[RoomManager]
-        DR[DataRefresher]
-        SP[SessionPrewarmer]
-        RH[ReportHydrator]
-        RP[ReportPersister]
+        Teacher[TeacherService]
     end
     
     subgraph Domain["domain/"]
@@ -323,7 +318,7 @@ flowchart LR
     WS --> RM
     RM --> Client
     RM --> Repos
-    DR --> CC
+    Teacher --> CC
     CC --> Auth
     CC --> Pool
     Client --> Auth
@@ -431,7 +426,7 @@ sequenceDiagram
       <h2>Attendance Dashboard Architecture</h2>
       <p class="description">
         The absence dashboard aggregates attendance data across all courses.
-        It uses a multi-layered caching strategy with background refresh.
+        It computes from live Warwick session data with bounded request-local concurrency.
       </p>
       <div class="diagram-container">
         <pre class="mermaid">
@@ -439,36 +434,22 @@ flowchart TB
     subgraph Request["Request Flow"]
         FE[Frontend Dashboard]
         API[API Handler]
-        Hydrator[Report Hydrator]
+        Compute[Live Report Compute]
     end
     
     subgraph DataSources["Data Sources"]
         WarwickAPI[Warwick API]
-        Cache[In-Memory Cache]
         DB[(PostgreSQL)]
     end
     
-    subgraph Background["Background Jobs"]
-        Refresher[DataRefresher]
-        Prewarmer[SessionPrewarmer]
-    end
-    
     FE --> |GET /absence-dashboard| API
-    API --> Hydrator
-    
-    Hydrator --> Cache
-    Cache --> |Cache Miss| WarwickAPI
-    WarwickAPI --> |Enrich Cache| Cache
-    
-    Refresher --> |Periodic Refresh| WarwickAPI
-    Prewarmer --> |Pre-compute Reports| DB
-    
-    Hydrator --> |Read Pre-warmed| DB
-    DB --> |Persist Reports| DB
+    API --> Compute
+    Compute --> |Live course/session reads| WarwickAPI
+    Compute --> |Return report only| API
+    DB -.-> |Rooms, favourites, saved views only| API
     
     style Request fill:#3b82f6,stroke:#60a5fa,stroke-width:2px
     style DataSources fill:#10b981,stroke:#34d399,stroke-width:2px
-    style Background fill:#a855f7,stroke:#c084fc,stroke-width:2px
         </pre>
       </div>
     </div>
@@ -551,13 +532,13 @@ flowchart LR
         </div>
         <div class="flow-step">
           <span class="step-number">3</span>
-          <h4>Data Refresher</h4>
-          <p>Background job that periodically fetches course data to warm the cache and ensure fresh data availability.</p>
+          <h4>Live upstream reads</h4>
+          <p>Course, session, profile, check-in, and report reads query Warwick during the admitted request and never fall back to a local upstream snapshot.</p>
         </div>
         <div class="flow-step">
           <span class="step-number">4</span>
-          <h4>Report Prewarmer</h4>
-          <p>Pre-computes attendance reports and persists them to PostgreSQL for fast dashboard loading.</p>
+          <h4>HTTP freshness</h4>
+          <p>API responses and frontend requests explicitly disable intermediary and browser cache reuse while focus, polling, and WebSocket reconnect paths remain active.</p>
         </div>
       </div>
     </div>
