@@ -272,6 +272,125 @@ func TestFetchCourses_NilDataField(t *testing.T) {
 	assert.Empty(t, courses)
 }
 
+func TestGetCourses_AlwaysFetchesUpstream(t *testing.T) {
+	mc := cache.New()
+	apiCalls := 0
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		w.Header().Set("Content-Type", "application/json")
+		courseName := "Course A"
+		if apiCalls == 2 {
+			courseName = "Course B"
+		}
+		_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":1,"recordsFiltered":1,"data":[{"ID":"c1","CourseName":"` + courseName + `","Cycle":"","Enrolled":10,"StartDate":"2020-01-01T00:00:00","EndDate":"2020-06-30T23:59:59"}]}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	first, err := client.GetCourses()
+	require.NoError(t, err)
+	second, err := client.GetCourses()
+	require.NoError(t, err)
+
+	require.Equal(t, "Course A", first[0].Name)
+	require.Equal(t, "Course B", second[0].Name)
+	require.Equal(t, 2, apiCalls)
+}
+
+func TestGetCourseDetail_AlwaysFetchesUpstream(t *testing.T) {
+	mc := cache.New()
+	mc.Set("courses", []domain.CourseSummary{{CourseID: "c1", Name: "Math"}}, time.Hour)
+	apiCalls := 0
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		w.Header().Set("Content-Type", "application/json")
+		name := "Week 1"
+		if apiCalls == 2 {
+			name = "Week 2"
+		}
+		_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":1,"recordsFiltered":1,"data":[{"dID":"s1","dName":"` + name + `","dStatus":"Finished"}]}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	first, err := client.GetCourseDetail("c1")
+	require.NoError(t, err)
+	second, err := client.GetCourseDetail("c1")
+	require.NoError(t, err)
+
+	require.Equal(t, "Week 1", first.Sessions[0].Name)
+	require.Equal(t, "Week 2", second.Sessions[0].Name)
+	require.Equal(t, 2, apiCalls)
+}
+
+func TestGetSessionDetail_AlwaysFetchesUpstream(t *testing.T) {
+	mc := cache.New()
+	apiCalls := 0
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		w.Header().Set("Content-Type", "application/json")
+		name := "Alice"
+		if apiCalls == 2 {
+			name = "Bob"
+		}
+		_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":1,"recordsFiltered":1,"data":[{"StudentID":"STU001","StudentName":"` + name + `","StudentNickName":"","StudentSchool":"Science","StudentCheckIn":true,"StudentPPoint":0}]}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	first, err := client.GetSessionDetail("c1", "s1")
+	require.NoError(t, err)
+	second, err := client.GetSessionDetail("c1", "s1")
+	require.NoError(t, err)
+
+	require.Equal(t, "Alice", first.Students[0].Name)
+	require.Equal(t, "Bob", second.Students[0].Name)
+	require.Equal(t, 2, apiCalls)
+}
+
+func TestLiveReadError_DoesNotReturnPreviousPayload(t *testing.T) {
+	mc := cache.New()
+	apiCalls := 0
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		if apiCalls == 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":1,"recordsFiltered":1,"data":[{"ID":"c1","CourseName":"Course A","Cycle":"","Enrolled":10,"StartDate":"2020-01-01T00:00:00","EndDate":"2020-06-30T23:59:59"}]}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	_, err = client.GetCourses()
+	require.NoError(t, err)
+	second, err := client.GetCourses()
+	require.Error(t, err)
+	require.Nil(t, second)
+	require.Equal(t, 2, apiCalls)
+}
+
 func TestFetchCourses_CourseStatusComputation(t *testing.T) {
 	mc := cache.New()
 
@@ -537,6 +656,36 @@ func TestFetchStudentProfiles_Pagination(t *testing.T) {
 	assert.Equal(t, "STU1001", profiles[4].StudentID)
 	assert.Equal(t, 3, requestCount, "should make exactly 3 requests")
 	assert.Equal(t, []int{0, 500, 1000}, requestedStarts, "should request starts 0, 500, 1000")
+}
+
+func TestFetchStudentProfiles_AlwaysFetchesUpstream(t *testing.T) {
+	mc := cache.New()
+	apiCalls := 0
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		w.Header().Set("Content-Type", "application/json")
+		name := "Alice"
+		if apiCalls == 2 {
+			name = "Bob"
+		}
+		_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":1,"recordsFiltered":1,"data":[{"StudentID":"STU001","StudentGuid":"guid-a","FullName":"` + name + `","School":"Science"}]}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+	client := NewClassroomClientFromPool(pool, TierTeacher, mc)
+	client.baseURL = apiServer.URL
+
+	first, err := client.FetchStudentProfiles()
+	require.NoError(t, err)
+	second, err := client.FetchStudentProfiles()
+	require.NoError(t, err)
+
+	require.Equal(t, "Alice", first[0].FullName)
+	require.Equal(t, "Bob", second[0].FullName)
+	require.Equal(t, 2, apiCalls)
 }
 
 func TestFetchStudentProfiles_CacheHitSkipsWarwick(t *testing.T) {

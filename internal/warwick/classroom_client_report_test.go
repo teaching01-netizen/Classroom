@@ -264,6 +264,41 @@ func TestGetCourseAttendanceReport_SingleflightDedup(t *testing.T) {
 		"at least 1 computation must happen")
 }
 
+func TestGetCourseAttendanceReport_AlwaysComputesLive(t *testing.T) {
+	c := cache.New()
+	client := newTestClient(c)
+	source := &versionedSessionDataSource{}
+
+	first, err := client.GetCourseAttendanceReport(
+		t.Context(), "c1", "Live Course", testSessions, 4, source, nil,
+	)
+	require.NoError(t, err)
+	second, err := client.GetCourseAttendanceReport(
+		t.Context(), "c1", "Live Course", testSessions, 4, source, nil,
+	)
+	require.NoError(t, err)
+
+	require.NotEqual(t, first.Students, second.Students)
+	require.Equal(t, 2, source.calls)
+	require.False(t, second.Stale)
+}
+
+type versionedSessionDataSource struct {
+	calls int
+}
+
+func (s *versionedSessionDataSource) FetchSessionDetailLive(_ context.Context, _ string) (*domain.SessionDetail, error) {
+	s.calls++
+	return &domain.SessionDetail{
+		SessionSummary: domain.SessionSummary{SessionID: "s1"},
+		Students: []domain.StudentCheckin{{
+			StudentID: "student-1",
+			Name:      map[bool]string{false: "Alice", true: "Bob"}[s.calls > 1],
+			CheckedIn: s.calls > 1,
+		}},
+	}, nil
+}
+
 // slowSessionDataSource adds a delay to simulate real network latency,
 // ensuring concurrent goroutines actually overlap in the singleflight.
 type slowSessionDataSource struct {
