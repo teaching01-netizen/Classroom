@@ -7,9 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
-
 	"qr-command-center/internal/domain"
+	"strings"
+	"time"
 )
 
 // ToggleCheckin updates a student's check-in status for a session.
@@ -40,7 +40,7 @@ func (c *ClassroomClient) ToggleCheckin(ctx context.Context, courseID, sessionID
 }
 
 func (c *ClassroomClient) toggleCheckinWithPool(ctx context.Context, courseID, sessionID, studentID string, checked bool) error {
-	ref, err := c.pool.Acquire(TierInteractive)
+	ref, err := c.pool.AcquireWithTimeoutContext(ctx, TierInteractive, 5*time.Second)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return domain.ErrAuthConflict
