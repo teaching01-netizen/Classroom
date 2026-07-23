@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 
 	"qr-command-center/internal/domain"
@@ -43,6 +44,10 @@ type ClassroomClient struct {
 
 	// courseDetailConcurrency bounds concurrent detail fetches during enrichment.
 	courseDetailConcurrency int
+
+	// sf coalesces identical overlapping upstream requests.
+	// Keys include operation + request parameters; no result caching after completion.
+	sf singleflight.Group
 }
 
 // NewClassroomClient creates a ClassroomClient with the given auth instance.
@@ -164,6 +169,20 @@ func (c *ClassroomClient) checkAuth(resp *http.Response) error {
 	}
 
 	return nil
+}
+
+// doSingleflight wraps singleflight.DoChan with context cancellation.
+// The fn is called with context.Background() so that a single waiter's
+// cancellation does not cancel the shared upstream call. Returns (nil, ctx.Err())
+// when the caller's context is done; the shared call continues for other waiters.
+func (c *ClassroomClient) doSingleflight(ctx context.Context, key string, fn func() (interface{}, error)) (interface{}, error) {
+	ch := c.sf.DoChan(key, fn)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case r := <-ch:
+		return r.Val, r.Err
+	}
 }
 
 // SetRateLimiter sets the rate limiter for live session-detail fetches.

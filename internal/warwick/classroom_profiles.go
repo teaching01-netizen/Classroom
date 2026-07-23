@@ -23,7 +23,14 @@ var userIDFromJSRegex = regexp.MustCompile(`d\.UserID\s*=\s*['"]([0-9a-fA-F]{8}-
 // FetchStudentProfiles fetches the list of student profiles from Warwick's UserGroup search.
 func (c *ClassroomClient) FetchStudentProfiles(ctx context.Context) ([]domain.StudentProfile, error) {
 	if c.pool != nil {
-		return c.fetchStudentProfilesWithPool(ctx)
+		key := "student-profiles"
+		v, err := c.doSingleflight(ctx, key, func() (interface{}, error) {
+			return c.fetchStudentProfilesWithPool(context.Background())
+		})
+		if err != nil {
+			return nil, err
+		}
+		return v.([]domain.StudentProfile), nil
 	}
 
 	if c.auth == nil {

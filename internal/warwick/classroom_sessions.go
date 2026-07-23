@@ -31,7 +31,14 @@ func (c *ClassroomClient) getCourseDetailLive(ctx context.Context, courseID, cou
 	}
 
 	if c.pool != nil {
-		return c.getCourseDetailWithPool(ctx, courseID, courseName)
+		key := "course-detail:" + courseID + ":" + courseName
+		v, err := c.doSingleflight(ctx, key, func() (interface{}, error) {
+			return c.getCourseDetailWithPool(context.Background(), courseID, courseName)
+		})
+		if err != nil {
+			return nil, err
+		}
+		return v.(*domain.CourseDetail), nil
 	}
 
 	var lastErr error
@@ -300,32 +307,40 @@ func (c *ClassroomClient) FetchSessionDetailLive(ctx context.Context, sessionID 
 	}
 
 	// Rate-limit live fetches if a limiter is configured.
+	// This is per-waiter: each caller independently acquires a rate limit token.
 	if c.rateLimiter != nil {
 		if err := c.rateLimiter.Wait(ctx); err != nil {
 			return nil, domain.ErrRateLimited
 		}
 	}
 
-	ref, err := c.pool.AcquireWithTimeoutContext(ctx, c.tier, 5*time.Second)
-	if err != nil {
-		if errors.Is(err, ErrAuthConflict) {
-			return nil, domain.ErrAuthConflict
+	key := "session-detail:" + sessionID
+	v, err := c.doSingleflight(ctx, key, func() (interface{}, error) {
+		ref, err := c.pool.AcquireWithTimeoutContext(context.Background(), c.tier, 5*time.Second)
+		if err != nil {
+			if errors.Is(err, ErrAuthConflict) {
+				return nil, domain.ErrAuthConflict
+			}
+			if errors.Is(err, ErrNoAvailableSessions) {
+				return nil, domain.ErrPoolExhausted
+			}
+			if errors.Is(err, context.Canceled) {
+				return nil, err
+			}
+			return nil, domain.ErrAuthExpired
 		}
-		if errors.Is(err, ErrNoAvailableSessions) {
-			return nil, domain.ErrPoolExhausted
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, domain.ErrAuthExpired
-	}
-	defer c.pool.Release(ref)
+		defer c.pool.Release(ref)
 
-	detail, err := c.fetchSessionDetail(ctx, ref.Cookie, sessionID)
+		detail, err := c.fetchSessionDetail(context.Background(), ref.Cookie, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		return detail, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	return detail, nil
+	return v.(*domain.SessionDetail), nil
 }
 
 // lookupCourseName performs a request-local course-list read for direct

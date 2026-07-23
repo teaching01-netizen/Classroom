@@ -18,12 +18,19 @@ import (
 // request-local session counts. No upstream-owned data is retained locally.
 func (c *ClassroomClient) GetCourses(ctx context.Context) ([]domain.CourseSummary, error) {
 	if c.pool != nil {
-		courses, err := c.getCoursesWithPool(ctx)
+		key := "courses:" + c.effectiveUserID()
+		v, err := c.doSingleflight(ctx, key, func() (interface{}, error) {
+			courses, err := c.getCoursesWithPool(context.Background())
+			if err != nil {
+				return nil, err
+			}
+			c.enrichCourses(context.Background(), courses)
+			return courses, nil
+		})
 		if err != nil {
 			return nil, err
 		}
-		c.enrichCourses(ctx, courses)
-		return courses, nil
+		return v.([]domain.CourseSummary), nil
 	}
 
 	var lastErr error
