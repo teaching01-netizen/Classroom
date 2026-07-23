@@ -13,8 +13,8 @@ import (
 // ComputeCourseAttendanceReport builds a per-student attendance report for a
 // course by fetching each session's student list live via the fetcher.
 //
-// It respects context cancellation, uses bounded concurrency (2 goroutines),
-// and handles 429 rate-limit errors with a single retry + backoff.
+// It respects context cancellation, uses bounded concurrency (concurrency
+// goroutines), and handles 429 rate-limit errors with a single retry + backoff.
 //
 // Students who never appeared in any fetched session are excluded.
 // The denominator for each student is the number of sessions where they appeared
@@ -24,8 +24,13 @@ func ComputeCourseAttendanceReport(
 	source domain.SessionFetcher,
 	course *domain.CourseDetail,
 	threshold int,
+	concurrency int,
 ) *domain.CourseAttendanceReport {
 	start := time.Now()
+
+	if concurrency <= 0 {
+		concurrency = 2
+	}
 
 	sessions := course.Sessions
 	if len(sessions) == 0 {
@@ -67,7 +72,7 @@ func ComputeCourseAttendanceReport(
 	results := make([]sessionResult, len(sessions))
 
 	// Use a semaphore to bound concurrency.
-	sem := make(chan struct{}, 2)
+	sem := make(chan struct{}, concurrency)
 	var cancelled bool
 
 	for i, sess := range sessions {

@@ -58,7 +58,11 @@ func (c *ClassroomClient) GetCourses(ctx context.Context) ([]domain.CourseSummar
 // detail fetch does not recursively request the full course list.
 func (c *ClassroomClient) enrichCourses(ctx context.Context, courses []domain.CourseSummary) {
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 2) // match teacher tier capacity (default 2 sessions)
+	concurrency := c.courseDetailConcurrency
+	if concurrency <= 0 {
+		concurrency = 2
+	}
+	sem := make(chan struct{}, concurrency) // match configured course detail concurrency
 	var mu sync.Mutex
 
 	for i := range courses {

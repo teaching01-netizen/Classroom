@@ -37,6 +37,12 @@ type ClassroomClient struct {
 	// rateLimiter gates live session-detail fetches (e.g. from the attendance
 	// report) to protect upstream Warwick from fan-out storms. nil = no limiting.
 	rateLimiter *rate.Limiter
+
+	// reportConcurrency bounds concurrent FetchSessionDetailLive calls per report.
+	reportConcurrency int
+
+	// courseDetailConcurrency bounds concurrent detail fetches during enrichment.
+	courseDetailConcurrency int
 }
 
 // NewClassroomClient creates a ClassroomClient with the given auth instance.
@@ -49,7 +55,9 @@ func NewClassroomClient(auth *WarwickAuth) *ClassroomClient {
 				return http.ErrUseLastResponse
 			},
 		},
-		baseURL: "https://warwick.humantix.cloud",
+		baseURL:                "https://warwick.humantix.cloud",
+		reportConcurrency:      2,
+		courseDetailConcurrency: 2,
 	}
 }
 
@@ -65,7 +73,9 @@ func NewClassroomClientFromPool(pool *SessionPool, tier SessionTier) *ClassroomC
 				return http.ErrUseLastResponse
 			},
 		},
-		baseURL: "https://warwick.humantix.cloud",
+		baseURL:                "https://warwick.humantix.cloud",
+		reportConcurrency:      2,
+		courseDetailConcurrency: 2,
 	}
 }
 
@@ -160,6 +170,22 @@ func (c *ClassroomClient) checkAuth(resp *http.Response) error {
 // Must be called before the client is used if rate limiting is desired.
 func (c *ClassroomClient) SetRateLimiter(l *rate.Limiter) {
 	c.rateLimiter = l
+}
+
+// SetReportConcurrency sets the max concurrent FetchSessionDetailLive calls per report.
+// Must be called before the client is used. If n <= 0, defaults to 2.
+func (c *ClassroomClient) SetReportConcurrency(n int) {
+	if n > 0 {
+		c.reportConcurrency = n
+	}
+}
+
+// SetCourseDetailConcurrency sets the max concurrent detail fetches during enrichment.
+// Must be called before the client is used. If n <= 0, defaults to 2.
+func (c *ClassroomClient) SetCourseDetailConcurrency(n int) {
+	if n > 0 {
+		c.courseDetailConcurrency = n
+	}
 }
 
 // SetBaseURL overrides the default Warwick base URL.

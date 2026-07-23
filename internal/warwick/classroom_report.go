@@ -30,8 +30,13 @@ func (c *ClassroomClient) GetCourseAttendanceReport(
 		Sessions: sessions,
 	}
 
+	concurrency := c.reportConcurrency
+	if concurrency <= 0 {
+		concurrency = 2
+	}
+
 	start := time.Now()
-	report := ComputeCourseAttendanceReport(ctx, source, course, threshold)
+	report := ComputeCourseAttendanceReport(ctx, source, course, threshold, concurrency)
 	metrics.ReportComputeDuration.WithLabelValues("live").Observe(time.Since(start).Seconds())
 	return report, nil
 }

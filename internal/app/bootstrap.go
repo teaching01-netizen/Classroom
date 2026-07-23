@@ -88,7 +88,9 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 		if cfg.UserID != "" {
 			classroomClient.SetUserID(cfg.UserID)
 		}
-		classroomClient.SetRateLimiter(rate.NewLimiter(rate.Limit(2), 2))
+		classroomClient.SetRateLimiter(rate.NewLimiter(rate.Limit(cfg.ReportRatePerSecond), cfg.ReportRateBurst))
+		classroomClient.SetReportConcurrency(cfg.ReportConcurrency)
+		classroomClient.SetCourseDetailConcurrency(cfg.CourseDetailConcurrency)
 	}
 
 	var defaultFetcher domain.SessionFetcher

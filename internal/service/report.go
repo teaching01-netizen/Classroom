@@ -13,6 +13,7 @@ func ComputeReport(
 	source domain.SessionFetcher,
 	course *domain.CourseDetail,
 	threshold int,
+	concurrency int,
 ) *domain.CourseAttendanceReport {
-	return warwick.ComputeCourseAttendanceReport(ctx, source, course, threshold)
+	return warwick.ComputeCourseAttendanceReport(ctx, source, course, threshold, concurrency)
 }

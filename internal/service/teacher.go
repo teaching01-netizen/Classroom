@@ -173,7 +173,7 @@ func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []str
 				return
 			}
 
-			report := ComputeReport(ctx, s.defaultFetcher, detail, threshold)
+			report := ComputeReport(ctx, s.defaultFetcher, detail, threshold, 2)
 			results[idx] = courseResult{report: report}
 		}(index, courseID)
 	}
@@ -283,7 +283,7 @@ func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain
 				return
 			}
 
-			report := ComputeReport(ctx, s.defaultFetcher, detail, threshold)
+			report := ComputeReport(ctx, s.defaultFetcher, detail, threshold, 2)
 			results[idx] = dashboardCourseResult{courseID: c.CourseID, courseName: c.Name, report: report}
 		}(i, course)
 	}

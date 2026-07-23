@@ -24,6 +24,12 @@ type Config struct {
 	InteractiveSessions int
 	ConnsPerHost        int
 
+	// --- Concurrency ---
+	ReportConcurrency       int
+	ReportRatePerSecond     int
+	ReportRateBurst         int
+	CourseDetailConcurrency int
+
 	// --- Timing ---
 	ServerlessEnabled   bool
 	ServerlessIdleGrace time.Duration
@@ -58,6 +64,10 @@ func LoadConfig() (Config, error) {
 		TeacherSessions:     getEnvInt("WARWICK_TEACHER_SESSIONS", 2),
 		InteractiveSessions: getEnvInt("WARWICK_INTERACTIVE_SESSIONS", 2),
 		ConnsPerHost:        getEnvInt("WARWICK_CONNS_PER_HOST", 50),
+		ReportConcurrency:       getEnvInt("WARWICK_REPORT_CONCURRENCY", 2),
+		ReportRatePerSecond:     getEnvInt("WARWICK_REPORT_RATE_PER_SECOND", 2),
+		ReportRateBurst:         getEnvInt("WARWICK_REPORT_RATE_BURST", 2),
+		CourseDetailConcurrency: getEnvInt("WARWICK_COURSE_DETAIL_CONCURRENCY", 2),
 		ServerlessEnabled:   serverlessEnabled,
 		ServerlessIdleGrace: serverlessIdleGrace,
 		DatabaseURL:         os.Getenv("DATABASE_URL"),

@@ -45,7 +45,7 @@ func BenchmarkComputeCourseAttendanceReport(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 4)
+		report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 4, 2)
 		if report == nil {
 			b.Fatal("report should not be nil")
 		}
@@ -107,7 +107,7 @@ func BenchmarkComputeCourseAttendanceReport_100Students(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2)
+		report := ComputeCourseAttendanceReport(context.Background(), fetcher, course, 2, 2)
 		if report == nil {
 			b.Fatal("report should not be nil")
 		}
