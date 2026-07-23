@@ -136,6 +136,21 @@ func (c *ClassroomClient) getCoursesWithPool(ctx context.Context) ([]domain.Cour
 	return nil, lastErr
 }
 
+// fetchCourseCatalog fetches the course list from Warwick, optionally enriching
+// with session counts. When enrich=true, per-course detail fetches populate
+// TotalSessions/CompletedSessions (one catalog request + N detail requests).
+// When enrich=false, only the raw names are returned (one catalog request).
+func (c *ClassroomClient) fetchCourseCatalog(ctx context.Context, enrich bool) ([]domain.CourseSummary, error) {
+	courses, err := c.fetchCoursesRaw(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if enrich {
+		c.enrichCourses(ctx, courses)
+	}
+	return courses, nil
+}
+
 // fetchCoursesRaw fetches the course list from Warwick without enrichment for
 // request-local name lookup during a direct course-detail request.
 func (c *ClassroomClient) fetchCoursesRaw(ctx context.Context) ([]domain.CourseSummary, error) {

@@ -400,3 +400,152 @@ func TestEnrichCourses_PassesKnownName(t *testing.T) {
 	assert.Equal(t, 1, f.courseListCalls, "should make exactly 1 course-list call")
 	assert.Equal(t, 2, f.detailCalls, "enrichment should make 2 detail calls for 2 active courses")
 }
+
+// --- Request Reduction Tests ---
+
+// TestGetCourseDetailWithName_SkipsCatalog verifies that a known course name
+// skips the catalog fetch entirely (VAL-REDUN-001).
+func TestGetCourseDetailWithName_SkipsCatalog(t *testing.T) {
+	f := newRequestCountFixture(t)
+
+	detail, err := f.client.GetCourseDetailWithName(context.Background(), "c1", "Math 101")
+	require.NoError(t, err)
+	require.NotNil(t, detail)
+
+	assert.Equal(t, 0, f.courseListCalls, "GetCourseDetailWithName with known name should make 0 course-list calls")
+	assert.Equal(t, 1, f.detailCalls, "GetCourseDetailWithName should make exactly 1 detail call")
+	assert.Equal(t, "Math 101", detail.Name, "returned CourseDetail.Name should match supplied courseName")
+}
+
+// TestGetCourseDetailWithName_FallbackToCatalog verifies that an empty course
+// name triggers a catalog lookup (VAL-REDUN-002).
+func TestGetCourseDetailWithName_FallbackToCatalog(t *testing.T) {
+	f := newRequestCountFixture(t)
+
+	detail, err := f.client.GetCourseDetailWithName(context.Background(), "c1", "")
+	require.NoError(t, err)
+	require.NotNil(t, detail)
+
+	assert.GreaterOrEqual(t, f.courseListCalls, 1, "GetCourseDetailWithName with empty name should make at least 1 course-list call")
+	assert.Equal(t, 1, f.detailCalls, "GetCourseDetailWithName should make exactly 1 detail call")
+	assert.Equal(t, "Math 101", detail.Name, "returned CourseDetail.Name should match the looked-up name")
+}
+
+// TestGetCourseDetailWithName_SameShape verifies that GetCourseDetailWithName
+// returns the same shape as GetCourseDetail (VAL-REDUN-003).
+func TestGetCourseDetailWithName_SameShape(t *testing.T) {
+	f := newRequestCountFixture(t)
+
+	withName, err := f.client.GetCourseDetailWithName(context.Background(), "c1", "Math 101")
+	require.NoError(t, err)
+	require.NotNil(t, withName)
+
+	withoutName, err := f.client.GetCourseDetail(context.Background(), "c1")
+	require.NoError(t, err)
+	require.NotNil(t, withoutName)
+
+	assert.Equal(t, len(withoutName.Sessions), len(withName.Sessions), "Sessions length should match")
+	assert.Equal(t, withoutName.TotalSessions, withName.TotalSessions, "TotalSessions should match")
+	assert.Equal(t, withoutName.CompletedSessions, withName.CompletedSessions, "CompletedSessions should match")
+}
+
+// TestGetCourseDetailWithName_SequentialCallsReachUpstream verifies that
+// sequential calls each make a fresh upstream request (VAL-REDUN-004).
+func TestGetCourseDetailWithName_SequentialCallsReachUpstream(t *testing.T) {
+	detailCalls := 0
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !strings.Contains(r.URL.Path, "ClassAttendanceDetailSearch") {
+			_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":1,"recordsFiltered":1,"data":[{"ID":"c1","CourseName":"Math"}]}`))
+			return
+		}
+		detailCalls++
+		name := "Week 1"
+		if detailCalls == 2 {
+			name = "Week 2"
+		}
+		_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":1,"recordsFiltered":1,"data":[{"dID":"s1","dName":"` + name + `","dStatus":"Finished"}]}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
+	client.baseURL = apiServer.URL
+
+	first, err := client.GetCourseDetailWithName(context.Background(), "c1", "Math 101")
+	require.NoError(t, err)
+	second, err := client.GetCourseDetailWithName(context.Background(), "c1", "Math 101")
+	require.NoError(t, err)
+
+	require.Equal(t, "Week 1", first.Sessions[0].Name)
+	require.Equal(t, "Week 2", second.Sessions[0].Name)
+	require.Equal(t, 2, detailCalls, "two sequential calls should make 2 detail calls")
+}
+
+// TestFetchCourseCatalog_WithEnrichment verifies that fetchCourseCatalog with
+// enrichment returns fully populated summaries (VAL-REDUN-005).
+func TestFetchCourseCatalog_WithEnrichment(t *testing.T) {
+	f := newRequestCountFixture(t)
+
+	courses, err := f.client.fetchCourseCatalog(context.Background(), true)
+	require.NoError(t, err)
+	require.Len(t, courses, 2)
+
+	assert.Equal(t, 1, f.courseListCalls, "fetchCourseCatalog should make exactly 1 course-list call")
+	assert.Equal(t, 2, f.detailCalls, "fetchCourseCatalog with enrich=true should make 2 detail calls for 2 active courses")
+	assert.Greater(t, courses[0].TotalSessions, 0, "active course should have TotalSessions > 0")
+}
+
+// TestFetchCourseCatalog_WithoutEnrichment verifies that fetchCourseCatalog
+// without enrichment returns raw names only (VAL-REDUN-006).
+func TestFetchCourseCatalog_WithoutEnrichment(t *testing.T) {
+	f := newRequestCountFixture(t)
+
+	courses, err := f.client.fetchCourseCatalog(context.Background(), false)
+	require.NoError(t, err)
+	require.Len(t, courses, 2)
+
+	assert.Equal(t, 1, f.courseListCalls, "fetchCourseCatalog should make exactly 1 course-list call")
+	assert.Equal(t, 0, f.detailCalls, "fetchCourseCatalog with enrich=false should make 0 detail calls")
+	assert.Equal(t, "Math 101", courses[0].Name, "returned CourseSummary.Name should be correct")
+	assert.Equal(t, "Physics 201", courses[1].Name, "returned CourseSummary.Name should be correct")
+}
+
+// TestRequestGraph_SingleCourseDetail verifies GetCourseDetail request graph
+// (VAL-REDUN-018): 1 catalog + 1 detail.
+func TestRequestGraph_SingleCourseDetail(t *testing.T) {
+	f := newRequestCountFixture(t)
+
+	_, err := f.client.GetCourseDetail(context.Background(), "c1")
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, f.courseListCalls, "GetCourseDetail should make exactly 1 course-list call")
+	assert.Equal(t, 1, f.detailCalls, "GetCourseDetail should make exactly 1 detail call")
+}
+
+// TestRequestGraph_CourseDetailWithName verifies GetCourseDetailWithName
+// request graph (VAL-REDUN-019): 0 catalog + 1 detail.
+func TestRequestGraph_CourseDetailWithName(t *testing.T) {
+	f := newRequestCountFixture(t)
+
+	_, err := f.client.GetCourseDetailWithName(context.Background(), "c1", "Math 101")
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, f.courseListCalls, "GetCourseDetailWithName with known name should make 0 course-list calls")
+	assert.Equal(t, 1, f.detailCalls, "GetCourseDetailWithName should make exactly 1 detail call")
+}
+
+// TestGetCourses_EnrichmentStillPopulates verifies backward compatibility:
+// GetCourses still enriches with session counts (VAL-REDUN-014).
+func TestGetCourses_EnrichmentStillPopulates(t *testing.T) {
+	f := newRequestCountFixture(t)
+
+	courses, err := f.client.GetCourses(context.Background())
+	require.NoError(t, err)
+	require.Len(t, courses, 2)
+
+	assert.Greater(t, courses[0].TotalSessions, 0, "active course should have TotalSessions > 0")
+	assert.Greater(t, courses[1].TotalSessions, 0, "active course should have TotalSessions > 0")
+}

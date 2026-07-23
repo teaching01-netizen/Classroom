@@ -140,7 +140,19 @@ type BatchCourseResult struct {
 }
 
 // GetBatchAttendance returns attendance reports for multiple courses.
+// Loads the course catalog once, builds a request-local courseID->name map,
+// and reuses it for all detail calls via GetCourseDetailWithName.
 func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []string, threshold int) (*BatchAttendanceResult, error) {
+
+	// Load course catalog once to build a request-local name map.
+	allCourses, err := s.dp.GetCourses(ctx)
+	if err != nil {
+		return nil, err
+	}
+	courseNames := make(map[string]string, len(allCourses))
+	for _, c := range allCourses {
+		courseNames[c.CourseID] = c.Name
+	}
 
 	type courseResult struct {
 		report *domain.CourseAttendanceReport
@@ -155,7 +167,7 @@ func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []str
 		go func(idx int, cid string) {
 			defer func() { <-sem }()
 
-			detail, err := s.dp.GetCourseDetail(ctx, cid)
+			detail, err := s.dp.GetCourseDetailWithName(ctx, cid, courseNames[cid])
 			if err != nil {
 				results[idx] = courseResult{err: err}
 				return
@@ -246,7 +258,7 @@ func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain
 			var lastErr error
 			for attempt := 0; attempt < 3; attempt++ {
 				var err error
-				detail, err = s.dp.GetCourseDetail(ctx, c.CourseID)
+				detail, err = s.dp.GetCourseDetailWithName(ctx, c.CourseID, c.Name)
 				if err == nil {
 					lastErr = nil
 					break
