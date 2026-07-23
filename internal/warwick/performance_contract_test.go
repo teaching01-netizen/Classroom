@@ -549,3 +549,53 @@ func TestGetCourses_EnrichmentStillPopulates(t *testing.T) {
 	assert.Greater(t, courses[0].TotalSessions, 0, "active course should have TotalSessions > 0")
 	assert.Greater(t, courses[1].TotalSessions, 0, "active course should have TotalSessions > 0")
 }
+
+// TestRequestGraph_Dashboard verifies the dashboard request graph
+// (VAL-REDUN-016): 1 catalog + C detail requests for C courses.
+// This validates at the warwick client level that the dashboard pattern
+// produces the expected request counts.
+func TestRequestGraph_Dashboard(t *testing.T) {
+	f := newRequestCountFixture(t)
+
+	// Load catalog without enrichment — 1 catalog call, 0 detail calls.
+	courses, err := f.client.fetchCourseCatalog(context.Background(), false)
+	require.NoError(t, err)
+	require.Len(t, courses, 2)
+
+	// For each course, call GetCourseDetailWithName with known name.
+	// Each call should make 1 detail request and 0 catalog requests.
+	for _, c := range courses {
+		detail, err := f.client.GetCourseDetailWithName(context.Background(), c.CourseID, c.Name)
+		require.NoError(t, err)
+		require.NotNil(t, detail)
+	}
+
+	// Dashboard: 1 catalog + C detail requests for C courses.
+	assert.Equal(t, 1, f.courseListCalls, "dashboard should make exactly 1 course-list call")
+	assert.Equal(t, 2, f.detailCalls, "dashboard with 2 courses should make 2 detail calls")
+}
+
+// TestRequestGraph_BatchAttendance verifies the batch attendance request graph
+// (VAL-REDUN-017): 1 catalog + N detail requests for N courses.
+// This validates at the warwick client level that the batch attendance pattern
+// produces the expected request counts.
+func TestRequestGraph_BatchAttendance(t *testing.T) {
+	f := newRequestCountFixture(t)
+
+	// Load catalog without enrichment — 1 catalog call, 0 detail calls.
+	courses, err := f.client.fetchCourseCatalog(context.Background(), false)
+	require.NoError(t, err)
+	require.Len(t, courses, 2)
+
+	// For each of the N courses, call GetCourseDetailWithName with known name.
+	// Each call should make 1 detail request and 0 catalog requests.
+	for _, c := range courses {
+		detail, err := f.client.GetCourseDetailWithName(context.Background(), c.CourseID, c.Name)
+		require.NoError(t, err)
+		require.NotNil(t, detail)
+	}
+
+	// Batch attendance: 1 catalog + N detail requests for N courses.
+	assert.Equal(t, 1, f.courseListCalls, "batch attendance should make exactly 1 course-list call")
+	assert.Equal(t, 2, f.detailCalls, "batch attendance with 2 courses should make 2 detail calls")
+}
