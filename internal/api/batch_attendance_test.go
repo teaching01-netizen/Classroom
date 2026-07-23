@@ -27,7 +27,7 @@ func (s *stubFetcher) FetchSessionDetailLive(_ context.Context, _ string) (*doma
 // but will fail on actual API calls (useful for body validation tests).
 func newNonNilTeacherService() *service.TeacherService {
 	cc := warwick.NewClassroomClient(nil)
-	return service.NewTeacherService(cc, &stubFetcher{})
+	return service.NewTeacherService(cc, &stubFetcher{}, 2)
 }
 
 func TestBatchAttendance_NilClient_Returns503(t *testing.T) {

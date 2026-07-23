@@ -97,7 +97,7 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 	if classroomClient != nil {
 		defaultFetcher = classroomClient
 	}
-	teacherService := service.NewTeacherService(classroomClient, defaultFetcher)
+	teacherService := service.NewTeacherService(classroomClient, defaultFetcher, cfg.ReportConcurrency)
 
 	workers := make([]service.ManagedWorker, 0)
 	idleHandlers := []service.IdleHandler{

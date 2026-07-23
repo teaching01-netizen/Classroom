@@ -28,19 +28,24 @@ type TeacherDataProvider interface {
 // It sits between the HTTP handlers and the Warwick client, providing
 // a testable layer that can be mocked independently of HTTP concerns.
 type TeacherService struct {
-	dp             TeacherDataProvider
-	defaultFetcher domain.SessionFetcher
+	dp                TeacherDataProvider
+	defaultFetcher    domain.SessionFetcher
+	reportConcurrency int
 }
 
-// NewTeacherService creates a TeacherService. Both args must be non-nil.
-func NewTeacherService(dp TeacherDataProvider, defaultFetcher domain.SessionFetcher) *TeacherService {
+// NewTeacherService creates a TeacherService. All args must be non-nil.
+// reportConcurrency controls the max concurrent FetchSessionDetailLive calls per report.
+func NewTeacherService(dp TeacherDataProvider, defaultFetcher domain.SessionFetcher, reportConcurrency int) *TeacherService {
 	if dp == nil {
 		panic("TeacherService: dp must not be nil")
 	}
 	if defaultFetcher == nil {
 		panic("TeacherService: defaultFetcher must not be nil")
 	}
-	return &TeacherService{dp: dp, defaultFetcher: defaultFetcher}
+	if reportConcurrency <= 0 {
+		reportConcurrency = 2
+	}
+	return &TeacherService{dp: dp, defaultFetcher: defaultFetcher, reportConcurrency: reportConcurrency}
 }
 
 // GetCourses returns the list of courses from Warwick.
@@ -173,7 +178,7 @@ func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []str
 				return
 			}
 
-			report := ComputeReport(ctx, s.defaultFetcher, detail, threshold, 2)
+			report := ComputeReport(ctx, s.defaultFetcher, detail, threshold, s.reportConcurrency)
 			results[idx] = courseResult{report: report}
 		}(index, courseID)
 	}
@@ -283,7 +288,7 @@ func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain
 				return
 			}
 
-			report := ComputeReport(ctx, s.defaultFetcher, detail, threshold, 2)
+			report := ComputeReport(ctx, s.defaultFetcher, detail, threshold, s.reportConcurrency)
 			results[idx] = dashboardCourseResult{courseID: c.CourseID, courseName: c.Name, report: report}
 		}(i, course)
 	}

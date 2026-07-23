@@ -16,7 +16,7 @@ import (
 func TestMetricsEndpoint_ReturnsPrometheusFormat(t *testing.T) {
 	rm := service.NewRoomManager(nil, nil)
 	cc := warwick.NewClassroomClient(nil)
-	ts := service.NewTeacherService(cc, &stubFetcher{})
+	ts := service.NewTeacherService(cc, &stubFetcher{}, 2)
 
 	router, rl := NewRouter(rm, ts, nil, nil, RouterOptions{WSMaxConns: 100})
 	defer rl.Stop()
@@ -36,7 +36,7 @@ func TestMetricsEndpoint_ReturnsPrometheusFormat(t *testing.T) {
 func TestMetricsEndpoint_ExcludesRemovedCacheMetrics(t *testing.T) {
 	rm := service.NewRoomManager(nil, nil)
 	cc := warwick.NewClassroomClient(nil)
-	ts := service.NewTeacherService(cc, &stubFetcher{})
+	ts := service.NewTeacherService(cc, &stubFetcher{}, 2)
 
 	router, rl := NewRouter(rm, ts, nil, nil, RouterOptions{WSMaxConns: 100})
 	defer rl.Stop()

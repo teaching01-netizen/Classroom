@@ -96,7 +96,7 @@ func (m *mockProvider) FetchSessionDetailLive(ctx context.Context, sessionID str
 // exactly one catalog request for N courses (VAL-REDUN-007).
 func TestGetAbsenceDashboard_OneCatalogRequest(t *testing.T) {
 	mock := newMockProvider()
-	svc := NewTeacherService(mock, mock)
+	svc := NewTeacherService(mock, mock, 2)
 
 	filters := domain.DashboardFilters{
 		CourseIds: []string{"c1", "c2"},
@@ -112,7 +112,7 @@ func TestGetAbsenceDashboard_OneCatalogRequest(t *testing.T) {
 // course name from the catalog to detail calls (VAL-REDUN-008).
 func TestGetAbsenceDashboard_PassesKnownName(t *testing.T) {
 	mock := newMockProvider()
-	svc := NewTeacherService(mock, mock)
+	svc := NewTeacherService(mock, mock, 2)
 
 	filters := domain.DashboardFilters{
 		CourseIds: []string{"c1", "c2"},
@@ -141,7 +141,7 @@ func TestGetAbsenceDashboard_CourseNamesInOutput(t *testing.T) {
 
 	mock := newMockProvider()
 	mock.detailReturn = detailReturn
-	svc := NewTeacherService(mock, &mockFetcher{})
+	svc := NewTeacherService(mock, &mockFetcher{}, 2)
 
 	filters := domain.DashboardFilters{
 		CourseIds: []string{"c1"},
@@ -160,7 +160,7 @@ func TestGetAbsenceDashboard_CourseNamesInOutput(t *testing.T) {
 // catalog once for N courses (VAL-REDUN-010).
 func TestGetBatchAttendance_OneCatalogLoad(t *testing.T) {
 	mock := newMockProvider()
-	svc := NewTeacherService(mock, mock)
+	svc := NewTeacherService(mock, mock, 2)
 
 	result, err := svc.GetBatchAttendance(context.Background(), []string{"c1", "c2", "c3"}, 4)
 	require.NoError(t, err)
@@ -174,7 +174,7 @@ func TestGetBatchAttendance_OneCatalogLoad(t *testing.T) {
 // request-local and not persisted between calls (VAL-REDUN-011).
 func TestGetBatchAttendance_CatalogMapNotPersisted(t *testing.T) {
 	mock := newMockProvider()
-	svc := NewTeacherService(mock, mock)
+	svc := NewTeacherService(mock, mock, 2)
 
 	_, err := svc.GetBatchAttendance(context.Background(), []string{"c1", "c2"}, 4)
 	require.NoError(t, err)
@@ -190,7 +190,7 @@ func TestGetBatchAttendance_CatalogMapNotPersisted(t *testing.T) {
 // course still loads the catalog (VAL-REDUN-012).
 func TestGetBatchAttendance_SingleCourseLoadsCatalog(t *testing.T) {
 	mock := newMockProvider()
-	svc := NewTeacherService(mock, mock)
+	svc := NewTeacherService(mock, mock, 2)
 
 	result, err := svc.GetBatchAttendance(context.Background(), []string{"c1"}, 4)
 	require.NoError(t, err)
@@ -208,7 +208,7 @@ func TestGetBatchAttendance_SingleCourseLoadsCatalog(t *testing.T) {
 // calls are race-free (VAL-REDUN-020).
 func TestGetAbsenceDashboard_ConcurrentCallsRaceFree(t *testing.T) {
 	mock := newMockProvider()
-	svc := NewTeacherService(mock, mock)
+	svc := NewTeacherService(mock, mock, 2)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
@@ -230,7 +230,7 @@ func TestGetAbsenceDashboard_ConcurrentCallsRaceFree(t *testing.T) {
 func TestGetCourseDetailWithName_ConcurrentCallsRaceFree(t *testing.T) {
 	// This is a service-level test that exercises the data provider interface.
 	mock := newMockProvider()
-	svc := NewTeacherService(mock, mock)
+	svc := NewTeacherService(mock, mock, 2)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
