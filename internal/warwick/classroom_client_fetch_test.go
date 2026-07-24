@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -447,6 +449,67 @@ func TestFetchCourses_UsesDefaultUserIDWhenNotConfigured(t *testing.T) {
 		"Warwick request should use defaultUserID when not configured")
 }
 
+func TestCourseCatalog_UserIDDetectionRunsOnceAfterFailure(t *testing.T) {
+	var pageCalls int
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			pageCalls++
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":1,"recordsFiltered":1,"data":[{"ID":"c1","CourseName":"Math","Cycle":"","Enrolled":1,"StartDate":"2026-01-01T00:00:00","EndDate":"2099-01-01T00:00:00"}]}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
+	client.baseURL = apiServer.URL
+
+	_, err = client.GetCourseCatalog(context.Background())
+	require.NoError(t, err)
+	_, err = client.GetCourseCatalog(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 3, pageCalls, "failed UserID detection should not repeat on every catalog read")
+}
+
+func TestUserIDDetectionRetriesAfterCancellation(t *testing.T) {
+	started := make(chan struct{})
+	var calls atomic.Int32
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			close(started)
+			time.Sleep(100 * time.Millisecond)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte("d.UserID = '11111111-2222-3333-4444-555555555555'"))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	client := NewClassroomClient(nil)
+	client.baseURL = apiServer.URL
+
+	ctx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan struct{})
+	go func() {
+		client.resolveUserID(ctx, "cookie")
+		close(firstDone)
+	}()
+	<-started
+	cancel()
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("canceled UserID discovery did not return")
+	}
+
+	assert.Equal(t, "11111111-2222-3333-4444-555555555555", client.resolveUserID(context.Background(), "cookie"))
+}
+
 func TestFetchStudentProfiles_Success(t *testing.T) {
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -502,6 +565,28 @@ func TestFetchStudentProfiles_Empty(t *testing.T) {
 	profiles, err := client.FetchStudentProfiles(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, profiles)
+}
+
+func TestFetchStudentProfiles_RejectsUnsafeRecordCount(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":-1,"recordsFiltered":-1,"data":[]}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	client := NewClassroomClientFromPool(pool, TierTeacher)
+	client.baseURL = apiServer.URL
+
+	profiles, err := client.FetchStudentProfiles(context.Background())
+	require.Error(t, err)
+	assert.Nil(t, profiles)
+	var fetchErr *domain.FetchError
+	require.ErrorAs(t, err, &fetchErr)
+	assert.Equal(t, domain.ErrKindInvalidPayload, fetchErr.Kind)
 }
 
 func TestFetchStudentProfiles_Pagination(t *testing.T) {

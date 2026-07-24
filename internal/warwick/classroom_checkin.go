@@ -20,8 +20,11 @@ func (c *ClassroomClient) ToggleCheckin(ctx context.Context, courseID, sessionID
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		cookie, _, err := c.auth.GetValidSession()
+		cookie, _, err := c.auth.GetValidSessionContext(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return domain.ErrAuthExpired
 		}
 		err = c.doToggleCheckin(ctx, cookie, sessionID, studentID, checked)
@@ -32,7 +35,10 @@ func (c *ClassroomClient) ToggleCheckin(ctx context.Context, courseID, sessionID
 		if err != domain.ErrAuthExpired || attempt == 1 {
 			break
 		}
-		if _, _, err := c.auth.ForceRefresh(); err != nil {
+		if _, _, err := c.auth.ForceRefreshContext(ctx); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return domain.ErrAuthExpired
 		}
 	}
@@ -62,7 +68,10 @@ func (c *ClassroomClient) toggleCheckinWithPool(ctx context.Context, courseID, s
 		if err != domain.ErrAuthExpired || attempt == 1 {
 			break
 		}
-		if _, _, err := c.pool.ForceRefreshOnSession(ref); err != nil {
+		if _, _, err := c.pool.ForceRefreshOnSessionContext(ctx, ref); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if errors.Is(err, ErrAuthConflict) {
 				return domain.ErrAuthConflict
 			}
@@ -84,7 +93,7 @@ func (c *ClassroomClient) doToggleCheckin(ctx context.Context, cookie, sessionID
 
 	resp, err := c.doRequest(ctx, "POST", "/admin/ClassAttendance/ToggleCheckin", cookie, strings.NewReader(form.Encode()))
 	if err != nil {
-		return domain.NewNetworkError(err.Error())
+		return requestError(ctx, err)
 	}
 	defer resp.Body.Close()
 

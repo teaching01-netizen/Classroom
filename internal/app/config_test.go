@@ -111,3 +111,45 @@ func TestLoadConfig_ConcurrencyRejectsInvalidInt(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, cfg.ReportConcurrency, "ReportConcurrency should default to 2 when invalid")
 }
+
+func TestLoadConfig_ConcurrencyRejectsUnsafeUpperBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "report concurrency", key: "WARWICK_REPORT_CONCURRENCY", value: "33"},
+		{name: "report rate", key: "WARWICK_REPORT_RATE_PER_SECOND", value: "101"},
+		{name: "report burst", key: "WARWICK_REPORT_RATE_BURST", value: "101"},
+		{name: "course detail concurrency", key: "WARWICK_COURSE_DETAIL_CONCURRENCY", value: "33"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://localhost/test")
+			t.Setenv("SERVERLESS_ENABLED", "false")
+			t.Setenv(tc.key, tc.value)
+			_, err := LoadConfig()
+			require.ErrorContains(t, err, tc.key)
+		})
+	}
+}
+
+func TestLoadConfig_RejectsUnsafePoolUpperBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "qr sessions", key: "WARWICK_QR_SESSIONS", value: "65"},
+		{name: "teacher sessions", key: "WARWICK_TEACHER_SESSIONS", value: "65"},
+		{name: "interactive sessions", key: "WARWICK_INTERACTIVE_SESSIONS", value: "65"},
+		{name: "connections", key: "WARWICK_CONNS_PER_HOST", value: "257"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://localhost/test")
+			t.Setenv("SERVERLESS_ENABLED", "false")
+			t.Setenv(tc.key, tc.value)
+			_, err := LoadConfig()
+			require.ErrorContains(t, err, tc.key)
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -11,12 +12,56 @@ import (
 	"qr-command-center/internal/domain"
 )
 
+func TestRunBoundedJobs_LimitsWorkersAndProcessesAllItems(t *testing.T) {
+	const itemCount = 64
+	const workerLimit = 3
+
+	var mu sync.Mutex
+	active := 0
+	maxActive := 0
+	processed := make([]bool, itemCount)
+
+	err := runBoundedJobs(context.Background(), itemCount, workerLimit, func(index int) {
+		mu.Lock()
+		active++
+		if active > maxActive {
+			maxActive = active
+		}
+		mu.Unlock()
+
+		time.Sleep(time.Millisecond)
+
+		mu.Lock()
+		processed[index] = true
+		active--
+		mu.Unlock()
+	})
+
+	require.NoError(t, err)
+	assert.LessOrEqual(t, maxActive, workerLimit)
+	for index, done := range processed {
+		assert.True(t, done, "item %d was not processed", index)
+	}
+}
+
+func TestRunBoundedJobs_ReturnsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	called := false
+	err := runBoundedJobs(ctx, 10, 2, func(_ int) { called = true })
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.False(t, called, "canceled jobs must not start work")
+}
+
 // mockProvider tracks call counts and arguments for TeacherDataProvider methods.
 type mockProvider struct {
-	mu                  sync.Mutex
-	getCoursesCalls     int
-	getCourseDetailCalls int
-	detailNameArgs      []string // courseName argument captured from GetCourseDetailWithName
+	mu                    sync.Mutex
+	getCoursesCalls       int
+	getCourseCatalogCalls int
+	getCourseDetailCalls  int
+	detailNameArgs        []string // courseName argument captured from GetCourseDetailWithName
 
 	courses      []domain.CourseSummary
 	detailReturn *domain.CourseDetail
@@ -45,6 +90,13 @@ func newMockProvider() *mockProvider {
 func (m *mockProvider) GetCourses(ctx context.Context) ([]domain.CourseSummary, error) {
 	m.mu.Lock()
 	m.getCoursesCalls++
+	m.mu.Unlock()
+	return m.courses, nil
+}
+
+func (m *mockProvider) GetCourseCatalog(ctx context.Context) ([]domain.CourseSummary, error) {
+	m.mu.Lock()
+	m.getCourseCatalogCalls++
 	m.mu.Unlock()
 	return m.courses, nil
 }
@@ -104,7 +156,8 @@ func TestGetAbsenceDashboard_OneCatalogRequest(t *testing.T) {
 	_, err := svc.GetAbsenceDashboard(context.Background(), filters)
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, mock.getCoursesCalls, "dashboard should make exactly 1 catalog request")
+	assert.Equal(t, 1, mock.getCourseCatalogCalls, "dashboard should make exactly 1 raw catalog request")
+	assert.Equal(t, 0, mock.getCoursesCalls, "dashboard must not request enriched courses")
 	assert.Equal(t, 2, mock.getCourseDetailCalls, "dashboard with 2 courses should make 2 detail calls")
 }
 
@@ -166,7 +219,8 @@ func TestGetBatchAttendance_OneCatalogLoad(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	assert.Equal(t, 1, mock.getCoursesCalls, "batch should load catalog exactly once")
+	assert.Equal(t, 1, mock.getCourseCatalogCalls, "batch should load raw catalog exactly once")
+	assert.Equal(t, 0, mock.getCoursesCalls, "batch must not request enriched courses")
 	assert.Equal(t, 3, mock.getCourseDetailCalls, "batch with 3 courses should make 3 detail calls")
 }
 
@@ -182,7 +236,8 @@ func TestGetBatchAttendance_CatalogMapNotPersisted(t *testing.T) {
 	_, err = svc.GetBatchAttendance(context.Background(), []string{"c3"}, 4)
 	require.NoError(t, err)
 
-	assert.Equal(t, 2, mock.getCoursesCalls, "two batch calls should each load catalog exactly once")
+	assert.Equal(t, 2, mock.getCourseCatalogCalls, "two batch calls should each load raw catalog exactly once")
+	assert.Equal(t, 0, mock.getCoursesCalls, "batch must not request enriched courses")
 	assert.Equal(t, 3, mock.getCourseDetailCalls, "two batch calls should make 3 total detail calls")
 }
 
@@ -196,8 +251,32 @@ func TestGetBatchAttendance_SingleCourseLoadsCatalog(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	assert.Equal(t, 1, mock.getCoursesCalls, "batch with 1 course should still load catalog")
+	assert.Equal(t, 1, mock.getCourseCatalogCalls, "batch with 1 course should still load raw catalog")
+	assert.Equal(t, 0, mock.getCoursesCalls, "batch must not request enriched courses")
 	assert.Equal(t, 1, mock.getCourseDetailCalls, "batch with 1 course should make 1 detail call")
+}
+
+func TestGetBatchAttendance_UnknownCourseDoesNotTriggerAnotherCatalogRead(t *testing.T) {
+	mock := newMockProvider()
+	svc := NewTeacherService(mock, mock, 2)
+
+	result, err := svc.GetBatchAttendance(context.Background(), []string{"missing"}, 4)
+	require.NoError(t, err)
+	require.Error(t, result.Courses["missing"].Err)
+	assert.Equal(t, 1, mock.getCourseCatalogCalls)
+	assert.Equal(t, 0, mock.getCourseDetailCalls)
+}
+
+func TestGetBatchAttendance_NilCourseDetailBecomesPerCourseError(t *testing.T) {
+	mock := newMockProvider()
+	mock.detailReturn = nil
+	svc := NewTeacherService(mock, mock, 2)
+
+	result, err := svc.GetBatchAttendance(context.Background(), []string{"c1"}, 4)
+
+	require.NoError(t, err)
+	require.Error(t, result.Courses["c1"].Err)
+	assert.Contains(t, result.Courses["c1"].Err.Error(), "nil course detail")
 }
 
 // TestEnrichCourses_PassesKnownName verifies that enrichment does not add

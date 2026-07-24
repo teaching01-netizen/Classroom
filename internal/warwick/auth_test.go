@@ -1,6 +1,7 @@
 package warwick
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -10,6 +11,44 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGetValidSessionContextCancellationStopsLogin(t *testing.T) {
+	started := make(chan struct{})
+	auth := NewWarwickAuth("test@test.com", "pass", "http://warwick.invalid/login")
+	auth.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		close(started)
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := auth.GetValidSessionContext(ctx)
+		result <- err
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("login request did not start")
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("context cancellation did not stop login")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestIsLoginPage(t *testing.T) {
 	html := `<div class="idg-box-login-primary">

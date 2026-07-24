@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -91,4 +92,39 @@ func TestBatchAttendance_MissingCourseIds_Returns400(t *testing.T) {
 	var resp ApiResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Contains(t, resp.Error, "course_ids is required")
+}
+
+func TestBatchAttendance_TooManyCourseIds_Returns400(t *testing.T) {
+	handler := getBatchAttendanceHandler(newNonNilTeacherService())
+
+	ids := make([]string, 101)
+	for i := range ids {
+		ids[i] = "CS" + string(rune('A'+i%26))
+	}
+	body, err := json.Marshal(map[string]interface{}{"course_ids": ids})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/teacher/courses/attendance-batch", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ApiResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Contains(t, resp.Error, "too many course_ids")
+}
+
+func TestBatchAttendance_OversizedBody_Returns413(t *testing.T) {
+	handler := getBatchAttendanceHandler(newNonNilTeacherService())
+
+	body := `{"course_ids":["CS101"],"padding":"` + strings.Repeat("x", 1<<20) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/teacher/courses/attendance-batch", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+	var resp ApiResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Contains(t, resp.Error, "request body too large")
 }

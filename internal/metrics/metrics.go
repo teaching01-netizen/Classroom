@@ -47,4 +47,22 @@ var (
 		},
 		[]string{"tier"},
 	)
+
+	// ReportRateLimitRetriesTotal counts bounded report retries after an
+	// upstream rate-limit response. It has no request-derived labels.
+	ReportRateLimitRetriesTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "report_rate_limit_retries_total",
+			Help: "Total number of bounded attendance-report retries after rate limiting.",
+		},
+	)
+
+	// ReportRateLimitRetryExhaustedTotal counts sessions that could not retry
+	// because the per-report retry budget was exhausted.
+	ReportRateLimitRetryExhaustedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "report_rate_limit_retry_exhausted_total",
+			Help: "Total number of attendance-report sessions rejected by the retry budget.",
+		},
+	)
 )

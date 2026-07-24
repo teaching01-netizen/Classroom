@@ -18,6 +18,38 @@ import (
 	"qr-command-center/internal/domain"
 )
 
+func TestRunBoundedIndices_LimitsWorkersAndProcessesAllItems(t *testing.T) {
+	const itemCount = 50
+	const workerLimit = 2
+
+	var mu sync.Mutex
+	active := 0
+	maxActive := 0
+	processed := make([]bool, itemCount)
+
+	err := runBoundedIndices(context.Background(), itemCount, workerLimit, func(index int) {
+		mu.Lock()
+		active++
+		if active > maxActive {
+			maxActive = active
+		}
+		mu.Unlock()
+
+		time.Sleep(time.Millisecond)
+
+		mu.Lock()
+		processed[index] = true
+		active--
+		mu.Unlock()
+	})
+
+	require.NoError(t, err)
+	assert.LessOrEqual(t, maxActive, workerLimit)
+	for index, done := range processed {
+		assert.True(t, done, "item %d was not processed", index)
+	}
+}
+
 // ============================================================================
 // Report fan-out concurrency tests (VAL-CONCUR-007, VAL-CONCUR-014)
 // ============================================================================
@@ -25,10 +57,10 @@ import (
 // concurrencyTracker is a SessionFetcher that tracks the maximum number of
 // concurrent in-flight calls.
 type concurrencyTracker struct {
-	mu           sync.Mutex
+	mu            sync.Mutex
 	maxConcurrent int32
-	current      int32
-	startBlock   chan struct{} // closed to allow calls to proceed
+	current       int32
+	startBlock    chan struct{} // closed to allow calls to proceed
 }
 
 func newConcurrencyTracker(startBlock chan struct{}) *concurrencyTracker {
@@ -86,7 +118,7 @@ func TestReportFanOut_Concurrency1(t *testing.T) {
 	}
 	course := &domain.CourseDetail{
 		CourseSummary: domain.CourseSummary{CourseID: "c1", Name: "Test"},
-		Sessions:     sessions,
+		Sessions:      sessions,
 	}
 
 	startBlock := make(chan struct{})
@@ -113,7 +145,7 @@ func TestReportFanOut_ConcurrencyLimits(t *testing.T) {
 	}
 	course := &domain.CourseDetail{
 		CourseSummary: domain.CourseSummary{CourseID: "c1", Name: "Test"},
-		Sessions:     sessions,
+		Sessions:      sessions,
 	}
 
 	// With concurrency=2, only 2 goroutines should be active at once.

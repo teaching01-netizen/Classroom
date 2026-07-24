@@ -24,8 +24,8 @@ var userIDFromJSRegex = regexp.MustCompile(`d\.UserID\s*=\s*['"]([0-9a-fA-F]{8}-
 func (c *ClassroomClient) FetchStudentProfiles(ctx context.Context) ([]domain.StudentProfile, error) {
 	if c.pool != nil {
 		key := "student-profiles"
-		v, err := c.doSingleflight(ctx, key, func() (interface{}, error) {
-			return c.fetchStudentProfilesWithPool(context.Background())
+		v, err := c.doSingleflight(ctx, key, func(callCtx context.Context) (interface{}, error) {
+			return c.fetchStudentProfilesWithPool(callCtx)
 		})
 		if err != nil {
 			return nil, err
@@ -39,8 +39,11 @@ func (c *ClassroomClient) FetchStudentProfiles(ctx context.Context) ([]domain.St
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		cookie, _, err := c.auth.GetValidSession()
+		cookie, _, err := c.auth.GetValidSessionContext(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, domain.ErrAuthExpired
 		}
 
@@ -52,7 +55,10 @@ func (c *ClassroomClient) FetchStudentProfiles(ctx context.Context) ([]domain.St
 		var fe *domain.FetchError
 		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
-			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
+			if _, _, rerr := c.auth.ForceRefreshContext(ctx); rerr != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				return nil, domain.ErrAuthExpired
 			}
 			continue
@@ -89,7 +95,10 @@ func (c *ClassroomClient) fetchStudentProfilesWithPool(ctx context.Context) ([]d
 		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
 			if attempt == 0 {
-				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
+				if _, _, rerr := c.pool.ForceRefreshOnSessionContext(ctx, ref); rerr != nil {
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
 					if errors.Is(rerr, ErrAuthConflict) {
 						return nil, domain.ErrAuthConflict
 					}
@@ -106,6 +115,7 @@ func (c *ClassroomClient) fetchStudentProfilesWithPool(ctx context.Context) ([]d
 
 func (c *ClassroomClient) fetchStudentProfiles(ctx context.Context, cookie string) ([]domain.StudentProfile, error) {
 	const pageSize = 500
+	const maxProfileRecords = 100_000
 
 	// First request to get total count.
 	req := DefaultDataTablesRequest([]string{"StudentID", "StudentGuid", "FullName", "School"})
@@ -118,7 +128,7 @@ func (c *ClassroomClient) fetchStudentProfiles(ctx context.Context, cookie strin
 
 	resp, err := c.doRequest(ctx, "POST", "/admin/api/UserGroupSearch", cookie, strings.NewReader(body))
 	if err != nil {
-		return nil, domain.NewNetworkError(err.Error())
+		return nil, requestError(ctx, err)
 	}
 	defer resp.Body.Close()
 
@@ -133,6 +143,9 @@ func (c *ClassroomClient) fetchStudentProfiles(ctx context.Context, cookie strin
 	}
 
 	total := firstPage.RecordsTotal
+	if total < 0 || total > maxProfileRecords {
+		return nil, domain.NewInvalidPayloadError(fmt.Sprintf("UserGroupSearch recordsTotal %d outside supported range", total))
+	}
 	slog.Info("warwick_student_profiles_fetch",
 		"http_status", resp.StatusCode,
 		"records_total", total,
@@ -202,7 +215,7 @@ func (c *ClassroomClient) fetchStudentProfiles(ctx context.Context, cookie strin
 // UserID from the JavaScript code (where it's hardcoded in the DataTables config).
 // Uses a redirect-following client because /admin/ returns 302 → the actual page.
 // Returns empty string on any failure (non-fatal).
-func (c *ClassroomClient) detectUserIDFromPage(cookie string) string {
+func (c *ClassroomClient) detectUserIDFromPage(ctx context.Context, cookie string) string {
 	detector := &http.Client{
 		Timeout: 15 * time.Second,
 	}
@@ -210,8 +223,11 @@ func (c *ClassroomClient) detectUserIDFromPage(cookie string) string {
 	// The ClassAttendance page contains the DataTables JS with d.UserID hardcoded.
 	paths := []string{"/admin/ClassAttendance", "/admin/ClassAttendance/Index", "/admin/"}
 	for _, path := range paths {
-		if uid := c.tryDetectUserID(detector, cookie, path); uid != "" {
+		if uid := c.tryDetectUserID(ctx, detector, cookie, path); uid != "" {
 			return uid
+		}
+		if ctx.Err() != nil {
+			return ""
 		}
 	}
 
@@ -219,9 +235,9 @@ func (c *ClassroomClient) detectUserIDFromPage(cookie string) string {
 	return ""
 }
 
-func (c *ClassroomClient) tryDetectUserID(client *http.Client, cookie, path string) string {
+func (c *ClassroomClient) tryDetectUserID(ctx context.Context, client *http.Client, cookie, path string) string {
 	u := c.baseURL + path
-	req, err := http.NewRequest("GET", u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		slog.Debug("warwick_userid_detect_request_failed", "path", path, "error", err)
 		return ""

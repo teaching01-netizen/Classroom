@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -212,6 +214,38 @@ func TestSingleflight_FetchSessionDetailLive_ConcurrentIdentical(t *testing.T) {
 	require.Len(t, details, 2)
 	require.NotNil(t, details[0])
 	require.NotNil(t, details[1])
+}
+
+func TestSingleflight_RateLimiterCountsOnlyRealUpstreamCalls(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":1,"recordsFiltered":1,"data":[{"StudentID":"STU001","StudentName":"Alice","StudentCheckIn":true}]}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 2, 1)
+	require.NoError(t, err)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
+	client.baseURL = apiServer.URL
+	client.SetRateLimiter(rate.NewLimiter(rate.Limit(1), 1))
+
+	start := time.Now()
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := client.FetchSessionDetailLive(context.Background(), "same-session")
+			results <- err
+		}()
+	}
+
+	require.NoError(t, <-results)
+	require.NoError(t, <-results)
+	require.Less(t, time.Since(start), 500*time.Millisecond, "a coalesced waiter must not consume a second limiter token")
+	require.Equal(t, int32(1), upstreamCalls.Load())
 }
 
 // TestSingleflight_FetchStudentProfiles_ConcurrentIdentical verifies

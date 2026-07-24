@@ -3,7 +3,6 @@ package warwick
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"testing"
 
 	"qr-command-center/internal/domain"
@@ -38,9 +37,7 @@ func BenchmarkComputeCourseAttendanceReport(b *testing.B) {
 	}
 
 	// Use a fast in-memory session fetcher that simulates 1000 students per session.
-	fetcher := &benchmarkSessionFetcher{
-		numStudents: 1000,
-	}
+	fetcher := newBenchmarkSessionFetcher(1000, sessions)
 
 	b.ResetTimer()
 
@@ -57,26 +54,34 @@ func BenchmarkComputeCourseAttendanceReport(b *testing.B) {
 
 // benchmarkSessionFetcher is a fast in-memory SessionFetcher for benchmarks.
 type benchmarkSessionFetcher struct {
-	numStudents int
+	details map[string]*domain.SessionDetail
+}
+
+func newBenchmarkSessionFetcher(numStudents int, sessions []domain.SessionSummary) *benchmarkSessionFetcher {
+	details := make(map[string]*domain.SessionDetail, len(sessions))
+	for _, session := range sessions {
+		students := make([]domain.StudentCheckin, numStudents)
+		for i := range numStudents {
+			students[i] = domain.StudentCheckin{
+				StudentID: fmt.Sprintf("STU%05d", i+1),
+				Name:      fmt.Sprintf("Student %d", i+1),
+				CheckedIn: i%2 == 0,
+			}
+		}
+		details[session.SessionID] = &domain.SessionDetail{
+			SessionSummary: domain.SessionSummary{
+				SessionID:      session.SessionID,
+				TotalStudents:  numStudents,
+				CheckedInCount: numStudents / 2,
+			},
+			Students: students,
+		}
+	}
+	return &benchmarkSessionFetcher{details: details}
 }
 
 func (f *benchmarkSessionFetcher) FetchSessionDetailLive(_ context.Context, sessionID string) (*domain.SessionDetail, error) {
-	students := make([]domain.StudentCheckin, f.numStudents)
-	for i := range f.numStudents {
-		students[i] = domain.StudentCheckin{
-			StudentID: fmt.Sprintf("STU%05d", i+1),
-			Name:      fmt.Sprintf("Student %d", i+1),
-			CheckedIn: rand.Intn(2) == 0,
-		}
-	}
-	return &domain.SessionDetail{
-		SessionSummary: domain.SessionSummary{
-			SessionID:      sessionID,
-			TotalStudents:  f.numStudents,
-			CheckedInCount: f.numStudents / 2,
-		},
-		Students: students,
-	}, nil
+	return f.details[sessionID], nil
 }
 
 // BenchmarkComputeCourseAttendanceReport_100Students benchmarks with a smaller
@@ -100,9 +105,7 @@ func BenchmarkComputeCourseAttendanceReport_100Students(b *testing.B) {
 		Sessions: sessions,
 	}
 
-	fetcher := &benchmarkSessionFetcher{
-		numStudents: 100,
-	}
+	fetcher := newBenchmarkSessionFetcher(100, sessions)
 
 	b.ResetTimer()
 

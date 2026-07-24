@@ -89,8 +89,11 @@ func (c *WarwickQrClient) FetchQR(classID string) (domain.QrResponse, error) {
 
 func (c *WarwickQrClient) FetchQRContext(ctx context.Context, classID string) (domain.QrResponse, error) {
 	if c.pool != nil {
-		ref, err := c.pool.Acquire(c.tier)
+		ref, err := c.pool.AcquireWithTimeoutContext(ctx, c.tier, 0)
 		if err != nil {
+			if ctx.Err() != nil {
+				return domain.QrResponse{}, ctx.Err()
+			}
 			if errors.Is(err, ErrAuthConflict) {
 				return domain.QrResponse{}, domain.ErrAuthConflict
 			}
@@ -103,8 +106,11 @@ func (c *WarwickQrClient) FetchQRContext(ctx context.Context, classID string) (d
 		return c.doFetchContext(ctx, classID, ref.Cookie)
 	}
 
-	cookie, _, err := c.auth.GetValidSession()
+	cookie, _, err := c.auth.GetValidSessionContext(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return domain.QrResponse{}, ctx.Err()
+		}
 		return domain.QrResponse{}, domain.ErrAuthExpired
 	}
 	return c.doFetchContext(ctx, classID, cookie)
@@ -118,8 +124,11 @@ func (c *WarwickQrClient) FetchQRWithFreshAuth(classID string) (domain.QrRespons
 
 func (c *WarwickQrClient) FetchQRWithFreshAuthContext(ctx context.Context, classID string) (domain.QrResponse, error) {
 	if c.pool != nil {
-		ref, err := c.pool.Acquire(c.tier)
+		ref, err := c.pool.AcquireWithTimeoutContext(ctx, c.tier, 0)
 		if err != nil {
+			if ctx.Err() != nil {
+				return domain.QrResponse{}, ctx.Err()
+			}
 			if errors.Is(err, ErrAuthConflict) {
 				return domain.QrResponse{}, domain.ErrAuthConflict
 			}
@@ -130,7 +139,10 @@ func (c *WarwickQrClient) FetchQRWithFreshAuthContext(ctx context.Context, class
 		}
 		defer c.pool.Release(ref)
 
-		if _, _, err := c.pool.ForceRefreshOnSession(ref); err != nil {
+		if _, _, err := c.pool.ForceRefreshOnSessionContext(ctx, ref); err != nil {
+			if ctx.Err() != nil {
+				return domain.QrResponse{}, ctx.Err()
+			}
 			if errors.Is(err, ErrAuthConflict) {
 				return domain.QrResponse{}, domain.ErrAuthConflict
 			}
@@ -139,8 +151,11 @@ func (c *WarwickQrClient) FetchQRWithFreshAuthContext(ctx context.Context, class
 		return c.doFetchContext(ctx, classID, ref.Cookie)
 	}
 
-	cookie, _, err := c.auth.ForceRefresh()
+	cookie, _, err := c.auth.ForceRefreshContext(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return domain.QrResponse{}, ctx.Err()
+		}
 		return domain.QrResponse{}, domain.ErrAuthExpired
 	}
 	return c.doFetchContext(ctx, classID, cookie)
@@ -154,7 +169,7 @@ func (c *WarwickQrClient) doFetchContext(ctx context.Context, classID string, co
 	body := fmt.Sprintf("id=%s", url.QueryEscape(classID))
 	req, err := http.NewRequestWithContext(ctx, "POST", c.qrEndpoint, strings.NewReader(body))
 	if err != nil {
-		return domain.QrResponse{}, domain.NewNetworkError(err.Error())
+		return domain.QrResponse{}, requestError(ctx, err)
 	}
 
 	req.Header.Set("Cookie", fmt.Sprintf("ASP.NET_SessionId=%s", cookie))
@@ -163,7 +178,7 @@ func (c *WarwickQrClient) doFetchContext(ctx context.Context, classID string, co
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return domain.QrResponse{}, domain.NewNetworkError(err.Error())
+		return domain.QrResponse{}, requestError(ctx, err)
 	}
 	defer resp.Body.Close()
 

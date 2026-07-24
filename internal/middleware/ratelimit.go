@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const defaultMaxVisitors = 100_000
+
 // rateLimiterEntry holds the token bucket state for a single IP.
 type rateLimiterEntry struct {
 	tokens     float64
@@ -20,6 +22,7 @@ type IPRateLimiter struct {
 	visitors        map[string]*rateLimiterEntry
 	rate            float64       // tokens added per second
 	burst           int           // max allowed tokens (bucket capacity)
+	maxVisitors     int           // hard cap to prevent attacker-controlled map growth
 	cleanupInterval time.Duration // how often to reap stale entries
 	stopCh          chan struct{}
 	stopOnce        sync.Once
@@ -33,6 +36,7 @@ func NewIPRateLimiter(rate float64, burst int) *IPRateLimiter {
 		visitors:        make(map[string]*rateLimiterEntry),
 		rate:            rate,
 		burst:           burst,
+		maxVisitors:     defaultMaxVisitors,
 		cleanupInterval: 5 * time.Minute,
 		stopCh:          make(chan struct{}),
 	}
@@ -55,6 +59,11 @@ func (l *IPRateLimiter) Allow(ip string) bool {
 
 	entry, ok := l.visitors[ip]
 	if !ok {
+		if l.maxVisitors > 0 && len(l.visitors) >= l.maxVisitors {
+			// Fail closed for previously unseen visitors while cleanup catches
+			// up. Existing visitors retain their bucket state.
+			return false
+		}
 		// New visitor — start with a full bucket.
 		entry = &rateLimiterEntry{
 			tokens:     float64(l.burst),
@@ -88,7 +97,7 @@ func (l *IPRateLimiter) Middleware(next http.Handler) http.Handler {
 			w.Header().Set("Retry-After", "1")
 			w.WriteHeader(http.StatusTooManyRequests)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":         "rate limit exceeded",
+				"error":          "rate limit exceeded",
 				"retry_after_ms": 1000,
 			})
 			return

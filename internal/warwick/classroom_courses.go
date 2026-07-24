@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"qr-command-center/internal/domain"
@@ -19,12 +20,12 @@ import (
 func (c *ClassroomClient) GetCourses(ctx context.Context) ([]domain.CourseSummary, error) {
 	if c.pool != nil {
 		key := "courses:" + c.effectiveUserID()
-		v, err := c.doSingleflight(ctx, key, func() (interface{}, error) {
-			courses, err := c.getCoursesWithPool(context.Background())
+		v, err := c.doSingleflight(ctx, key, func(callCtx context.Context) (interface{}, error) {
+			courses, err := c.getCoursesWithPool(callCtx)
 			if err != nil {
 				return nil, err
 			}
-			c.enrichCourses(context.Background(), courses)
+			c.enrichCourses(callCtx, courses)
 			return courses, nil
 		})
 		if err != nil {
@@ -35,8 +36,11 @@ func (c *ClassroomClient) GetCourses(ctx context.Context) ([]domain.CourseSummar
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		cookie, _, err := c.auth.GetValidSession()
+		cookie, _, err := c.auth.GetValidSessionContext(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, domain.ErrAuthExpired
 		}
 
@@ -49,7 +53,10 @@ func (c *ClassroomClient) GetCourses(ctx context.Context) ([]domain.CourseSummar
 		var fe *domain.FetchError
 		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
-			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
+			if _, _, rerr := c.auth.ForceRefreshContext(ctx); rerr != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				return nil, domain.ErrAuthExpired
 			}
 			continue
@@ -60,43 +67,88 @@ func (c *ClassroomClient) GetCourses(ctx context.Context) ([]domain.CourseSummar
 	return nil, lastErr
 }
 
+// runBoundedIndices executes one job per index with a fixed number of
+// workers. It avoids creating one goroutine per course when Warwick returns a
+// large catalog and stops queued work promptly when the request is canceled.
+func runBoundedIndices(ctx context.Context, count, concurrency int, fn func(index int)) error {
+	if count <= 0 {
+		return ctx.Err()
+	}
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	if concurrency > count {
+		concurrency = count
+	}
+
+	var workers sync.WaitGroup
+	var next atomic.Int64
+	workers.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer workers.Done()
+			for index := int(next.Add(1) - 1); index < count; index = int(next.Add(1) - 1) {
+				if ctx.Err() != nil {
+					return
+				}
+				fn(index)
+			}
+		}()
+	}
+
+	workers.Wait()
+	return ctx.Err()
+}
+
+// GetCourseCatalog fetches the live course list without detail enrichment.
+// Callers that need only course identity and names should use this method to
+// avoid fetching details for every active course before selecting a subset.
+// Results are coalesced only while the upstream read is in flight.
+func (c *ClassroomClient) GetCourseCatalog(ctx context.Context) ([]domain.CourseSummary, error) {
+	if c.pool != nil {
+		key := "course-catalog:" + c.effectiveUserID()
+		v, err := c.doSingleflight(ctx, key, func(callCtx context.Context) (interface{}, error) {
+			return c.fetchCourseCatalog(callCtx, false)
+		})
+		if err != nil {
+			return nil, err
+		}
+		courses, ok := v.([]domain.CourseSummary)
+		if !ok {
+			return nil, fmt.Errorf("warwick: unexpected course catalog result type %T", v)
+		}
+		return courses, nil
+	}
+
+	return c.fetchCourseCatalog(ctx, false)
+}
+
 // enrichCourses concurrently fetches course details to populate session counts.
 // The source course name is passed into the request-local detail fetch so the
 // detail fetch does not recursively request the full course list.
 func (c *ClassroomClient) enrichCourses(ctx context.Context, courses []domain.CourseSummary) {
-	var wg sync.WaitGroup
 	concurrency := c.courseDetailConcurrency
 	if concurrency <= 0 {
 		concurrency = 2
 	}
-	sem := make(chan struct{}, concurrency) // match configured course detail concurrency
-	var mu sync.Mutex
-
-	for i := range courses {
-		if courses[i].Status == domain.CourseStatusFinished {
-			continue
+	if err := runBoundedIndices(ctx, len(courses), concurrency, func(idx int) {
+		if courses[idx].Status == domain.CourseStatusFinished {
+			return
 		}
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
 
-			detail, err := c.getCourseDetailLive(ctx, courses[idx].CourseID, courses[idx].Name)
-			if err != nil {
-				slog.Debug("enrich_course_detail_failed",
-					"course_id", courses[idx].CourseID,
-					"error", err)
-				return
-			}
+		detail, err := c.getCourseDetailLive(ctx, courses[idx].CourseID, courses[idx].Name)
+		if err != nil {
+			slog.Debug("enrich_course_detail_failed",
+				"course_id", courses[idx].CourseID,
+				"error", err)
+			return
+		}
 
-			mu.Lock()
-			courses[idx].TotalSessions = detail.TotalSessions
-			courses[idx].CompletedSessions = detail.CompletedSessions
-			mu.Unlock()
-		}(i)
+		courses[idx].TotalSessions = detail.TotalSessions
+		courses[idx].CompletedSessions = detail.CompletedSessions
+	}); err != nil && ctx.Err() == nil {
+		slog.Debug("enrich_courses_stopped", "error", err)
 	}
-	wg.Wait()
 }
 
 func (c *ClassroomClient) getCoursesWithPool(ctx context.Context) ([]domain.CourseSummary, error) {
@@ -115,12 +167,9 @@ func (c *ClassroomClient) getCoursesWithPool(ctx context.Context) ([]domain.Cour
 	}
 	defer c.pool.Release(ref)
 
-	// Auto-detect UserID from Warwick admin page when not explicitly configured.
-	if c.userID == "" {
-		if detected := c.detectUserIDFromPage(ref.Cookie); detected != "" {
-			c.userID = detected
-		}
-	}
+	// Resolve UserID once so failed page detection cannot add three HTML
+	// requests to every subsequent catalog read.
+	c.resolveUserID(ctx, ref.Cookie)
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
@@ -132,7 +181,10 @@ func (c *ClassroomClient) getCoursesWithPool(ctx context.Context) ([]domain.Cour
 		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
 			if attempt == 0 {
-				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
+				if _, _, rerr := c.pool.ForceRefreshOnSessionContext(ctx, ref); rerr != nil {
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
 					if errors.Is(rerr, ErrAuthConflict) {
 						return nil, domain.ErrAuthConflict
 					}
@@ -170,8 +222,11 @@ func (c *ClassroomClient) fetchCoursesRaw(ctx context.Context) ([]domain.CourseS
 	}
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		cookie, _, err := c.auth.GetValidSession()
+		cookie, _, err := c.auth.GetValidSessionContext(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, domain.ErrAuthExpired
 		}
 		courses, err := c.fetchCourses(ctx, cookie)
@@ -181,7 +236,10 @@ func (c *ClassroomClient) fetchCoursesRaw(ctx context.Context) ([]domain.CourseS
 		var fe *domain.FetchError
 		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
-			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
+			if _, _, rerr := c.auth.ForceRefreshContext(ctx); rerr != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				return nil, domain.ErrAuthExpired
 			}
 			continue
@@ -200,7 +258,7 @@ func (c *ClassroomClient) fetchCourses(ctx context.Context, cookie string) ([]do
 
 	resp, err := c.doRequest(ctx, "POST", "/admin/api/ClassAttendanceSearch", cookie, strings.NewReader(body))
 	if err != nil {
-		return nil, domain.NewNetworkError(err.Error())
+		return nil, requestError(ctx, err)
 	}
 	defer resp.Body.Close()
 

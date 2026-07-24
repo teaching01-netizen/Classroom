@@ -3,18 +3,28 @@ package warwick
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"sort"
 	"time"
 
 	"qr-command-center/internal/domain"
+	"qr-command-center/internal/metrics"
+)
+
+const (
+	maxReportRateLimitRetries = 4
+	reportRetryBase           = 500 * time.Millisecond
+	reportRetryJitter         = 500 * time.Millisecond
+	reportRetryMax            = 4 * time.Second
 )
 
 // ComputeCourseAttendanceReport builds a per-student attendance report for a
 // course by fetching each session's student list live via the fetcher.
 //
 // It respects context cancellation, uses bounded concurrency (concurrency
-// goroutines), and handles 429 rate-limit errors with a single retry + backoff.
+// goroutines), and handles 429 rate-limit errors with a bounded, staggered
+// retry budget per report.
 //
 // Students who never appeared in any fetched session are excluded.
 // The denominator for each student is the number of sessions where they appeared
@@ -27,6 +37,27 @@ func ComputeCourseAttendanceReport(
 	concurrency int,
 ) *domain.CourseAttendanceReport {
 	start := time.Now()
+	if course == nil {
+		return &domain.CourseAttendanceReport{
+			Students:   []domain.StudentAttendance{},
+			Errors:     []domain.ReportError{{Reason: "nil course detail"}},
+			Truncated:  true,
+			ComputedAt: start,
+			DurationMs: time.Since(start).Milliseconds(),
+		}
+	}
+	if source == nil {
+		return &domain.CourseAttendanceReport{
+			CourseID:   course.CourseID,
+			CourseName: course.Name,
+			Sessions:   course.Sessions,
+			Students:   []domain.StudentAttendance{},
+			Errors:     []domain.ReportError{{Reason: "nil session source"}},
+			Truncated:  true,
+			ComputedAt: start,
+			DurationMs: time.Since(start).Milliseconds(),
+		}
+	}
 
 	if concurrency <= 0 {
 		concurrency = 2
@@ -70,71 +101,85 @@ func ComputeCourseAttendanceReport(
 	}
 
 	results := make([]sessionResult, len(sessions))
-
-	// Use a semaphore to bound concurrency.
-	sem := make(chan struct{}, concurrency)
+	retryBudget := make(chan struct{}, maxReportRateLimitRetries)
 	var cancelled bool
 
-	for i, sess := range sessions {
-		select {
-		case <-ctx.Done():
-			cancelled = true
-			results[i] = sessionResult{index: i, state: "error", err: fmt.Errorf("cancelled")}
-			continue
-		default:
-		}
+	jobErr := runBoundedIndices(ctx, len(sessions), concurrency, func(idx int) {
+		sess := sessions[idx]
+		sessCtx, sessCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer sessCancel()
 
-		sem <- struct{}{}
-		go func(idx int, sess domain.SessionSummary) {
-			defer func() { <-sem }()
+		detail, err := source.FetchSessionDetailLive(sessCtx, sess.SessionID)
+		if err != nil {
+			if ctx.Err() != nil {
+				results[idx] = sessionResult{index: idx, state: "error", err: fmt.Errorf("cancelled")}
+				return
+			}
 
-			sessCtx, sessCancel := context.WithTimeout(ctx, 10*time.Second)
-			defer sessCancel()
-
-			detail, err := source.FetchSessionDetailLive(sessCtx, sess.SessionID)
-			if err != nil {
+			// Retry only within a report-wide budget. Keeping the tokens
+			// acquired for the lifetime of this report bounds total retry
+			// amplification, rather than merely limiting simultaneous sleeps.
+			if isRateLimited(err) {
 				if ctx.Err() != nil {
 					results[idx] = sessionResult{index: idx, state: "error", err: fmt.Errorf("cancelled")}
 					return
 				}
-
-				// Single retry on 429 rate limit with backoff.
-				if isRateLimited(err) {
-					slog.Warn("report_session_rate_limited", "session_id", sess.SessionID, "retrying_after", "2s")
+				select {
+				case retryBudget <- struct{}{}:
+					metrics.ReportRateLimitRetriesTotal.Inc()
+					backoff := reportRateLimitBackoff(sess.SessionID, 0)
+					slog.Warn("report_session_rate_limited", "session_id", sess.SessionID, "retrying_after", backoff, "retry_budget", maxReportRateLimitRetries)
+					timer := time.NewTimer(backoff)
 					select {
-					case <-time.After(2 * time.Second):
+					case <-timer.C:
 					case <-ctx.Done():
+						if !timer.Stop() {
+							select {
+							case <-timer.C:
+							default:
+							}
+						}
 						results[idx] = sessionResult{index: idx, state: "error", err: fmt.Errorf("cancelled")}
 						return
 					}
-					retryCtx, retryCancel := context.WithTimeout(ctx, 10*time.Second)
-					defer retryCancel()
-					detail, err = source.FetchSessionDetailLive(retryCtx, sess.SessionID)
-					if err != nil {
-						results[idx] = sessionResult{index: idx, state: "error", err: err}
-						return
-					}
-				} else {
+				case <-ctx.Done():
+					results[idx] = sessionResult{index: idx, state: "error", err: fmt.Errorf("cancelled")}
+					return
+				default:
+					metrics.ReportRateLimitRetryExhaustedTotal.Inc()
+					results[idx] = sessionResult{index: idx, state: "error", err: fmt.Errorf("rate limit retry budget exhausted for session %s", sess.SessionID)}
+					return
+				}
+				retryCtx, retryCancel := context.WithTimeout(ctx, 10*time.Second)
+				defer retryCancel()
+				detail, err = source.FetchSessionDetailLive(retryCtx, sess.SessionID)
+				if err != nil {
 					results[idx] = sessionResult{index: idx, state: "error", err: err}
 					return
 				}
-			}
-
-			if detail == nil {
-				results[idx] = sessionResult{index: idx, state: "error", err: fmt.Errorf("nil detail for session %s", sess.SessionID)}
+			} else {
+				results[idx] = sessionResult{index: idx, state: "error", err: err}
 				return
 			}
-			if len(detail.Students) == 0 {
-				results[idx] = sessionResult{index: idx, detail: detail, state: "empty"}
-				return
-			}
-			results[idx] = sessionResult{index: idx, detail: detail, state: "ok"}
-		}(i, sess)
-	}
+		}
 
-	// Drain remaining semaphore slots so all goroutines complete.
-	for i := 0; i < cap(sem); i++ {
-		sem <- struct{}{}
+		if detail == nil {
+			results[idx] = sessionResult{index: idx, state: "error", err: fmt.Errorf("nil detail for session %s", sess.SessionID)}
+			return
+		}
+		if len(detail.Students) == 0 {
+			results[idx] = sessionResult{index: idx, detail: detail, state: "empty"}
+			return
+		}
+		results[idx] = sessionResult{index: idx, detail: detail, state: "ok"}
+	})
+	if jobErr != nil {
+		cancelled = true
+		for i := range results {
+			if results[i].state == "" {
+				results[i] = sessionResult{index: i, state: "error", err: fmt.Errorf("cancelled")}
+			}
+		}
 	}
 
 	// Check if context was cancelled during execution.
@@ -253,6 +298,26 @@ func ComputeCourseAttendanceReport(
 		ComputedAt: start,
 		DurationMs: time.Since(start).Milliseconds(),
 	}
+}
+
+// reportRateLimitBackoff returns a bounded deterministic jittered delay. A
+// session-specific hash avoids synchronized retry waves without introducing a
+// shared random source (and keeps retry timing reproducible in tests).
+func reportRateLimitBackoff(sessionID string, attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	base := reportRetryBase << min(attempt, 3)
+	if base > reportRetryMax {
+		base = reportRetryMax
+	}
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(sessionID))
+	jitter := time.Duration(hash.Sum32()%uint32(reportRetryJitter/time.Millisecond)) * time.Millisecond
+	if base+jitter > reportRetryMax {
+		return reportRetryMax
+	}
+	return base + jitter
 }
 
 // isRateLimited checks whether an error represents an HTTP 429 response.

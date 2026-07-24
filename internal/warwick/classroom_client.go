@@ -6,9 +6,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
-	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 
 	"qr-command-center/internal/domain"
@@ -33,7 +33,10 @@ type ClassroomClient struct {
 
 	// userID identifies the Warwick user for course queries.
 	// Set via SetUserID; falls back to defaultUserID when empty.
-	userID string
+	userID             string
+	userIDMu           sync.RWMutex
+	userIDResolutionMu sync.Mutex
+	userIDResolved     bool
 
 	// rateLimiter gates live session-detail fetches (e.g. from the attendance
 	// report) to protect upstream Warwick from fan-out storms. nil = no limiting.
@@ -47,7 +50,7 @@ type ClassroomClient struct {
 
 	// sf coalesces identical overlapping upstream requests.
 	// Keys include operation + request parameters; no result caching after completion.
-	sf singleflight.Group
+	sf inflightGroup
 }
 
 // NewClassroomClient creates a ClassroomClient with the given auth instance.
@@ -60,8 +63,8 @@ func NewClassroomClient(auth *WarwickAuth) *ClassroomClient {
 				return http.ErrUseLastResponse
 			},
 		},
-		baseURL:                "https://warwick.humantix.cloud",
-		reportConcurrency:      2,
+		baseURL:                 "https://warwick.humantix.cloud",
+		reportConcurrency:       2,
 		courseDetailConcurrency: 2,
 	}
 }
@@ -78,8 +81,8 @@ func NewClassroomClientFromPool(pool *SessionPool, tier SessionTier) *ClassroomC
 				return http.ErrUseLastResponse
 			},
 		},
-		baseURL:                "https://warwick.humantix.cloud",
-		reportConcurrency:      2,
+		baseURL:                 "https://warwick.humantix.cloud",
+		reportConcurrency:       2,
 		courseDetailConcurrency: 2,
 	}
 }
@@ -121,6 +124,13 @@ func (c *ClassroomClient) doRequest(ctx context.Context, method, path, cookie st
 	metrics.WarwickUpstreamRequestDurationSeconds.WithLabelValues(endpoint).Observe(dur.Seconds())
 
 	return resp, err
+}
+
+func requestError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return domain.NewNetworkError(err.Error())
 }
 
 // classifyEndpoint returns a bounded, low-cardinality endpoint label for a given
@@ -171,18 +181,15 @@ func (c *ClassroomClient) checkAuth(resp *http.Response) error {
 	return nil
 }
 
-// doSingleflight wraps singleflight.DoChan with context cancellation.
-// The fn is called with context.Background() so that a single waiter's
-// cancellation does not cancel the shared upstream call. Returns (nil, ctx.Err())
-// when the caller's context is done; the shared call continues for other waiters.
-func (c *ClassroomClient) doSingleflight(ctx context.Context, key string, fn func() (interface{}, error)) (interface{}, error) {
-	ch := c.sf.DoChan(key, fn)
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case r := <-ch:
-		return r.Val, r.Err
-	}
+// doSingleflight coalesces identical reads while preserving per-caller
+// cancellation. The producer is cancelled when its last waiter leaves.
+func (c *ClassroomClient) doSingleflight(
+	ctx context.Context,
+	key string,
+	fn func(context.Context) (interface{}, error),
+) (interface{}, error) {
+	value, err, _ := c.sf.Do(ctx, key, fn)
+	return value, err
 }
 
 // SetRateLimiter sets the rate limiter for live session-detail fetches.
@@ -216,11 +223,57 @@ func (c *ClassroomClient) SetBaseURL(url string) {
 // SetUserID sets the Warwick UserID used for course queries.
 // When empty (default), the hardcoded defaultUserID is used.
 func (c *ClassroomClient) SetUserID(id string) {
+	c.userIDMu.Lock()
+	defer c.userIDMu.Unlock()
 	c.userID = id
+}
+
+// resolveUserID performs page detection at most once for clients without an
+// explicit UserID. A failed detection is memoized as the configured fallback
+// so every later catalog read stays on the API path.
+func (c *ClassroomClient) resolveUserID(ctx context.Context, cookie string) string {
+	c.userIDMu.RLock()
+	configured := c.userID != ""
+	c.userIDMu.RUnlock()
+	if configured {
+		return c.effectiveUserID()
+	}
+
+	// Serialize first-use discovery. A canceled discovery is deliberately not
+	// marked resolved, allowing a later request to retry instead of permanently
+	// memoizing the fallback UserID.
+	c.userIDResolutionMu.Lock()
+	defer c.userIDResolutionMu.Unlock()
+
+	c.userIDMu.RLock()
+	configured = c.userID != ""
+	c.userIDMu.RUnlock()
+	if configured || c.userIDResolved {
+		return c.effectiveUserID()
+	}
+
+	detected := c.detectUserIDFromPage(ctx, cookie)
+	if ctx.Err() != nil {
+		return c.effectiveUserID()
+	}
+
+	c.userIDMu.Lock()
+	if c.userID == "" {
+		if detected != "" {
+			c.userID = detected
+		} else {
+			c.userID = defaultUserID
+		}
+	}
+	c.userIDMu.Unlock()
+	c.userIDResolved = true
+	return c.effectiveUserID()
 }
 
 // effectiveUserID returns the configured userID or the hardcoded default.
 func (c *ClassroomClient) effectiveUserID() string {
+	c.userIDMu.RLock()
+	defer c.userIDMu.RUnlock()
 	if c.userID != "" {
 		return c.userID
 	}

@@ -1,6 +1,7 @@
 package warwick
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,8 +34,9 @@ type WarwickAuth struct {
 	sessionMu sync.RWMutex
 	session   *sessionState
 
-	forceRefreshMu sync.Mutex    // serializes ForceRefresh calls
-	currentGen     atomic.Uint64 // incremented on each successful ForceRefresh login
+	refreshGate      chan struct{} // serializes lazy refreshes and is context-aware
+	forceRefreshGate chan struct{} // serializes forced refreshes and is context-aware
+	currentGen       atomic.Uint64 // incremented on each successful ForceRefresh login
 }
 
 func NewWarwickAuth(email, password, loginURL string) *WarwickAuth {
@@ -45,9 +47,11 @@ func NewWarwickAuth(email, password, loginURL string) *WarwickAuth {
 				return http.ErrUseLastResponse
 			},
 		},
-		email:    email,
-		password: password,
-		loginURL: loginURL,
+		email:            email,
+		password:         password,
+		loginURL:         loginURL,
+		refreshGate:      make(chan struct{}, 1),
+		forceRefreshGate: make(chan struct{}, 1),
 	}
 }
 
@@ -64,6 +68,20 @@ func FromEnv() (*WarwickAuth, error) {
 }
 
 func (a *WarwickAuth) GetValidSession() (string, uint64, error) {
+	return a.GetValidSessionContext(context.Background())
+}
+
+// GetValidSessionContext returns a valid session and propagates request
+// cancellation through a lazy login. This prevents a disconnected request
+// from waiting for the full HTTP client timeout during authentication.
+func (a *WarwickAuth) GetValidSessionContext(ctx context.Context) (string, uint64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
+	}
+
 	a.sessionMu.RLock()
 	if a.session != nil && time.Now().Before(a.session.expiresAt.Add(-sessionRefreshBuffer)) {
 		cookie := a.session.cookieValue
@@ -73,6 +91,11 @@ func (a *WarwickAuth) GetValidSession() (string, uint64, error) {
 	}
 	a.sessionMu.RUnlock()
 
+	if err := acquireGate(ctx, a.refreshGate); err != nil {
+		return "", 0, err
+	}
+	defer releaseGate(a.refreshGate)
+
 	a.sessionMu.Lock()
 	defer a.sessionMu.Unlock()
 
@@ -80,7 +103,7 @@ func (a *WarwickAuth) GetValidSession() (string, uint64, error) {
 		return a.session.cookieValue, a.session.generation, nil
 	}
 
-	session, err := a.performLogin()
+	session, err := a.performLoginContext(ctx)
 	if err != nil {
 		return "", 0, err
 	}
@@ -90,17 +113,31 @@ func (a *WarwickAuth) GetValidSession() (string, uint64, error) {
 }
 
 func (a *WarwickAuth) ForceRefresh() (string, uint64, error) {
-	a.forceRefreshMu.Lock()
-	defer a.forceRefreshMu.Unlock()
+	return a.ForceRefreshContext(context.Background())
+}
+
+// ForceRefreshContext serializes forced refreshes while allowing callers to
+// abandon a queued or in-flight login when their request is canceled.
+func (a *WarwickAuth) ForceRefreshContext(ctx context.Context) (string, uint64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := acquireGate(ctx, a.forceRefreshGate); err != nil {
+		return "", 0, err
+	}
+	defer releaseGate(a.forceRefreshGate)
 
 	// Double-check: try the fast path first — if session is still fresh, return it.
-	cookie, gen, err := a.GetValidSession()
+	cookie, gen, err := a.GetValidSessionContext(ctx)
 	if err == nil {
 		return cookie, gen, nil
 	}
+	if ctx.Err() != nil {
+		return "", 0, ctx.Err()
+	}
 
 	// Truly expired — perform a fresh login.
-	session, err := a.performLogin()
+	session, err := a.performLoginContext(ctx)
 	if err != nil {
 		return "", 0, err
 	}
@@ -124,11 +161,19 @@ func (a *WarwickAuth) IsStaleGeneration(gen uint64) bool {
 // login performs the HTTP POST login flow and returns the session cookie.
 // Both WarwickAuth and SessionPool use this shared primitive.
 func login(client *http.Client, loginURL, email, password string) (string, error) {
+	return loginWithContext(context.Background(), client, loginURL, email, password)
+}
+
+func loginWithContext(ctx context.Context, client *http.Client, loginURL, email, password string) (string, error) {
 	form := url.Values{}
 	form.Set("email", email)
 	form.Set("password", password)
-	resp, err := client.Post(loginURL, "application/x-www-form-urlencoded",
-		strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, loginURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("building login request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("login request failed: %w", err)
 	}
@@ -153,7 +198,11 @@ func login(client *http.Client, loginURL, email, password string) (string, error
 }
 
 func (a *WarwickAuth) performLogin() (*sessionState, error) {
-	cookieValue, err := login(a.client, a.loginURL, a.email, a.password)
+	return a.performLoginContext(context.Background())
+}
+
+func (a *WarwickAuth) performLoginContext(ctx context.Context) (*sessionState, error) {
+	cookieValue, err := loginWithContext(ctx, a.client, a.loginURL, a.email, a.password)
 	if err != nil {
 		return nil, err
 	}
@@ -164,6 +213,19 @@ func (a *WarwickAuth) performLogin() (*sessionState, error) {
 		obtainedAt:  now,
 		expiresAt:   now.Add(sessionTTL),
 	}, nil
+}
+
+func acquireGate(ctx context.Context, gate chan struct{}) error {
+	select {
+	case gate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func releaseGate(gate chan struct{}) {
+	<-gate
 }
 
 func isLoginPage(body string) bool {

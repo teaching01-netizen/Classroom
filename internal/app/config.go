@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+const (
+	maxSessionTierSize         = 64
+	maxConnsPerHost            = 256
+	maxReportConcurrency       = 32
+	maxReportRatePerSecond     = 100
+	maxReportRateBurst         = 100
+	maxCourseDetailConcurrency = 32
+)
+
 // Config holds all environment-variable-driven configuration for the server.
 type Config struct {
 	// --- Warwick credentials ---
@@ -57,24 +66,49 @@ func LoadConfig() (Config, error) {
 	}
 
 	cfg := Config{
-		Email:               os.Getenv("WARWICK_EMAIL"),
-		Password:            os.Getenv("WARWICK_PASSWORD"),
-		UserID:              os.Getenv("WARWICK_USER_ID"),
-		QRSessions:          getEnvInt("WARWICK_QR_SESSIONS", 2),
-		TeacherSessions:     getEnvInt("WARWICK_TEACHER_SESSIONS", 2),
-		InteractiveSessions: getEnvInt("WARWICK_INTERACTIVE_SESSIONS", 2),
-		ConnsPerHost:        getEnvInt("WARWICK_CONNS_PER_HOST", 50),
+		Email:                   os.Getenv("WARWICK_EMAIL"),
+		Password:                os.Getenv("WARWICK_PASSWORD"),
+		UserID:                  os.Getenv("WARWICK_USER_ID"),
+		QRSessions:              getEnvInt("WARWICK_QR_SESSIONS", 2),
+		TeacherSessions:         getEnvInt("WARWICK_TEACHER_SESSIONS", 2),
+		InteractiveSessions:     getEnvInt("WARWICK_INTERACTIVE_SESSIONS", 2),
+		ConnsPerHost:            getEnvInt("WARWICK_CONNS_PER_HOST", 50),
 		ReportConcurrency:       getEnvInt("WARWICK_REPORT_CONCURRENCY", 2),
 		ReportRatePerSecond:     getEnvInt("WARWICK_REPORT_RATE_PER_SECOND", 2),
 		ReportRateBurst:         getEnvInt("WARWICK_REPORT_RATE_BURST", 2),
 		CourseDetailConcurrency: getEnvInt("WARWICK_COURSE_DETAIL_CONCURRENCY", 2),
-		ServerlessEnabled:   serverlessEnabled,
-		ServerlessIdleGrace: serverlessIdleGrace,
-		DatabaseURL:         os.Getenv("DATABASE_URL"),
-		Port:                resolvePort(),
-		WSMaxConns:          int64(getEnvInt("WARWICK_MAX_CONCURRENT_WS", 500)),
-		CORSOrigin:          os.Getenv("CORS_ORIGIN"),
-		WarwickBaseURL:      getEnvStr("WARWICK_BASE_URL", "https://warwick.humantix.cloud"),
+		ServerlessEnabled:       serverlessEnabled,
+		ServerlessIdleGrace:     serverlessIdleGrace,
+		DatabaseURL:             os.Getenv("DATABASE_URL"),
+		Port:                    resolvePort(),
+		WSMaxConns:              int64(getEnvInt("WARWICK_MAX_CONCURRENT_WS", 500)),
+		CORSOrigin:              os.Getenv("CORS_ORIGIN"),
+		WarwickBaseURL:          getEnvStr("WARWICK_BASE_URL", "https://warwick.humantix.cloud"),
+	}
+
+	if cfg.ReportConcurrency > maxReportConcurrency {
+		return Config{}, fmt.Errorf("WARWICK_REPORT_CONCURRENCY must be <= %d", maxReportConcurrency)
+	}
+	if cfg.ReportRatePerSecond > maxReportRatePerSecond {
+		return Config{}, fmt.Errorf("WARWICK_REPORT_RATE_PER_SECOND must be <= %d", maxReportRatePerSecond)
+	}
+	if cfg.ReportRateBurst > maxReportRateBurst {
+		return Config{}, fmt.Errorf("WARWICK_REPORT_RATE_BURST must be <= %d", maxReportRateBurst)
+	}
+	if cfg.CourseDetailConcurrency > maxCourseDetailConcurrency {
+		return Config{}, fmt.Errorf("WARWICK_COURSE_DETAIL_CONCURRENCY must be <= %d", maxCourseDetailConcurrency)
+	}
+	if cfg.QRSessions > maxSessionTierSize {
+		return Config{}, fmt.Errorf("WARWICK_QR_SESSIONS must be <= %d", maxSessionTierSize)
+	}
+	if cfg.TeacherSessions > maxSessionTierSize {
+		return Config{}, fmt.Errorf("WARWICK_TEACHER_SESSIONS must be <= %d", maxSessionTierSize)
+	}
+	if cfg.InteractiveSessions > maxSessionTierSize {
+		return Config{}, fmt.Errorf("WARWICK_INTERACTIVE_SESSIONS must be <= %d", maxSessionTierSize)
+	}
+	if cfg.ConnsPerHost > maxConnsPerHost {
+		return Config{}, fmt.Errorf("WARWICK_CONNS_PER_HOST must be <= %d", maxConnsPerHost)
 	}
 
 	if cfg.DatabaseURL == "" {

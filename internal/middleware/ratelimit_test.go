@@ -57,6 +57,26 @@ func TestIPRateLimiter_Allow_DifferentIPsAreIndependent(t *testing.T) {
 	}
 }
 
+func TestIPRateLimiter_RejectsNewVisitorsAtCapacity(t *testing.T) {
+	rl := NewIPRateLimiter(10, 1)
+	rl.maxVisitors = 2
+	defer rl.Stop()
+
+	if !rl.Allow("10.0.0.10") || !rl.Allow("10.0.0.11") {
+		t.Fatal("expected initial visitors to be admitted")
+	}
+	if rl.Allow("10.0.0.12") {
+		t.Fatal("expected new visitors to be rejected once the map is at capacity")
+	}
+
+	rl.mu.RLock()
+	visitorCount := len(rl.visitors)
+	rl.mu.RUnlock()
+	if visitorCount != 2 {
+		t.Fatalf("expected visitor map to remain bounded at 2, got %d", visitorCount)
+	}
+}
+
 func TestIPRateLimiter_Allow_RefillOverTime(t *testing.T) {
 	rl := NewIPRateLimiter(100, 1) // 100 tokens/sec, burst 1
 	defer rl.Stop()

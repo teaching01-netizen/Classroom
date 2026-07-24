@@ -2,6 +2,7 @@ package warwick
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -70,6 +71,9 @@ type SessionRef struct {
 	Generation uint64
 	session    *pooledSession
 	pool       *SessionPool
+	tier       SessionTier
+	index      int
+	released   atomic.Bool
 }
 
 // pooledSession is an independent Warwick session with its own HTTP client and cookie.
@@ -84,8 +88,6 @@ type pooledSession struct {
 	obtainedAt time.Time
 	expiresAt  time.Time
 	generation uint64
-
-	inUse bool
 
 	// Staggered re-auth: exponential backoff after detecting a human-admin kick.
 	backedOffUntil time.Time // don't re-auth until this time
@@ -139,12 +141,12 @@ func (s *pooledSession) isKickCandidate() bool {
 //   - ForceRefresh cascades (one session refresh does not affect others)
 //   - Rate limit buckets (each session has its own connection pool)
 type SessionPool struct {
-	mu              sync.Mutex
-	cond            *sync.Cond // signals waiters when a session is released
-	sessions        []*pooledSession
-	qrNext          uint64
-	teacherNext     uint64
-	interactiveNext uint64
+	sessions []*pooledSession
+
+	qrAvailable          chan int
+	teacherAvailable     chan int
+	interactiveAvailable chan int
+
 	qrSize          int
 	teacherSize     int
 	interactiveSize int
@@ -198,199 +200,124 @@ func NewSessionPool(email, password, loginURL string, qrSessions, teacherSession
 	}
 
 	p := &SessionPool{
-		sessions:        sessions,
-		qrSize:          qrSessions,
-		teacherSize:     teacherSessions,
-		interactiveSize: interactiveSessions,
+		sessions:             sessions,
+		qrAvailable:          make(chan int, qrSessions),
+		teacherAvailable:     make(chan int, teacherSessions),
+		interactiveAvailable: make(chan int, interactiveSessions),
+		qrSize:               qrSessions,
+		teacherSize:          teacherSessions,
+		interactiveSize:      interactiveSessions,
 	}
-	p.cond = sync.NewCond(&p.mu)
+	for i := 0; i < qrSessions; i++ {
+		p.qrAvailable <- i
+	}
+	for i := qrSessions; i < qrSessions+teacherSessions; i++ {
+		p.teacherAvailable <- i
+	}
+	for i := qrSessions + teacherSessions; i < total; i++ {
+		p.interactiveAvailable <- i
+	}
 	return p, nil
 }
 
-// Acquire gets an available session for the given traffic tier.
-// Uses round-robin within the tier. Returns an error if all sessions in the
-// tier are currently in use or if login fails.
+// availableForTier returns the bounded queue of session indexes for a tier.
+func (p *SessionPool) availableForTier(tier SessionTier) (chan int, int, error) {
+	switch tier {
+	case TierQR:
+		return p.qrAvailable, p.qrSize, nil
+	case TierTeacher:
+		return p.teacherAvailable, p.teacherSize, nil
+	case TierInteractive:
+		return p.interactiveAvailable, p.interactiveSize, nil
+	default:
+		return nil, 0, fmt.Errorf("warwick: unknown session tier %d", tier)
+	}
+}
+
+func (p *SessionPool) acquireIndex(ctx context.Context, tier SessionTier, available chan int, index int, acquireStart time.Time) (*SessionRef, error) {
+	if err := ctx.Err(); err != nil {
+		available <- index
+		return nil, err
+	}
+
+	s := p.sessions[index]
+	cookie, gen, err := p.ensureValidSession(ctx, s)
+	if err != nil {
+		available <- index
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("warwick: acquire session: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		available <- index
+		return nil, err
+	}
+
+	metrics.WarwickSessionPoolWaitSeconds.WithLabelValues(tier.String()).Observe(time.Since(acquireStart).Seconds())
+	return &SessionRef{
+		Cookie:     cookie,
+		Generation: gen,
+		session:    s,
+		pool:       p,
+		tier:       tier,
+		index:      index,
+	}, nil
+}
+
+// Acquire gets an available session for the given traffic tier. It never
+// blocks; callers that can wait should use AcquireWithTimeoutContext.
 func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 	acquireStart := time.Now()
+	available, size, err := p.availableForTier(tier)
+	if err != nil {
+		return nil, err
+	}
 
-	p.mu.Lock()
-
-	var start, end int
-	switch tier {
-	case TierQR:
-		start = 0
-		end = p.qrSize
-	case TierTeacher:
-		start = p.qrSize
-		end = p.qrSize + p.teacherSize
-	case TierInteractive:
-		start = p.qrSize + p.teacherSize
-		end = p.qrSize + p.teacherSize + p.interactiveSize
+	select {
+	case index := <-available:
+		return p.acquireIndex(context.Background(), tier, available, index, acquireStart)
 	default:
-		p.mu.Unlock()
-		return nil, fmt.Errorf("warwick: unknown session tier %d", tier)
+		return nil, fmt.Errorf("%w: tier %d (all %d in use)", ErrNoAvailableSessions, tier, size)
 	}
-
-	if start >= len(p.sessions) || end > len(p.sessions) {
-		p.mu.Unlock()
-		return nil, fmt.Errorf("warwick: invalid pool configuration: tier %d range [%d,%d) out of %d sessions",
-			tier, start, end, len(p.sessions))
-	}
-
-	// Round-robin within the tier — only the relevant tier's counter is incremented.
-	var next int
-	switch tier {
-	case TierQR:
-		next = int(atomic.AddUint64(&p.qrNext, 1) - 1)
-	case TierTeacher:
-		next = int(atomic.AddUint64(&p.teacherNext, 1) - 1)
-	case TierInteractive:
-		next = int(atomic.AddUint64(&p.interactiveNext, 1) - 1)
-	}
-
-	for offset := 0; offset < (end - start); offset++ {
-		idx := start + (next+offset)%(end-start)
-		s := p.sessions[idx]
-		if !s.inUse {
-			s.inUse = true
-			p.mu.Unlock()
-
-			cookie, gen, err := p.ensureValidSession(s)
-			if err != nil {
-				p.mu.Lock()
-				s.inUse = false
-				p.mu.Unlock()
-				return nil, fmt.Errorf("warwick: acquire session: %w", err)
-			}
-
-			metrics.WarwickSessionPoolWaitSeconds.WithLabelValues(tier.String()).Observe(time.Since(acquireStart).Seconds())
-			return &SessionRef{
-				Cookie:     cookie,
-				Generation: gen,
-				session:    s,
-				pool:       p,
-			}, nil
-		}
-	}
-
-	p.mu.Unlock()
-	return nil, fmt.Errorf("%w: tier %d (all %d in use)", ErrNoAvailableSessions,
-		tier, end-start)
 }
 
 // AcquireWithTimeoutContext acquires a session for the given tier, waiting up
-// to timeout for one to become available if all are in use. Returns ctx.Err()
-// if the context is cancelled before a session is available. On login failure,
-// the session's inUse flag is cleared before the error is returned.
+// to timeout for one to become available. Cancellation and timeout are handled
+// directly by select, so no waiter-specific goroutines or condition variables
+// are needed.
 func (p *SessionPool) AcquireWithTimeoutContext(ctx context.Context, tier SessionTier, timeout time.Duration) (*SessionRef, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("warwick: nil acquisition context")
+	}
 	acquireStart := time.Now()
-
-	p.mu.Lock()
-
-	var start, end int
-	switch tier {
-	case TierQR:
-		start = 0
-		end = p.qrSize
-	case TierTeacher:
-		start = p.qrSize
-		end = p.qrSize + p.teacherSize
-	case TierInteractive:
-		start = p.qrSize + p.teacherSize
-		end = p.qrSize + p.teacherSize + p.interactiveSize
-	default:
-		p.mu.Unlock()
-		return nil, fmt.Errorf("warwick: unknown session tier %d", tier)
+	available, size, err := p.availableForTier(tier)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if timeout <= 0 {
+		select {
+		case index := <-available:
+			return p.acquireIndex(ctx, tier, available, index, acquireStart)
+		default:
+			return nil, fmt.Errorf("%w: tier %d (all %d in use, no wait requested)", ErrNoAvailableSessions, tier, size)
+		}
 	}
 
-	if start >= len(p.sessions) || end > len(p.sessions) {
-		p.mu.Unlock()
-		return nil, fmt.Errorf("warwick: invalid pool configuration: tier %d range [%d,%d) out of %d sessions",
-			tier, start, end, len(p.sessions))
-	}
-
-	// Timer goroutine broadcasts the cond when the deadline expires,
-	// waking any blocked AcquireWithTimeoutContext callers.
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
-	var timedOut atomic.Bool
-	done := make(chan struct{})
-	defer close(done)
-
-	go func() {
-		select {
-		case <-timer.C:
-			timedOut.Store(true)
-			p.cond.Broadcast()
-		case <-done:
-		}
-	}()
-
-	// Channel to signal context cancellation unblocking.
-	ctxDone := ctx.Done()
-	ctxCancelCh := make(chan struct{}, 1)
-	go func() {
-		select {
-		case <-ctxDone:
-			p.cond.Broadcast()
-			ctxCancelCh <- struct{}{}
-		case <-done:
-		}
-	}()
-
-	for {
-		// Check context cancellation before attempting acquisition.
-		if ctx.Err() != nil {
-			p.mu.Unlock()
-			return nil, ctx.Err()
-		}
-
-		// Round-robin within the tier — only the relevant tier's counter is incremented.
-		var next int
-		switch tier {
-		case TierQR:
-			next = int(atomic.AddUint64(&p.qrNext, 1) - 1)
-		case TierTeacher:
-			next = int(atomic.AddUint64(&p.teacherNext, 1) - 1)
-		case TierInteractive:
-			next = int(atomic.AddUint64(&p.interactiveNext, 1) - 1)
-		}
-
-		for offset := 0; offset < (end - start); offset++ {
-			idx := start + (next+offset)%(end-start)
-			s := p.sessions[idx]
-			if !s.inUse {
-				s.inUse = true
-				p.mu.Unlock()
-
-				cookie, gen, err := p.ensureValidSession(s)
-				if err != nil {
-					p.mu.Lock()
-					s.inUse = false
-					p.mu.Unlock()
-					return nil, fmt.Errorf("warwick: acquire session: %w", err)
-				}
-
-				metrics.WarwickSessionPoolWaitSeconds.WithLabelValues(tier.String()).Observe(time.Since(acquireStart).Seconds())
-				return &SessionRef{
-					Cookie:     cookie,
-					Generation: gen,
-					session:    s,
-					pool:       p,
-				}, nil
-			}
-		}
-
-		// All sessions in use — check if deadline expired
-		if timedOut.Load() {
-			p.mu.Unlock()
-			return nil, fmt.Errorf("%w: tier %d (all %d in use, waited %v)",
-				ErrNoAvailableSessions, tier, end-start, timeout)
-		}
-
-		// Wait for a session to be released (or timeout/cancel broadcast)
-		p.cond.Wait()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case index := <-available:
+		return p.acquireIndex(ctx, tier, available, index, acquireStart)
+	case <-timer.C:
+		return nil, fmt.Errorf("%w: tier %d (all %d in use, waited %v)",
+			ErrNoAvailableSessions, tier, size, timeout)
 	}
 }
 
@@ -402,20 +329,41 @@ func (p *SessionPool) AcquireWithTimeout(tier SessionTier, timeout time.Duration
 	return p.AcquireWithTimeoutContext(context.Background(), tier, timeout)
 }
 
-// Release marks a session as no longer in use so it can be acquired by another caller.
+// Release returns a session index to its tier queue. It is idempotent so
+// deferred cleanup and explicit error cleanup cannot create duplicate capacity.
 func (p *SessionPool) Release(ref *SessionRef) {
 	if ref == nil || ref.session == nil {
 		return
 	}
-	p.mu.Lock()
-	ref.session.inUse = false
-	p.cond.Signal()
-	p.mu.Unlock()
+	if ref.released.Swap(true) {
+		return
+	}
+	owner := ref.pool
+	if owner == nil || ref.index < 0 || ref.index >= len(owner.sessions) || owner.sessions[ref.index] != ref.session {
+		return
+	}
+	available, _, err := owner.availableForTier(ref.tier)
+	if err != nil {
+		return
+	}
+	available <- ref.index
 }
 
 // ForceRefreshOnSession performs a fresh login for just this one session.
 // Other sessions in the pool are completely unaffected.
 func (p *SessionPool) ForceRefreshOnSession(ref *SessionRef) (string, uint64, error) {
+	return p.ForceRefreshOnSessionContext(context.Background(), ref)
+}
+
+// ForceRefreshOnSessionContext refreshes one pooled session while honoring
+// request cancellation during the upstream login.
+func (p *SessionPool) ForceRefreshOnSessionContext(ctx context.Context, ref *SessionRef) (string, uint64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
+	}
 	s := ref.session
 	s.mu.Lock()
 
@@ -424,7 +372,7 @@ func (p *SessionPool) ForceRefreshOnSession(ref *SessionRef) (string, uint64, er
 		return "", 0, ErrAuthConflict
 	}
 
-	cookie, gen, err := p.doLoginLocked(s)
+	cookie, gen, err := p.doLoginLocked(ctx, s)
 	if err != nil {
 		if s.isKickCandidate() {
 			s.applyBackoff()
@@ -446,7 +394,10 @@ func (p *SessionPool) ForceRefreshOnSession(ref *SessionRef) (string, uint64, er
 
 // ensureValidSession returns a valid cookie for the given session, performing
 // a login if the current cookie is missing or expired (double-checked locking).
-func (p *SessionPool) ensureValidSession(s *pooledSession) (string, uint64, error) {
+func (p *SessionPool) ensureValidSession(ctx context.Context, s *pooledSession) (string, uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
+	}
 	// Fast path with read lock
 	s.mu.RLock()
 	if s.cookie != "" && time.Now().Before(s.expiresAt.Add(-sessionRefreshBuffer)) {
@@ -470,8 +421,13 @@ func (p *SessionPool) ensureValidSession(s *pooledSession) (string, uint64, erro
 		return "", 0, ErrAuthConflict
 	}
 
-	cookie, gen, err := p.doLoginLocked(s)
+	cookie, gen, err := p.doLoginLocked(ctx, s)
 	if err != nil {
+		// Caller cancellation/deadline is not evidence of an admin kick. Do not
+		// poison the session's backoff state for a request-local failure.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", 0, err
+		}
 		// Login failed — determine if this is a human conflict (kick) or normal expiry.
 		if s.isKickCandidate() {
 			s.applyBackoff()
@@ -487,8 +443,8 @@ func (p *SessionPool) ensureValidSession(s *pooledSession) (string, uint64, erro
 
 // doLoginLocked performs the login flow and updates the session.
 // Caller must hold s.mu write lock.
-func (p *SessionPool) doLoginLocked(s *pooledSession) (string, uint64, error) {
-	cookieValue, err := login(s.client, s.loginURL, s.email, s.password)
+func (p *SessionPool) doLoginLocked(ctx context.Context, s *pooledSession) (string, uint64, error) {
+	cookieValue, err := loginWithContext(ctx, s.client, s.loginURL, s.email, s.password)
 	if err != nil {
 		return "", 0, err
 	}

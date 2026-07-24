@@ -14,6 +14,11 @@ import (
 	"qr-command-center/internal/service"
 )
 
+const (
+	maxBatchAttendanceBodyBytes = 1 << 20 // 1 MiB
+	maxBatchAttendanceCourses   = 100
+)
+
 // mapServiceError maps domain errors to HTTP status codes.
 func mapServiceError(w http.ResponseWriter, err error) bool {
 	if errors.Is(err, domain.ErrAuthExpired) {
@@ -295,12 +300,22 @@ func getBatchAttendanceHandler(ts *service.TeacherService) http.HandlerFunc {
 			CourseIds []string `json:"course_ids"`
 			Threshold int      `json:"threshold"`
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBatchAttendanceBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				writeJSON(w, http.StatusRequestEntityTooLarge, errorResponse("request body too large"))
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))
 			return
 		}
 		if len(req.CourseIds) == 0 {
 			writeJSON(w, http.StatusBadRequest, errorResponse("course_ids is required"))
+			return
+		}
+		if len(req.CourseIds) > maxBatchAttendanceCourses {
+			writeJSON(w, http.StatusBadRequest, errorResponse("too many course_ids: maximum is 100"))
 			return
 		}
 

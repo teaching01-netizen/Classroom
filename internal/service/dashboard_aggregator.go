@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"sort"
 	"time"
 
@@ -23,7 +22,6 @@ type studentAgg struct {
 func aggregatePerCourseResults(results []dashboardCourseResult) (map[string]*studentAgg, map[string]*domain.DashboardSessionSummary, int) {
 	studentMap := make(map[string]*studentAgg)
 	allSessions := make(map[string]*domain.DashboardSessionSummary)
-	totalStudents := 0
 
 	for _, res := range results {
 		if res.err != nil || res.report == nil {
@@ -84,12 +82,9 @@ func aggregatePerCourseResults(results []dashboardCourseResult) (map[string]*stu
 			}
 		}
 
-		if len(res.report.Students) > totalStudents {
-			totalStudents = len(res.report.Students)
-		}
 	}
 
-	return studentMap, allSessions, totalStudents
+	return studentMap, allSessions, len(studentMap)
 }
 
 func buildSessionList(allSessions map[string]*domain.DashboardSessionSummary, totalStudents int) []domain.DashboardSessionSummary {
@@ -109,13 +104,11 @@ func buildSessionList(allSessions map[string]*domain.DashboardSessionSummary, to
 	return sessions
 }
 
-func loadStudentIDMapping(ctx context.Context, dp TeacherDataProvider) map[string]string {
-	m := make(map[string]string)
-	if profiles, err := dp.FetchStudentProfiles(ctx); err == nil {
-		for _, p := range profiles {
-			if p.StudentID != "" && p.StudentGuid != "" {
-				m[p.StudentGuid] = p.StudentID
-			}
+func buildStudentIDMapping(profiles []domain.StudentProfile) map[string]string {
+	m := make(map[string]string, len(profiles))
+	for _, p := range profiles {
+		if p.StudentID != "" && p.StudentGuid != "" {
+			m[p.StudentGuid] = p.StudentID
 		}
 	}
 	return m
@@ -149,7 +142,12 @@ func buildStudentAbsences(studentMap map[string]*studentAgg, sessions []domain.D
 
 		isAtRisk := computeAtRisk(agg.total, absences, threshold)
 
-		key := agg.name
+		// Names are not stable identifiers: siblings or classmates can share a
+		// display name. Only fall back to the name when upstream omitted an ID.
+		key := agg.studentGUID
+		if key == "" {
+			key = agg.name
+		}
 		if studentSet[key] {
 			continue
 		}
@@ -239,31 +237,45 @@ func extractTopAtRisk(students []domain.StudentAbsence, limit int) []domain.Stud
 }
 
 func (s *TeacherService) aggregateDashboard(
-	ctx context.Context,
 	results []dashboardCourseResult,
 	courses []domain.CourseSummary,
 	threshold int,
 	wCodes []string,
+	guidToStudentID map[string]string,
 ) (*domain.DashboardReport, error) {
 
 	studentMap, allSessions, totalStudents := aggregatePerCourseResults(results)
 	sessions := buildSessionList(allSessions, totalStudents)
-	guidToStudentID := loadStudentIDMapping(ctx, s.dp)
 	students := buildStudentAbsences(studentMap, sessions, guidToStudentID, threshold)
 
 	if len(wCodes) > 0 {
 		students = domain.FilterStudentsByWCodes(students, wCodes)
 	}
 
+	atRiskCount := 0
+	attendedSessions := 0
+	totalSessions := 0
+	for _, student := range students {
+		if student.AtRisk {
+			atRiskCount++
+		}
+		attendedSessions += student.AttendedSessions
+		totalSessions += student.TotalSessions
+	}
+	avgAttendanceRate := 0.0
+	if totalSessions > 0 {
+		avgAttendanceRate = float64(attendedSessions) / float64(totalSessions)
+	}
 	topAtRisk := extractTopAtRisk(students, 5)
 
 	return &domain.DashboardReport{
-		GeneratedAt:   time.Now(),
-		TotalStudents: totalStudents,
-		TotalCourses:  len(courses),
-		AtRiskCount:   len(topAtRisk),
-		TopAtRisk:     topAtRisk,
-		Students:      students,
-		Sessions:      sessions,
+		GeneratedAt:       time.Now(),
+		TotalStudents:     totalStudents,
+		TotalCourses:      len(courses),
+		AvgAttendanceRate: avgAttendanceRate,
+		AtRiskCount:       atRiskCount,
+		TopAtRisk:         topAtRisk,
+		Students:          students,
+		Sessions:          sessions,
 	}, nil
 }

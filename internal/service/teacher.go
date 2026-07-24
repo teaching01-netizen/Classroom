@@ -3,7 +3,10 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"qr-command-center/internal/domain"
@@ -15,6 +18,7 @@ import (
 // without real Warwick infrastructure.
 type TeacherDataProvider interface {
 	GetCourses(ctx context.Context) ([]domain.CourseSummary, error)
+	GetCourseCatalog(ctx context.Context) ([]domain.CourseSummary, error)
 	GetCourseDetail(ctx context.Context, courseID string) (*domain.CourseDetail, error)
 	GetCourseDetailWithName(ctx context.Context, courseID, courseName string) (*domain.CourseDetail, error)
 	GetSessionDetail(ctx context.Context, courseID, sessionID string) (*domain.SessionDetail, error)
@@ -32,6 +36,47 @@ type TeacherService struct {
 	defaultFetcher    domain.SessionFetcher
 	reportConcurrency int
 }
+
+type profileFetchResult struct {
+	profiles []domain.StudentProfile
+	err      error
+}
+
+// runBoundedJobs executes one job for each index while keeping the number of
+// worker goroutines bounded. The caller remains responsible for making the
+// job itself context-aware; cancellation prevents queued work from starting
+// and is returned after already-running workers have exited.
+func runBoundedJobs(ctx context.Context, count, concurrency int, fn func(index int)) error {
+	if count <= 0 {
+		return ctx.Err()
+	}
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	if concurrency > count {
+		concurrency = count
+	}
+
+	var workers sync.WaitGroup
+	var next atomic.Int64
+	workers.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer workers.Done()
+			for index := int(next.Add(1) - 1); index < count; index = int(next.Add(1) - 1) {
+				if ctx.Err() != nil {
+					return
+				}
+				fn(index)
+			}
+		}()
+	}
+
+	workers.Wait()
+	return ctx.Err()
+}
+
+const maxBatchCourseIDs = 100
 
 // NewTeacherService creates a TeacherService. All args must be non-nil.
 // reportConcurrency controls the max concurrent FetchSessionDetailLive calls per report.
@@ -66,6 +111,8 @@ type SessionDetailResult struct {
 
 // GetSessionDetail fetches session detail and student profiles concurrently.
 func (s *TeacherService) GetSessionDetail(ctx context.Context, courseID, sessionID string) (*SessionDetailResult, error) {
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	type detailResult struct {
 		detail *domain.SessionDetail
@@ -79,19 +126,26 @@ func (s *TeacherService) GetSessionDetail(ctx context.Context, courseID, session
 	profileCh := make(chan profileResult, 1)
 
 	go func() {
-		d, err := s.dp.GetSessionDetail(ctx, courseID, sessionID)
+		d, err := s.dp.GetSessionDetail(workCtx, courseID, sessionID)
 		detailCh <- detailResult{detail: d, err: err}
 	}()
 	go func() {
-		p, _ := s.dp.FetchStudentProfiles(ctx)
+		p, _ := s.dp.FetchStudentProfiles(workCtx)
 		profileCh <- profileResult{profiles: p}
 	}()
 
 	res := <-detailCh
 	if res.err != nil {
-		// Join the sibling request so no Warwick call outlives this request.
+		// Cancel and join the sibling request so no Warwick call outlives this
+		// request or retains a scarce session-pool slot.
+		cancel()
 		<-profileCh
 		return nil, res.err
+	}
+	if res.detail == nil {
+		cancel()
+		<-profileCh
+		return nil, errors.New("teacher: session detail provider returned nil detail")
 	}
 
 	profRes := <-profileCh
@@ -114,20 +168,55 @@ func (s *TeacherService) GetAttendanceReport(ctx context.Context, courseID strin
 		fetcher = s.dp
 	}
 
-	// Fetch course detail for the session list.
-	courseDetail, err := s.dp.GetCourseDetail(ctx, courseID)
-	if err != nil {
-		return nil, err
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type detailResult struct {
+		detail *domain.CourseDetail
+		err    error
+	}
+	profileCh := make(chan profileFetchResult, 1)
+	detailCh := make(chan detailResult, 1)
+
+	go func() {
+		profiles, err := s.dp.FetchStudentProfiles(workCtx)
+		profileCh <- profileFetchResult{profiles: profiles, err: err}
+	}()
+	go func() {
+		detail, err := s.dp.GetCourseDetail(workCtx, courseID)
+		detailCh <- detailResult{detail: detail, err: err}
+	}()
+
+	detailRes := <-detailCh
+	if detailRes.err != nil {
+		cancel()
+		<-profileCh
+		return nil, detailRes.err
+	}
+	if detailRes.detail == nil {
+		cancel()
+		<-profileCh
+		return nil, errors.New("teacher: course detail provider returned nil detail")
 	}
 
-	report, err := s.dp.GetCourseAttendanceReport(ctx, courseID, courseDetail.Name, courseDetail.Sessions, threshold, fetcher)
+	courseDetail := detailRes.detail
+	report, err := s.dp.GetCourseAttendanceReport(workCtx, courseID, courseDetail.Name, courseDetail.Sessions, threshold, fetcher)
 	if err != nil {
+		cancel()
+		<-profileCh
 		return nil, err
 	}
+	if report == nil {
+		cancel()
+		<-profileCh
+		return nil, errors.New("teacher: attendance report provider returned nil report")
+	}
 
-	// Enrich StudentID with Warwick wcode.
-	if profiles, profErr := s.dp.FetchStudentProfiles(ctx); profErr == nil {
-		domain.EnrichStudentIDWithWCode(report.Students, profiles)
+	// Let report computation overlap profile retrieval, then join before
+	// returning so no upstream work survives the request.
+	profileRes := <-profileCh
+	if profileRes.err == nil {
+		domain.EnrichStudentIDWithWCode(report.Students, profileRes.profiles)
 	}
 
 	return report, nil
@@ -148,9 +237,12 @@ type BatchCourseResult struct {
 // Loads the course catalog once, builds a request-local courseID->name map,
 // and reuses it for all detail calls via GetCourseDetailWithName.
 func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []string, threshold int) (*BatchAttendanceResult, error) {
+	if len(courseIDs) > maxBatchCourseIDs {
+		return nil, fmt.Errorf("too many course_ids: maximum is %d", maxBatchCourseIDs)
+	}
 
 	// Load course catalog once to build a request-local name map.
-	allCourses, err := s.dp.GetCourses(ctx)
+	allCourses, err := s.dp.GetCourseCatalog(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -165,27 +257,28 @@ func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []str
 	}
 
 	results := make([]courseResult, len(courseIDs))
-	sem := make(chan struct{}, 2)
+	if err := runBoundedJobs(ctx, len(courseIDs), 2, func(index int) {
+		courseID := courseIDs[index]
+		courseName, ok := courseNames[courseID]
+		if !ok {
+			results[index] = courseResult{err: fmt.Errorf("course %q not found in catalog", courseID)}
+			return
+		}
 
-	for index, courseID := range courseIDs {
-		sem <- struct{}{}
-		go func(idx int, cid string) {
-			defer func() { <-sem }()
+		detail, err := s.dp.GetCourseDetailWithName(ctx, courseID, courseName)
+		if err != nil {
+			results[index] = courseResult{err: err}
+			return
+		}
+		if detail == nil {
+			results[index] = courseResult{err: fmt.Errorf("nil course detail for course %q", courseID)}
+			return
+		}
 
-			detail, err := s.dp.GetCourseDetailWithName(ctx, cid, courseNames[cid])
-			if err != nil {
-				results[idx] = courseResult{err: err}
-				return
-			}
-
-			report := ComputeReport(ctx, s.defaultFetcher, detail, threshold, s.reportConcurrency)
-			results[idx] = courseResult{report: report}
-		}(index, courseID)
-	}
-
-	// Drain semaphore.
-	for i := 0; i < cap(sem); i++ {
-		sem <- struct{}{}
+		report := ComputeReport(ctx, s.defaultFetcher, detail, threshold, s.reportConcurrency)
+		results[index] = courseResult{report: report}
+	}); err != nil {
+		return nil, err
 	}
 
 	if ctx.Err() != nil {
@@ -220,7 +313,7 @@ func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain
 	threshold := filters.Threshold
 
 	// Fetch all courses.
-	allCourses, err := s.dp.GetCourses(ctx)
+	allCourses, err := s.dp.GetCourseCatalog(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -249,59 +342,69 @@ func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain
 		}, nil
 	}
 
+	profileCh := make(chan profileFetchResult, 1)
+	go func() {
+		profiles, profileErr := s.dp.FetchStudentProfiles(ctx)
+		profileCh <- profileFetchResult{profiles: profiles, err: profileErr}
+	}()
+
 	// Compute attendance reports for each course in parallel.
 	results := make([]dashboardCourseResult, len(courses))
-	sem := make(chan struct{}, 2)
+	if err := runBoundedJobs(ctx, len(courses), 2, func(index int) {
+		c := courses[index]
 
-	for i, course := range courses {
-		sem <- struct{}{}
-		go func(idx int, c domain.CourseSummary) {
-			defer func() { <-sem }()
-
-			// Retry with backoff on pool exhaustion.
-			var detail *domain.CourseDetail
-			var lastErr error
-			for attempt := 0; attempt < 3; attempt++ {
-				var err error
-				detail, err = s.dp.GetCourseDetailWithName(ctx, c.CourseID, c.Name)
-				if err == nil {
-					lastErr = nil
-					break
-				}
-				lastErr = err
-				if errors.Is(err, domain.ErrPoolExhausted) {
-					backoff := time.Duration(500*(1<<uint(attempt))) * time.Millisecond
-					slog.Warn("dashboard_course_detail_pool_retry", "course_id", c.CourseID, "attempt", attempt+1, "backoff", backoff)
-					select {
-					case <-time.After(backoff):
-						continue
-					case <-ctx.Done():
-						results[idx] = dashboardCourseResult{courseID: c.CourseID, courseName: c.Name, err: ctx.Err()}
-						return
-					}
-				}
+		// Retry with backoff on pool exhaustion.
+		var detail *domain.CourseDetail
+		var lastErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			var err error
+			detail, err = s.dp.GetCourseDetailWithName(ctx, c.CourseID, c.Name)
+			if err == nil {
+				lastErr = nil
 				break
 			}
-			if lastErr != nil {
-				slog.Error("dashboard_course_detail_failed", "course_id", c.CourseID, "error", lastErr)
-				results[idx] = dashboardCourseResult{courseID: c.CourseID, courseName: c.Name, err: lastErr}
-				return
+			lastErr = err
+			if errors.Is(err, domain.ErrPoolExhausted) {
+				backoff := time.Duration(500*(1<<uint(attempt))) * time.Millisecond
+				slog.Warn("dashboard_course_detail_pool_retry", "course_id", c.CourseID, "attempt", attempt+1, "backoff", backoff)
+				select {
+				case <-time.After(backoff):
+					continue
+				case <-ctx.Done():
+					results[index] = dashboardCourseResult{courseID: c.CourseID, courseName: c.Name, err: ctx.Err()}
+					return
+				}
 			}
+			break
+		}
+		if lastErr != nil {
+			slog.Error("dashboard_course_detail_failed", "course_id", c.CourseID, "error", lastErr)
+			results[index] = dashboardCourseResult{courseID: c.CourseID, courseName: c.Name, err: lastErr}
+			return
+		}
+		if detail == nil {
+			results[index] = dashboardCourseResult{courseID: c.CourseID, courseName: c.Name, err: fmt.Errorf("nil course detail for course %q", c.CourseID)}
+			return
+		}
 
-			report := ComputeReport(ctx, s.defaultFetcher, detail, threshold, s.reportConcurrency)
-			results[idx] = dashboardCourseResult{courseID: c.CourseID, courseName: c.Name, report: report}
-		}(i, course)
-	}
-
-	// Drain semaphore.
-	for i := 0; i < cap(sem); i++ {
-		sem <- struct{}{}
+		report := ComputeReport(ctx, s.defaultFetcher, detail, threshold, s.reportConcurrency)
+		results[index] = dashboardCourseResult{courseID: c.CourseID, courseName: c.Name, report: report}
+	}); err != nil && ctx.Err() != nil {
+		<-profileCh
+		return nil, err
 	}
 
 	if ctx.Err() != nil {
+		<-profileCh
 		return nil, ctx.Err()
 	}
 
+	profileRes := <-profileCh
+	guidToStudentID := make(map[string]string)
+	if profileRes.err == nil {
+		guidToStudentID = buildStudentIDMapping(profileRes.profiles)
+	}
+
 	// Aggregate across courses.
-	return s.aggregateDashboard(ctx, results, courses, threshold, filters.WCodes)
+	return s.aggregateDashboard(results, courses, threshold, filters.WCodes, guidToStudentID)
 }

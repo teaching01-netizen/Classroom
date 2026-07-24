@@ -1,8 +1,10 @@
 package warwick
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,4 +92,125 @@ func TestAcquireWithTimeoutReturnsErrorOnTimeout(t *testing.T) {
 	_, err = pool.AcquireWithTimeout(TierQR, 10*time.Millisecond)
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrNoAvailableSessions)
+}
+
+func TestSessionPoolReleaseIsIdempotent(t *testing.T) {
+	loginServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "ASP.NET_SessionId=testcookie; path=/; HttpOnly")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer loginServer.Close()
+
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	ref, err := pool.Acquire(TierQR)
+	require.NoError(t, err)
+	pool.Release(ref)
+	pool.Release(ref)
+
+	ref, err = pool.Acquire(TierQR)
+	require.NoError(t, err)
+	defer pool.Release(ref)
+
+	_, err = pool.AcquireWithTimeout(TierQR, 10*time.Millisecond)
+	assert.ErrorIs(t, err, ErrNoAvailableSessions)
+}
+
+func TestAcquireWithTimeoutContextHonorsCancellation(t *testing.T) {
+	loginServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "ASP.NET_SessionId=testcookie; path=/; HttpOnly")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer loginServer.Close()
+
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	ref, err := pool.Acquire(TierQR)
+	require.NoError(t, err)
+	defer pool.Release(ref)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = pool.AcquireWithTimeoutContext(ctx, TierQR, time.Second)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestAcquireWithTimeoutContextCancelsLogin(t *testing.T) {
+	loginStarted := make(chan struct{})
+	var requests atomic.Int32
+	loginServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			close(loginStarted)
+			time.Sleep(100 * time.Millisecond)
+			return
+		}
+		w.Header().Add("Set-Cookie", "ASP.NET_SessionId=testcookie; path=/; HttpOnly")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer loginServer.Close()
+
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, acquireErr := pool.AcquireWithTimeoutContext(ctx, TierQR, time.Second)
+		result <- acquireErr
+	}()
+	<-loginStarted
+	cancel()
+	assert.ErrorIs(t, <-result, context.Canceled)
+
+	ref, err := pool.AcquireWithTimeout(TierQR, time.Second)
+	require.NoError(t, err)
+	pool.Release(ref)
+}
+
+func TestCanceledRefreshDoesNotBackoffHealthySession(t *testing.T) {
+	loginStarted := make(chan struct{})
+	var requests atomic.Int32
+	loginServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch requests.Add(1) {
+		case 1:
+			w.Header().Add("Set-Cookie", "ASP.NET_SessionId=initial; path=/; HttpOnly")
+			w.WriteHeader(http.StatusFound)
+		case 2:
+			close(loginStarted)
+			time.Sleep(100 * time.Millisecond)
+		default:
+			w.Header().Add("Set-Cookie", "ASP.NET_SessionId=refreshed; path=/; HttpOnly")
+			w.WriteHeader(http.StatusFound)
+		}
+	}))
+	defer loginServer.Close()
+
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	ref, err := pool.Acquire(TierQR)
+	require.NoError(t, err)
+	pool.Release(ref)
+
+	session := pool.sessions[0]
+	session.mu.Lock()
+	session.expiresAt = time.Now().Add(-time.Minute)
+	session.obtainedAt = time.Now()
+	session.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, acquireErr := pool.AcquireWithTimeoutContext(ctx, TierQR, time.Second)
+		result <- acquireErr
+	}()
+	<-loginStarted
+	cancel()
+	assert.ErrorIs(t, <-result, context.Canceled)
+
+	ref, err = pool.AcquireWithTimeout(TierQR, time.Second)
+	require.NoError(t, err, "a canceled refresh must not back off the session")
+	pool.Release(ref)
 }

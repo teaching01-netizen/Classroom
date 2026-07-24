@@ -31,9 +31,9 @@ func (c *ClassroomClient) getCourseDetailLive(ctx context.Context, courseID, cou
 	}
 
 	if c.pool != nil {
-		key := "course-detail:" + courseID + ":" + courseName
-		v, err := c.doSingleflight(ctx, key, func() (interface{}, error) {
-			return c.getCourseDetailWithPool(context.Background(), courseID, courseName)
+		key := courseDetailSingleflightKey(courseID, courseName)
+		v, err := c.doSingleflight(ctx, key, func(callCtx context.Context) (interface{}, error) {
+			return c.getCourseDetailWithPool(callCtx, courseID, courseName)
 		})
 		if err != nil {
 			return nil, err
@@ -43,8 +43,11 @@ func (c *ClassroomClient) getCourseDetailLive(ctx context.Context, courseID, cou
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		cookie, _, err := c.auth.GetValidSession()
+		cookie, _, err := c.auth.GetValidSessionContext(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, domain.ErrAuthExpired
 		}
 
@@ -57,7 +60,10 @@ func (c *ClassroomClient) getCourseDetailLive(ctx context.Context, courseID, cou
 		var fe *domain.FetchError
 		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
-			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
+			if _, _, rerr := c.auth.ForceRefreshContext(ctx); rerr != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				return nil, domain.ErrAuthExpired
 			}
 			continue
@@ -66,6 +72,12 @@ func (c *ClassroomClient) getCourseDetailLive(ctx context.Context, courseID, cou
 		return nil, err
 	}
 	return nil, lastErr
+}
+
+func courseDetailSingleflightKey(courseID, courseName string) string {
+	// Quote each component so delimiters in real course names/IDs cannot make
+	// two distinct requests share a result.
+	return fmt.Sprintf("course-detail:%q:%q", courseID, courseName)
 }
 
 func (c *ClassroomClient) getCourseDetailWithPool(ctx context.Context, courseID, courseName string) (*domain.CourseDetail, error) {
@@ -99,7 +111,10 @@ func (c *ClassroomClient) fetchCourseDetailWithPool(ctx context.Context, courseI
 		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
 			if attempt == 0 {
-				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
+				if _, _, rerr := c.pool.ForceRefreshOnSessionContext(ctx, ref); rerr != nil {
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
 					if errors.Is(rerr, ErrAuthConflict) {
 						return nil, domain.ErrAuthConflict
 					}
@@ -122,7 +137,7 @@ func (c *ClassroomClient) fetchCourseDetail(ctx context.Context, cookie, courseI
 
 	resp, err := c.doRequest(ctx, "POST", "/admin/api/ClassAttendanceDetailSearch", cookie, strings.NewReader(body))
 	if err != nil {
-		return nil, domain.NewNetworkError(err.Error())
+		return nil, requestError(ctx, err)
 	}
 	defer resp.Body.Close()
 
@@ -177,8 +192,11 @@ func (c *ClassroomClient) GetSessionDetail(ctx context.Context, courseID, sessio
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		cookie, _, err := c.auth.GetValidSession()
+		cookie, _, err := c.auth.GetValidSessionContext(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, domain.ErrAuthExpired
 		}
 
@@ -190,7 +208,10 @@ func (c *ClassroomClient) GetSessionDetail(ctx context.Context, courseID, sessio
 		var fe *domain.FetchError
 		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
-			if _, _, rerr := c.auth.ForceRefresh(); rerr != nil {
+			if _, _, rerr := c.auth.ForceRefreshContext(ctx); rerr != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				return nil, domain.ErrAuthExpired
 			}
 			continue
@@ -231,7 +252,10 @@ func (c *ClassroomClient) fetchSessionDetailWithPool(ctx context.Context, sessio
 		if errors.As(err, &fe) && fe.Kind == domain.ErrKindAuthExpired {
 			lastErr = err
 			if attempt == 0 {
-				if _, _, rerr := c.pool.ForceRefreshOnSession(ref); rerr != nil {
+				if _, _, rerr := c.pool.ForceRefreshOnSessionContext(ctx, ref); rerr != nil {
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
 					if errors.Is(rerr, ErrAuthConflict) {
 						return nil, domain.ErrAuthConflict
 					}
@@ -254,7 +278,7 @@ func (c *ClassroomClient) fetchSessionDetail(ctx context.Context, cookie, sessio
 
 	resp, err := c.doRequest(ctx, "POST", "/admin/api/ClassAttendanceStudentCheckInSearch", cookie, strings.NewReader(body))
 	if err != nil {
-		return nil, domain.NewNetworkError(err.Error())
+		return nil, requestError(ctx, err)
 	}
 	defer resp.Body.Close()
 
@@ -306,17 +330,19 @@ func (c *ClassroomClient) FetchSessionDetailLive(ctx context.Context, sessionID 
 		return nil, fmt.Errorf("FetchSessionDetailLive requires a session pool")
 	}
 
-	// Rate-limit live fetches if a limiter is configured.
-	// This is per-waiter: each caller independently acquires a rate limit token.
-	if c.rateLimiter != nil {
-		if err := c.rateLimiter.Wait(ctx); err != nil {
-			return nil, domain.ErrRateLimited
-		}
-	}
-
 	key := "session-detail:" + sessionID
-	v, err := c.doSingleflight(ctx, key, func() (interface{}, error) {
-		ref, err := c.pool.AcquireWithTimeoutContext(context.Background(), c.tier, 5*time.Second)
+	v, err := c.doSingleflight(ctx, key, func(callCtx context.Context) (interface{}, error) {
+		// Consume one limiter token per real upstream request, not per waiter.
+		if c.rateLimiter != nil {
+			if err := c.rateLimiter.Wait(callCtx); err != nil {
+				if callCtx.Err() != nil {
+					return nil, callCtx.Err()
+				}
+				return nil, domain.ErrRateLimited
+			}
+		}
+
+		ref, err := c.pool.AcquireWithTimeoutContext(callCtx, c.tier, 5*time.Second)
 		if err != nil {
 			if errors.Is(err, ErrAuthConflict) {
 				return nil, domain.ErrAuthConflict
@@ -324,14 +350,14 @@ func (c *ClassroomClient) FetchSessionDetailLive(ctx context.Context, sessionID 
 			if errors.Is(err, ErrNoAvailableSessions) {
 				return nil, domain.ErrPoolExhausted
 			}
-			if errors.Is(err, context.Canceled) {
-				return nil, err
+			if callCtx.Err() != nil {
+				return nil, callCtx.Err()
 			}
 			return nil, domain.ErrAuthExpired
 		}
 		defer c.pool.Release(ref)
 
-		detail, err := c.fetchSessionDetail(context.Background(), ref.Cookie, sessionID)
+		detail, err := c.fetchSessionDetail(callCtx, ref.Cookie, sessionID)
 		if err != nil {
 			return nil, err
 		}

@@ -85,3 +85,11 @@ func TestMetrics_PoolWaitHistogramObservable(t *testing.T) {
 	count := testutil.CollectAndCount(WarwickSessionPoolWaitSeconds)
 	assert.GreaterOrEqual(t, count, 1, "should be collectable")
 }
+
+func TestMetrics_ReportRetryCountersObservable(t *testing.T) {
+	ReportRateLimitRetriesTotal.Inc()
+	ReportRateLimitRetryExhaustedTotal.Inc()
+
+	assert.Equal(t, 1, testutil.CollectAndCount(ReportRateLimitRetriesTotal))
+	assert.Equal(t, 1, testutil.CollectAndCount(ReportRateLimitRetryExhaustedTotal))
+}
