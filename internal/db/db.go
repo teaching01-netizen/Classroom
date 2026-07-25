@@ -78,15 +78,15 @@ func RunMigrations(databaseURL string) error {
 		return err
 	}
 
-	// After successful migration (or ErrNoChange), verify schema version >= 8.
-	// Migration 008 removes the disposable upstream-data replica tables.
+	// After successful migration (or ErrNoChange), verify schema version >= 9.
+	// Migration 009 adds the fenced PostgreSQL snapshot and host-admission model.
 	var version int
 	if err := db.QueryRowContext(context.Background(), "SELECT version FROM schema_migrations").Scan(&version); err != nil {
 		return fmt.Errorf("check schema version: %w", err)
 	}
-	if version < 8 {
-		slog.Error("schema version below required minimum", "have", version, "need", 8)
-		return fmt.Errorf("schema version %d below required minimum 8", version)
+	if version < 9 {
+		slog.Error("schema version below required minimum", "have", version, "need", 9)
+		return fmt.Errorf("schema version %d below required minimum 9", version)
 	}
 
 	return nil
