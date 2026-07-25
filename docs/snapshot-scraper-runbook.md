@@ -194,3 +194,26 @@ PostgreSQL 16 and the deployed instance/database topology before cutover.
 Record the same set during staging, including production-shaped payload-size
 distribution. Investigate changes with profiles and query plans before raising
 host rate or concurrency.
+
+## Dependency security checks
+
+Run:
+
+```bash
+go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+cd web
+npm audit
+npm audit --omit=dev
+```
+
+The release toolchain is Go 1.26.5 with `golang.org/x/text` 0.39.0;
+`govulncheck` must report zero reachable vulnerabilities.
+
+As of 2026-07-26, npm maps React Router's server-action/RSC CSRF advisory to
+both `react-router` and `react-router-dom`, so the production audit reports two
+high package nodes for one advisory. This SPA uses only `BrowserRouter`,
+`Routes`, `Route`, `Link`, `useNavigate`, and `useParams`; it has no React
+Server Components, SSR runtime, data router, loader, action, or server-action
+endpoint. Treat that as a documented reachability exception, keep React Router
+at 7.18.1 or newer, and re-evaluate the exception whenever routing architecture
+or the advisory's fixed range changes. No critical advisory is accepted.

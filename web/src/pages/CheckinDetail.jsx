@@ -52,7 +52,10 @@ export function CheckinDetail() {
         } catch (e) {
           if (e instanceof SyntaxError) {
             console.error('JSON parse error fetching rooms:', e.message);
-            throw new Error('Invalid response from rooms API — please try again');
+            throw new Error(
+              'Invalid response from rooms API — please try again',
+              { cause: e },
+            );
           }
           throw e;
         }
@@ -74,7 +77,10 @@ export function CheckinDetail() {
             } catch (e) {
               if (e instanceof SyntaxError) {
                 console.error('JSON parse error starting room:', e.message);
-                throw new Error('Invalid response when starting room — please try again');
+                throw new Error(
+                  'Invalid response when starting room — please try again',
+                  { cause: e },
+                );
               }
               throw e;
             }

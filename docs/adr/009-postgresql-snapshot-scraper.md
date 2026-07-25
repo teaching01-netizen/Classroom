@@ -37,15 +37,16 @@ request-level live overrides are not part of snapshot mode.
 
 ## Preflight evidence
 
-- Toolchain: Go 1.26.3.
+- Preflight toolchain: Go 1.26.3. Release builds were raised to Go 1.26.5
+  after vulnerability scanning identified standard-library fixes in that patch.
 - WebSocket dependency: `nhooyr.io/websocket` 1.8.17 is retained for this
   rollout; a dependency migration is separate work.
 - Shared transport: `internal/warwick/transport.go` already centralizes the
   process transport and session-pool clients reuse it.
 - Baseline backend: `go test ./... -count=1` and `go vet ./...` passed.
 - Baseline frontend: 135 tests and the Vite production build passed.
-- Baseline lint: `npm run lint` failed because no ESLint configuration existed;
-  the snapshot rollout will add the missing configuration and verify it.
+- Frontend lint now uses an ESLint 10 flat configuration and excludes generated
+  `dist` and dependency trees.
 - Profile snapshots are assembled from paginated requests, so conditional
   validators are disabled for that kind.
 
@@ -56,3 +57,18 @@ maximum serve age. The cost is additional PostgreSQL coordination state,
 retention work, and operational monitoring. At-least-once execution remains
 safe through target identity, lease fencing, content hashes, transactional
 current pointers, and idempotent `(target_id, lease_generation)` runs.
+
+## Release verification
+
+- Backend unit, integration, real-PostgreSQL, race, vet, storage-boundary, and
+  full end-to-end snapshot contracts pass.
+- Frontend lint, 143 Vitest tests, and the Vite production build pass.
+- `govulncheck` reports zero reachable vulnerabilities with Go 1.26.5 and
+  `golang.org/x/text` 0.39.0.
+- Frontend dependencies were raised to Vite 8.1.5, Vitest 4.1.10, ESLint
+  10.8.0, and React Router 7.18.1. `npm audit --omit=dev` still maps one
+  high-severity React Router server-action/RSC advisory to two package nodes.
+  This release accepts that reachability exception because the application is
+  a client-only `BrowserRouter` SPA and has no React Server Components, SSR
+  runtime, data router, loader, action, or server-action endpoint. Browser
+  routing advisories affecting earlier releases are fixed by 7.18.1.

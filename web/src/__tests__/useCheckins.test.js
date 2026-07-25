@@ -16,6 +16,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('useCheckins - fetchStudents updates store', () => {
@@ -65,7 +66,10 @@ describe('useCheckins - fetchStudents updates store', () => {
 describe('useCheckins - fetchStudents AbortController', () => {
   it('creates an AbortController and passes signal to fetch', async () => {
     const abortSpy = vi.fn();
-    vi.stubGlobal('AbortController', vi.fn(() => ({ signal: 'mock-signal', abort: abortSpy })));
+    vi.stubGlobal('AbortController', vi.fn(function AbortControllerMock() {
+      this.signal = 'mock-signal';
+      this.abort = abortSpy;
+    }));
     vi.stubGlobal('fetch', vi.fn().mockImplementation(() =>
       new Promise(() => {})
     ));

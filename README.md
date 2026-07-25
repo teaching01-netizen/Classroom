@@ -36,7 +36,7 @@ and is superseded by [ADR 009](docs/adr/009-postgresql-snapshot-scraper.md).
 
 ## Requirements
 
-- Go 1.26.3
+- Go 1.26.5
 - Node.js 20 and npm
 - PostgreSQL 16 for production
 - Warwick credentials and user ID
