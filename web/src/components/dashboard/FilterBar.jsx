@@ -24,11 +24,13 @@ export function FilterBar({ courses, coursesLoading, activeViewId, onLoadView, o
   const [wCodeInput, setWCodeInput] = useState((filters.wCodes || []).join(', '));
 
   useEffect(() => {
-    const currentParsed = JSON.stringify(parseWCodes(wCodeInput));
-    const storeParsed = JSON.stringify(filters.wCodes || []);
-    if (currentParsed !== storeParsed) {
-      setWCodeInput((filters.wCodes || []).join(', '));
-    }
+    setWCodeInput((currentInput) => {
+      const currentParsed = JSON.stringify(parseWCodes(currentInput));
+      const storeParsed = JSON.stringify(filters.wCodes || []);
+      return currentParsed === storeParsed
+        ? currentInput
+        : (filters.wCodes || []).join(', ');
+    });
   }, [filters.wCodes]);
 
   const filteredCourses = useMemo(() => {

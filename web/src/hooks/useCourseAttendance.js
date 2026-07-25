@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchFresh } from '../api/fetchFresh';
+import {
+  isCourseSessionSnapshot,
+  useSnapshotEvents,
+} from './useSnapshotEvents';
 
 export function useCourseAttendance(courseId, { threshold = 0 } = {}) {
   const [data, setData] = useState(null);
@@ -7,7 +11,7 @@ export function useCourseAttendance(courseId, { threshold = 0 } = {}) {
   const [error, setError] = useState(null);
   const abortRef = useRef(null);
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async ({ silent = false } = {}) => {
     if (!courseId) return;
 
     if (abortRef.current) {
@@ -16,7 +20,9 @@ export function useCourseAttendance(courseId, { threshold = 0 } = {}) {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    setLoading(true);
+    if (!silent) {
+      setLoading(true);
+    }
     setError(null);
 
     try {
@@ -51,6 +57,13 @@ export function useCourseAttendance(courseId, { threshold = 0 } = {}) {
   const refetch = useCallback(() => {
     fetchData();
   }, [fetchData]);
+  const silentRefetch = useCallback(() => {
+    fetchData({ silent: true });
+  }, [fetchData]);
+  useSnapshotEvents(
+    (metadata) => isCourseSessionSnapshot(metadata, courseId),
+    courseId ? silentRefetch : undefined
+  );
 
   return {
     data,

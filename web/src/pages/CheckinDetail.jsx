@@ -4,7 +4,6 @@ import { useCheckins } from '../hooks/useCheckins';
 import { useSessionStore } from '../store/useSessionStore';
 import { StatsBar } from '../components/StatsBar';
 import { StudentTable } from '../components/StudentTable';
-import { Pagination } from '../components/Pagination';
 import { QRModal } from '../components/QRModal';
 import { BackBreadcrumb } from '../components/BackBreadcrumb';
 import { fetchFresh } from '../api/fetchFresh';
@@ -23,6 +22,7 @@ export function CheckinDetail() {
   const [autoStartError, setAutoStartError] = useState(null);
   const pollRef = useRef(null);
   const startedRef = useRef(false);
+  const handleStartCheckinRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -115,7 +115,7 @@ export function CheckinDetail() {
           }, 2000);
         } else {
           // No room — create and start (reuse existing handler)
-          await handleStartCheckin();
+          await handleStartCheckinRef.current?.();
         }
       } catch (err) {
         console.error('Auto-start failed:', err);
@@ -284,6 +284,7 @@ export function CheckinDetail() {
       setIsStarting(false);
     }
   };
+  handleStartCheckinRef.current = handleStartCheckin;
 
   const handleCloseQR = () => {
     setShowQR(false);

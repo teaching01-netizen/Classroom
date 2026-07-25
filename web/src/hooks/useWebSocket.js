@@ -1,6 +1,10 @@
 import { useEffect, useRef } from 'react';
 import { useRoomStore } from '../store/useRoomStore';
 import { useSessionStore } from '../store/useSessionStore';
+import {
+  applySnapshotStateSync,
+  publishSnapshotCommitted,
+} from './useSnapshotEvents';
 
 const WS_URL = import.meta.env.VITE_WS_URL || `/ws`;
 
@@ -43,13 +47,17 @@ export const useWebSocket = () => {
             sessionActions.updateStudentCheckin(data.CHECKIN_UPDATED.student_id, data.CHECKIN_UPDATED.checked_in);
           } else if (data.SESSION_STATS_UPDATED !== undefined) {
             sessionActions.updateSessionStats(data.SESSION_STATS_UPDATED);
+          } else if (data.SnapshotStateSync !== undefined) {
+            applySnapshotStateSync(data.SnapshotStateSync);
+          } else if (data.SnapshotCommitted !== undefined) {
+            publishSnapshotCommitted(data.SnapshotCommitted);
           }
         } catch (error) {
           console.error('WebSocket message parse error:', error);
         }
       };
 
-      wsRef.current.onclose = (event) => {
+      wsRef.current.onclose = () => {
         useRoomStore.getState().setIsWsConnected(false);
         reconnectAttempts.current += 1;
         if (reconnectAttempts.current <= MAX_RECONNECT) {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { useSessionStore } from '../store/useSessionStore';
 import { useRoomStore } from '../store/useRoomStore';
 

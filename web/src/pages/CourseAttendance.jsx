@@ -1,5 +1,5 @@
 import React from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useCourseAttendance } from '../hooks/useCourseAttendance';
 import { AttendanceTable } from '../components/AttendanceTable';
 import { BackBreadcrumb } from '../components/BackBreadcrumb';

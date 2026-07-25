@@ -3,6 +3,7 @@ import { useSessionStore } from '../store/useSessionStore';
 import { useFocusRefetch } from './useFocusRefetch';
 import { useWsReconnect } from './useWebSocket';
 import { fetchFresh } from '../api/fetchFresh';
+import { isCourseSnapshot, useSnapshotEvents } from './useSnapshotEvents';
 
 export const useSessions = (courseId) => {
   const { sessions, isInitialLoading, isRefreshing, error, setSessions, setCourseName, setInitialLoading, setRefreshing, setError, reset } = useSessionStore();
@@ -43,6 +44,10 @@ export const useSessions = (courseId) => {
   const silentFetch = useCallback(() => fetchSessions({ silent: true }), [fetchSessions]);
   useFocusRefetch(courseId ? silentFetch : undefined);
   useWsReconnect(courseId ? silentFetch : undefined);
+  useSnapshotEvents(
+    (metadata) => isCourseSnapshot(metadata, courseId),
+    courseId ? silentFetch : undefined
+  );
 
   return { sessions, isLoading: isInitialLoading, isRefreshing, error };
 };

@@ -2,6 +2,8 @@ import React from 'react';
 import { useCountdown } from '../hooks/useCountdown';
 
 export const QRDisplay = ({ room }) => {
+  const timeLeft = useCountdown(room?.expires_at);
+
   if (!room) {
     return (
       <div style={{
@@ -17,8 +19,6 @@ export const QRDisplay = ({ room }) => {
       </div>
     );
   }
-
-  const timeLeft = useCountdown(room.expires_at);
 
   if (!room.qr_url) {
     return (

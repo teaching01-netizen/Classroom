@@ -3,6 +3,7 @@ import { useCourseStore } from '../store/useCourseStore';
 import { useFocusRefetch } from './useFocusRefetch';
 import { useWsReconnect } from './useWebSocket';
 import { fetchFresh } from '../api/fetchFresh';
+import { isCatalogSnapshot, useSnapshotEvents } from './useSnapshotEvents';
 
 export const useCourses = () => {
   const { courses, isInitialLoading, isRefreshing, error, setCourses, setInitialLoading, setRefreshing, setError } = useCourseStore();
@@ -33,6 +34,7 @@ export const useCourses = () => {
   const silentFetch = useCallback(() => fetchCourses({ silent: true }), [fetchCourses]);
   useFocusRefetch(silentFetch);
   useWsReconnect(silentFetch);
+  useSnapshotEvents(isCatalogSnapshot, silentFetch);
 
   return { courses, isLoading: isInitialLoading, isRefreshing, error };
 };

@@ -9,7 +9,8 @@ export function useBatchAttendance(courseIds, { threshold = 0 } = {}) {
   const idsKey = courseIds?.join(',') ?? '';
 
   useEffect(() => {
-    if (!courseIds || courseIds.length === 0) {
+    const requestedCourseIds = idsKey ? idsKey.split(',') : [];
+    if (requestedCourseIds.length === 0) {
       setData(null);
       setLoading(false);
       setError(null);
@@ -32,7 +33,7 @@ export function useBatchAttendance(courseIds, { threshold = 0 } = {}) {
         const res = await fetchFresh('/api/teacher/courses/attendance-batch', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ course_ids: courseIds, threshold }),
+          body: JSON.stringify({ course_ids: requestedCourseIds, threshold }),
           signal: controller.signal,
         });
 
