@@ -34,10 +34,26 @@ curl --fail-with-body \
   jq '.data'
 ```
 
-The status response intentionally contains aggregate counts only. For each
-kind, coverage is `current_by_kind[kind] / targets_by_kind[kind]`. A missing
-root current count is not ready; a zero target denominator for discovered
-course/session kinds is not evidence of coverage.
+The status response intentionally contains aggregate counts only. Use
+`active_course_current / active_course_targets` for the active-course gate and
+`known_session_current / known_session_targets` for the session gate. A missing
+root current count is not ready, and a zero target denominator is not evidence
+of coverage.
+
+Check the fail-closed cutover gates without exposing the bearer token in
+process arguments:
+
+```bash
+APP_ORIGIN='https://app.example' \
+SCRAPER_TRIGGER_TOKEN="$SCRAPER_TRIGGER_TOKEN" \
+  ./scripts/verify-snapshot-rollout-readiness.sh
+```
+
+This verifies current catalog/profile roots, non-zero 100% active-course and
+known-session coverage, zero expired current snapshots, zero active permits at
+the observation point, and no active host pause. It does not replace the full
+observation window or Prometheus checks for lease loss, notification drops,
+rate limits, authentication storms, and pool exhaustion.
 
 ## Stage 1: write-only
 

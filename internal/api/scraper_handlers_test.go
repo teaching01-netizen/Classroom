@@ -78,12 +78,16 @@ func TestScraperTickRequiresExactBearerTokenAndBoundsContext(t *testing.T) {
 
 func TestScraperStatusReturnsAggregatesOnly(t *testing.T) {
 	statusReader := &scraperStatusFake{status: db.ScraperStatus{
-		Due:            3,
-		Leased:         2,
-		Failed:         1,
-		ExpiredCurrent: 4,
-		ActivePermits:  1,
-		ExpiredPermits: 2,
+		Due:                 3,
+		Leased:              2,
+		Failed:              1,
+		ExpiredCurrent:      4,
+		ActiveCourseTargets: 7,
+		ActiveCourseCurrent: 7,
+		KnownSessionTargets: 42,
+		KnownSessionCurrent: 42,
+		ActivePermits:       1,
+		ExpiredPermits:      2,
 	}}
 	handler := scraperStatusHandler(
 		statusReader,
@@ -100,6 +104,10 @@ func TestScraperStatusReturnsAggregatesOnly(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Equal(t, 1, statusReader.calls)
 	require.Contains(t, recorder.Body.String(), `"due":3`)
+	require.Contains(t, recorder.Body.String(), `"active_course_targets":7`)
+	require.Contains(t, recorder.Body.String(), `"active_course_current":7`)
+	require.Contains(t, recorder.Body.String(), `"known_session_targets":42`)
+	require.Contains(t, recorder.Body.String(), `"known_session_current":42`)
 	for _, prohibited := range []string{
 		"resource_key",
 		"parent_key",

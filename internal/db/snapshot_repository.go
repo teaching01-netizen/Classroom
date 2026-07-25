@@ -110,6 +110,10 @@ type ScraperStatus struct {
 	Leased                     int                           `json:"leased"`
 	Failed                     int                           `json:"failed"`
 	ExpiredCurrent             int                           `json:"expired_current"`
+	ActiveCourseTargets        int                           `json:"active_course_targets"`
+	ActiveCourseCurrent        int                           `json:"active_course_current"`
+	KnownSessionTargets        int                           `json:"known_session_targets"`
+	KnownSessionCurrent        int                           `json:"known_session_current"`
 	OldestValidationAgeSeconds map[domain.SnapshotKind]int64 `json:"oldest_validation_age_seconds"`
 	OldestSnapshotAgeSeconds   map[domain.SnapshotKind]int64 `json:"oldest_snapshot_age_seconds"`
 	HostPausedUntil            *time.Time                    `json:"host_paused_until"`
@@ -1316,6 +1320,26 @@ func (r *SnapshotRepository) ScraperStatus(
 					OR last_validated_at
 						+ max_serve_age_seconds * INTERVAL '1 second' < $2
 				  )
+			),
+			COUNT(*) FILTER (
+				WHERE enabled=TRUE
+				  AND kind='course_detail'
+				  AND attributes->>'course_status'='active'
+			),
+			COUNT(*) FILTER (
+				WHERE enabled=TRUE
+				  AND kind='course_detail'
+				  AND attributes->>'course_status'='active'
+				  AND current_snapshot_id IS NOT NULL
+			),
+			COUNT(*) FILTER (
+				WHERE enabled=TRUE
+				  AND kind='session_detail'
+			),
+			COUNT(*) FILTER (
+				WHERE enabled=TRUE
+				  AND kind='session_detail'
+				  AND current_snapshot_id IS NOT NULL
 			)
 		FROM scrape_targets
 		WHERE host=$1`,
@@ -1326,6 +1350,10 @@ func (r *SnapshotRepository) ScraperStatus(
 		&status.Leased,
 		&status.Failed,
 		&status.ExpiredCurrent,
+		&status.ActiveCourseTargets,
+		&status.ActiveCourseCurrent,
+		&status.KnownSessionTargets,
+		&status.KnownSessionCurrent,
 	)
 	if err != nil {
 		return status, fmt.Errorf("read scraper target status: %w", err)
@@ -1421,7 +1449,7 @@ func (r *SnapshotRepository) ScraperStatus(
 	if err != nil {
 		return status, fmt.Errorf("read scraper host status: %w", err)
 	}
-	if pausedUntil != nil {
+	if pausedUntil != nil && pausedUntil.After(now) {
 		paused := pausedUntil.UTC()
 		status.HostPausedUntil = &paused
 	}

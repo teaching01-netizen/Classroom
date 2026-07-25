@@ -154,6 +154,7 @@ go test -race ./internal/scraper ./internal/db ./internal/service \
   ./internal/api ./internal/warwick -count=1
 go vet ./...
 ./scripts/verify-no-upstream-cache.sh
+node --test scripts/check-snapshot-rollout-readiness.test.mjs
 ```
 
 Database integration tests require a disposable database:

@@ -116,6 +116,70 @@ func TestSnapshotRepositoryScraperStatusReturnsAggregates(t *testing.T) {
 	require.Equal(t, 1, active.Leased)
 	require.Equal(t, 1, active.ActivePermits)
 	require.Empty(t, active.OldestValidationAgeSeconds)
+
+	_, err = repo.pool.Exec(ctx, `
+		UPDATE scrape_host_state
+		SET paused_until=$2
+		WHERE host=$1`,
+		testSnapshotHost,
+		now.Add(-time.Second),
+	)
+	require.NoError(t, err)
+	expiredPause, err := repo.ScraperStatus(ctx, testSnapshotHost, now)
+	require.NoError(t, err)
+	require.Nil(t, expiredPause.HostPausedUntil,
+		"status must expose only an active host pause as a cutover blocker")
+}
+
+func TestSnapshotRepositoryScraperStatusExposesRolloutCoverageGates(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	activeCourse := catalogSeed(now)
+	activeCourse.Ref.Kind = domain.SnapshotCourseDetail
+	activeCourse.Ref.ResourceKey = "active-course"
+	activeCourse.Attributes = json.RawMessage(`{"course_status":"active"}`)
+	finishedCourse := activeCourse
+	finishedCourse.Ref.ResourceKey = "finished-course"
+	finishedCourse.Attributes = json.RawMessage(`{"course_status":"finished"}`)
+	session := activeCourse
+	session.Ref.Kind = domain.SnapshotSessionDetail
+	session.Ref.ParentKey = activeCourse.Ref.ResourceKey
+	session.Ref.ResourceKey = "known-session"
+	session.Attributes = json.RawMessage(`{"session_status":"active"}`)
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{
+		activeCourse,
+		finishedCourse,
+		session,
+	}))
+	claimed, err := repo.ClaimDue(ctx, ClaimRequest{
+		Now: now, Limit: 3, WorkerID: "coverage-worker",
+		LeaseDuration: 2 * time.Minute,
+	})
+	require.NoError(t, err)
+	require.Len(t, claimed, 3)
+	for _, target := range claimed {
+		switch target.Ref {
+		case activeCourse.Ref:
+			_, err = repo.Commit(
+				ctx,
+				changedCommit(target, "coverage-worker", now, json.RawMessage(`{"course_id":"active-course"}`)),
+			)
+			require.NoError(t, err)
+		case session.Ref:
+			_, err = repo.Commit(
+				ctx,
+				changedCommit(target, "coverage-worker", now, json.RawMessage(`{"session_id":"known-session"}`)),
+			)
+			require.NoError(t, err)
+		}
+	}
+
+	status, err := repo.ScraperStatus(ctx, testSnapshotHost, now)
+	require.NoError(t, err)
+	require.Equal(t, 1, status.ActiveCourseTargets)
+	require.Equal(t, 1, status.ActiveCourseCurrent)
+	require.Equal(t, 1, status.KnownSessionTargets)
+	require.Equal(t, 1, status.KnownSessionCurrent)
 }
 
 func TestSnapshotRepositoryTargetReadsNullableLeaseOwner(t *testing.T) {
