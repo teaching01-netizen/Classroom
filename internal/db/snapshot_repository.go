@@ -531,6 +531,33 @@ func (r *SnapshotRepository) SetDueNow(ctx context.Context, ref domain.TargetRef
 	return nil
 }
 
+func (r *SnapshotRepository) Target(
+	ctx context.Context,
+	ref domain.TargetRef,
+) (domain.ScrapeTarget, error) {
+	if err := ref.Validate(); err != nil {
+		return domain.ScrapeTarget{}, err
+	}
+	row := r.pool.QueryRow(ctx, `
+		SELECT `+targetReturningColumns+`
+		FROM scrape_targets AS target
+		WHERE target.host=$1 AND target.kind=$2
+		  AND target.parent_key=$3 AND target.resource_key=$4`,
+		ref.Host,
+		ref.Kind,
+		ref.ParentKey,
+		ref.ResourceKey,
+	)
+	target, err := scanScrapeTarget(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ScrapeTarget{}, domain.ErrSnapshotNotFound
+	}
+	if err != nil {
+		return domain.ScrapeTarget{}, fmt.Errorf("read scrape target: %w", err)
+	}
+	return target, nil
+}
+
 func (r *SnapshotRepository) RescheduleLease(ctx context.Context, targetID, generation int64, nextRunAt time.Time) error {
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE scrape_targets
