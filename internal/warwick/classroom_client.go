@@ -99,6 +99,17 @@ func (c *ClassroomClient) Auth() *WarwickAuth {
 }
 
 func (c *ClassroomClient) doRequest(ctx context.Context, method, path, cookie string, body io.Reader) (*http.Response, error) {
+	return c.doRequestWithHeaders(ctx, method, path, cookie, body, nil)
+}
+
+func (c *ClassroomClient) doRequestWithHeaders(
+	ctx context.Context,
+	method string,
+	path string,
+	cookie string,
+	body io.Reader,
+	headers http.Header,
+) (*http.Response, error) {
 	u := c.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
@@ -109,6 +120,11 @@ func (c *ClassroomClient) doRequest(ctx context.Context, method, path, cookie st
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+	}
+	for key, values := range headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
 	}
 
 	start := time.Now()

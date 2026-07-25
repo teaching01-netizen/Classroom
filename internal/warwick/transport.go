@@ -26,13 +26,15 @@ import (
 //     supports it.
 func NewSharedTransport(connsPerHost int) *http.Transport {
 	return &http.Transport{
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   connsPerHost,
-		MaxConnsPerHost:       connsPerHost,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		DisableCompression:    false,
-		ForceAttemptHTTP2:     true,
+		MaxIdleConns:           100,
+		MaxIdleConnsPerHost:    connsPerHost,
+		MaxConnsPerHost:        connsPerHost,
+		IdleConnTimeout:        90 * time.Second,
+		TLSHandshakeTimeout:    10 * time.Second,
+		ResponseHeaderTimeout:  15 * time.Second,
+		ExpectContinueTimeout:  1 * time.Second,
+		MaxResponseHeaderBytes: 1 << 20,
+		DisableCompression:     false,
+		ForceAttemptHTTP2:      true,
 	}
 }

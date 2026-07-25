@@ -24,7 +24,9 @@ func TestNewSharedTransport_ConfiguresAllTuningFields(t *testing.T) {
 	assert.Equal(t, 50, tr.MaxConnsPerHost, "MaxConnsPerHost must match the connsPerHost arg")
 	assert.Equal(t, 90*time.Second, tr.IdleConnTimeout)
 	assert.Equal(t, 10*time.Second, tr.TLSHandshakeTimeout)
+	assert.Equal(t, 15*time.Second, tr.ResponseHeaderTimeout)
 	assert.Equal(t, 1*time.Second, tr.ExpectContinueTimeout)
+	assert.Equal(t, int64(1<<20), tr.MaxResponseHeaderBytes)
 	// DisableCompression: false is what enables transparent gzip. We make it
 	// explicit so it can't be flipped by accident.
 	assert.False(t, tr.DisableCompression, "DisableCompression must be false so gzip responses decompress automatically")
