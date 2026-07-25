@@ -23,23 +23,38 @@ type TeacherDataProvider interface {
 	GetCourseDetailWithName(ctx context.Context, courseID, courseName string) (*domain.CourseDetail, error)
 	GetSessionDetail(ctx context.Context, courseID, sessionID string) (*domain.SessionDetail, error)
 	FetchStudentProfiles(ctx context.Context) ([]domain.StudentProfile, error)
+}
+
+type CheckinWriter interface {
 	ToggleCheckin(ctx context.Context, courseID, sessionID, studentID string, checked bool) error
-	GetCourseAttendanceReport(ctx context.Context, courseID, courseName string, sessions []domain.SessionSummary, threshold int, source domain.SessionFetcher) (*domain.CourseAttendanceReport, error)
-	FetchSessionForReport(ctx context.Context, courseID, sessionID string) (*domain.SessionDetail, error)
 }
 
 // TeacherService owns the business logic for teacher-facing operations.
 // It sits between the HTTP handlers and the Warwick client, providing
 // a testable layer that can be mocked independently of HTTP concerns.
 type TeacherService struct {
-	dp                TeacherDataProvider
-	defaultFetcher    domain.SessionFetcher
+	reader            TeacherDataProvider
+	sessions          domain.SessionFetcher
+	checkins          CheckinWriter
+	refresher         SnapshotRefresher
 	reportConcurrency int
+	snapshotMode      bool
 }
+
+var ErrLiveSourceDisabled = errors.New("request-level live source is disabled in snapshot mode")
 
 type profileFetchResult struct {
 	profiles []domain.StudentProfile
 	err      error
+}
+
+type snapshotAwareReader interface {
+	CatalogRef() domain.TargetRef
+	CourseRef(string) domain.TargetRef
+	SessionRef(string, string) domain.TargetRef
+	ProfilesRef() domain.TargetRef
+	Metadata(context.Context, domain.TargetRef) (domain.SnapshotMetadata, error)
+	AnyOverdue(context.Context, []domain.TargetRef) (bool, error)
 }
 
 // runBoundedJobs executes one job for each index while keeping the number of
@@ -87,20 +102,61 @@ func NewTeacherService(dp TeacherDataProvider, defaultFetcher domain.SessionFetc
 	if defaultFetcher == nil {
 		panic("TeacherService: defaultFetcher must not be nil")
 	}
+	checkins, ok := dp.(CheckinWriter)
+	if !ok {
+		panic("TeacherService: live provider must implement CheckinWriter")
+	}
+	return NewTeacherServiceWithDependencies(
+		dp,
+		defaultFetcher,
+		checkins,
+		NoopSnapshotRefresher{},
+		reportConcurrency,
+		false,
+	)
+}
+
+func NewTeacherServiceWithDependencies(
+	reader TeacherDataProvider,
+	sessions domain.SessionFetcher,
+	checkins CheckinWriter,
+	refresher SnapshotRefresher,
+	reportConcurrency int,
+	snapshotMode bool,
+) *TeacherService {
+	if reader == nil {
+		panic("TeacherService: reader must not be nil")
+	}
+	if sessions == nil {
+		panic("TeacherService: sessions must not be nil")
+	}
+	if checkins == nil {
+		panic("TeacherService: checkins must not be nil")
+	}
+	if refresher == nil {
+		panic("TeacherService: refresher must not be nil")
+	}
 	if reportConcurrency <= 0 {
 		reportConcurrency = 2
 	}
-	return &TeacherService{dp: dp, defaultFetcher: defaultFetcher, reportConcurrency: reportConcurrency}
+	return &TeacherService{
+		reader:            reader,
+		sessions:          sessions,
+		checkins:          checkins,
+		refresher:         refresher,
+		reportConcurrency: reportConcurrency,
+		snapshotMode:      snapshotMode,
+	}
 }
 
 // GetCourses returns the list of courses from Warwick.
 func (s *TeacherService) GetCourses(ctx context.Context) ([]domain.CourseSummary, error) {
-	return s.dp.GetCourses(ctx)
+	return s.reader.GetCourses(ctx)
 }
 
 // GetCourseDetail returns the sessions for a specific course.
 func (s *TeacherService) GetCourseDetail(ctx context.Context, courseID string) (*domain.CourseDetail, error) {
-	return s.dp.GetCourseDetail(ctx, courseID)
+	return s.reader.GetCourseDetail(ctx, courseID)
 }
 
 // SessionDetailResult holds the result of fetching session detail with profiles.
@@ -126,11 +182,11 @@ func (s *TeacherService) GetSessionDetail(ctx context.Context, courseID, session
 	profileCh := make(chan profileResult, 1)
 
 	go func() {
-		d, err := s.dp.GetSessionDetail(workCtx, courseID, sessionID)
+		d, err := s.reader.GetSessionDetail(workCtx, courseID, sessionID)
 		detailCh <- detailResult{detail: d, err: err}
 	}()
 	go func() {
-		p, _ := s.dp.FetchStudentProfiles(workCtx)
+		p, _ := s.reader.FetchStudentProfiles(workCtx)
 		profileCh <- profileResult{profiles: p}
 	}()
 
@@ -158,14 +214,21 @@ func (s *TeacherService) GetSessionDetail(ctx context.Context, courseID, session
 
 // ToggleCheckin toggles a student's check-in status for a session.
 func (s *TeacherService) ToggleCheckin(ctx context.Context, courseID, sessionID, studentID string, checked bool) error {
-	return s.dp.ToggleCheckin(ctx, courseID, sessionID, studentID, checked)
+	return s.checkins.ToggleCheckin(ctx, courseID, sessionID, studentID, checked)
 }
 
 // GetAttendanceReport computes an attendance report from live session data.
 func (s *TeacherService) GetAttendanceReport(ctx context.Context, courseID string, threshold int, source string) (*domain.CourseAttendanceReport, error) {
-	fetcher := s.defaultFetcher
+	fetcher := s.sessions
 	if source == "live" {
-		fetcher = s.dp
+		if s.snapshotMode {
+			return nil, ErrLiveSourceDisabled
+		}
+		liveFetcher, ok := s.reader.(domain.SessionFetcher)
+		if !ok {
+			return nil, errors.New("teacher: live reader does not implement SessionFetcher")
+		}
+		fetcher = liveFetcher
 	}
 
 	workCtx, cancel := context.WithCancel(ctx)
@@ -179,11 +242,11 @@ func (s *TeacherService) GetAttendanceReport(ctx context.Context, courseID strin
 	detailCh := make(chan detailResult, 1)
 
 	go func() {
-		profiles, err := s.dp.FetchStudentProfiles(workCtx)
+		profiles, err := s.reader.FetchStudentProfiles(workCtx)
 		profileCh <- profileFetchResult{profiles: profiles, err: err}
 	}()
 	go func() {
-		detail, err := s.dp.GetCourseDetail(workCtx, courseID)
+		detail, err := s.reader.GetCourseDetail(workCtx, courseID)
 		detailCh <- detailResult{detail: detail, err: err}
 	}()
 
@@ -200,17 +263,10 @@ func (s *TeacherService) GetAttendanceReport(ctx context.Context, courseID strin
 	}
 
 	courseDetail := detailRes.detail
-	report, err := s.dp.GetCourseAttendanceReport(workCtx, courseID, courseDetail.Name, courseDetail.Sessions, threshold, fetcher)
-	if err != nil {
-		cancel()
-		<-profileCh
-		return nil, err
+	if courseDetail.CourseID == "" {
+		courseDetail.CourseID = courseID
 	}
-	if report == nil {
-		cancel()
-		<-profileCh
-		return nil, errors.New("teacher: attendance report provider returned nil report")
-	}
+	report := ComputeReport(workCtx, fetcher, courseDetail, threshold, s.reportConcurrency)
 
 	// Let report computation overlap profile retrieval, then join before
 	// returning so no upstream work survives the request.
@@ -218,8 +274,73 @@ func (s *TeacherService) GetAttendanceReport(ctx context.Context, courseID strin
 	if profileRes.err == nil {
 		domain.EnrichStudentIDWithWCode(report.Students, profileRes.profiles)
 	}
+	s.markReportStale(workCtx, courseID, courseDetail.Sessions, report)
 
 	return report, nil
+}
+
+func (s *TeacherService) markReportStale(
+	ctx context.Context,
+	courseID string,
+	sessions []domain.SessionSummary,
+	report *domain.CourseAttendanceReport,
+) {
+	if !s.snapshotMode || report == nil {
+		return
+	}
+	snapshots, ok := s.reader.(snapshotAwareReader)
+	if !ok {
+		report.Stale = true
+		return
+	}
+	refs := make([]domain.TargetRef, 0, len(sessions))
+	for _, session := range sessions {
+		refs = append(refs, snapshots.SessionRef(courseID, session.SessionID))
+	}
+	overdue, err := snapshots.AnyOverdue(ctx, refs)
+	report.Stale = overdue || err != nil
+}
+
+func (s *TeacherService) snapshotMetadata(
+	ctx context.Context,
+	ref func(snapshotAwareReader) domain.TargetRef,
+) (domain.SnapshotMetadata, bool, error) {
+	if !s.snapshotMode {
+		return domain.SnapshotMetadata{}, false, nil
+	}
+	snapshots, ok := s.reader.(snapshotAwareReader)
+	if !ok {
+		return domain.SnapshotMetadata{}, false, errors.New("teacher: snapshot reader does not expose freshness metadata")
+	}
+	metadata, err := snapshots.Metadata(ctx, ref(snapshots))
+	return metadata, true, err
+}
+
+func (s *TeacherService) CourseCatalogMetadata(
+	ctx context.Context,
+) (domain.SnapshotMetadata, bool, error) {
+	return s.snapshotMetadata(ctx, func(reader snapshotAwareReader) domain.TargetRef {
+		return reader.CatalogRef()
+	})
+}
+
+func (s *TeacherService) CourseMetadata(
+	ctx context.Context,
+	courseID string,
+) (domain.SnapshotMetadata, bool, error) {
+	return s.snapshotMetadata(ctx, func(reader snapshotAwareReader) domain.TargetRef {
+		return reader.CourseRef(courseID)
+	})
+}
+
+func (s *TeacherService) SessionMetadata(
+	ctx context.Context,
+	courseID string,
+	sessionID string,
+) (domain.SnapshotMetadata, bool, error) {
+	return s.snapshotMetadata(ctx, func(reader snapshotAwareReader) domain.TargetRef {
+		return reader.SessionRef(courseID, sessionID)
+	})
 }
 
 // BatchAttendanceResult holds per-course results for batch attendance.
@@ -242,7 +363,7 @@ func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []str
 	}
 
 	// Load course catalog once to build a request-local name map.
-	allCourses, err := s.dp.GetCourseCatalog(ctx)
+	allCourses, err := s.reader.GetCourseCatalog(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +386,7 @@ func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []str
 			return
 		}
 
-		detail, err := s.dp.GetCourseDetailWithName(ctx, courseID, courseName)
+		detail, err := s.reader.GetCourseDetailWithName(ctx, courseID, courseName)
 		if err != nil {
 			results[index] = courseResult{err: err}
 			return
@@ -275,7 +396,8 @@ func (s *TeacherService) GetBatchAttendance(ctx context.Context, courseIDs []str
 			return
 		}
 
-		report := ComputeReport(ctx, s.defaultFetcher, detail, threshold, s.reportConcurrency)
+		report := ComputeReport(ctx, s.sessions, detail, threshold, s.reportConcurrency)
+		s.markReportStale(ctx, courseID, detail.Sessions, report)
 		results[index] = courseResult{report: report}
 	}); err != nil {
 		return nil, err
@@ -313,7 +435,7 @@ func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain
 	threshold := filters.Threshold
 
 	// Fetch all courses.
-	allCourses, err := s.dp.GetCourseCatalog(ctx)
+	allCourses, err := s.reader.GetCourseCatalog(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +466,7 @@ func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain
 
 	profileCh := make(chan profileFetchResult, 1)
 	go func() {
-		profiles, profileErr := s.dp.FetchStudentProfiles(ctx)
+		profiles, profileErr := s.reader.FetchStudentProfiles(ctx)
 		profileCh <- profileFetchResult{profiles: profiles, err: profileErr}
 	}()
 
@@ -358,7 +480,7 @@ func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain
 		var lastErr error
 		for attempt := 0; attempt < 3; attempt++ {
 			var err error
-			detail, err = s.dp.GetCourseDetailWithName(ctx, c.CourseID, c.Name)
+			detail, err = s.reader.GetCourseDetailWithName(ctx, c.CourseID, c.Name)
 			if err == nil {
 				lastErr = nil
 				break
@@ -387,7 +509,8 @@ func (s *TeacherService) GetAbsenceDashboard(ctx context.Context, filters domain
 			return
 		}
 
-		report := ComputeReport(ctx, s.defaultFetcher, detail, threshold, s.reportConcurrency)
+		report := ComputeReport(ctx, s.sessions, detail, threshold, s.reportConcurrency)
+		s.markReportStale(ctx, c.CourseID, detail.Sessions, report)
 		results[index] = dashboardCourseResult{courseID: c.CourseID, courseName: c.Name, report: report}
 	}); err != nil && ctx.Err() != nil {
 		<-profileCh

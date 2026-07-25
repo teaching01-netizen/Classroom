@@ -21,6 +21,14 @@ const (
 
 // mapServiceError maps domain errors to HTTP status codes.
 func mapServiceError(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, domain.ErrSnapshotNotFound) {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse("snapshot unavailable"))
+		return true
+	}
+	if errors.Is(err, domain.ErrSnapshotExpired) {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse("snapshot expired"))
+		return true
+	}
 	if errors.Is(err, domain.ErrAuthExpired) {
 		writeJSON(w, http.StatusUnauthorized, errorResponse("Warwick session expired"))
 		return true
@@ -36,6 +44,14 @@ func mapServiceError(w http.ResponseWriter, err error) bool {
 	return false
 }
 
+func setSnapshotFreshnessHeaders(w http.ResponseWriter, metadata domain.SnapshotMetadata) {
+	w.Header().Set("X-Snapshot-Version", strconv.FormatInt(metadata.Version, 10))
+	w.Header().Set("X-Snapshot-Validation-Seq", strconv.FormatInt(metadata.ValidationSeq, 10))
+	w.Header().Set("X-Snapshot-Validated-At", metadata.ValidatedAt.UTC().Format(time.RFC3339))
+	w.Header().Set("X-Snapshot-Stale", strconv.FormatBool(metadata.Stale))
+	w.Header().Set("Cache-Control", "private, no-store")
+}
+
 func getCoursesHandler(ts *service.TeacherService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		courses, err := ts.GetCourses(r.Context())
@@ -45,6 +61,9 @@ func getCoursesHandler(ts *service.TeacherService) http.HandlerFunc {
 			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
+		}
+		if metadata, active, metadataErr := ts.CourseCatalogMetadata(r.Context()); active && metadataErr == nil {
+			setSnapshotFreshnessHeaders(w, metadata)
 		}
 		writeJSON(w, http.StatusOK, successResponse(domain.TeacherCoursesResponse{Courses: courses}))
 	}
@@ -65,6 +84,9 @@ func getCourseDetailHandler(ts *service.TeacherService) http.HandlerFunc {
 			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
 			return
+		}
+		if metadata, active, metadataErr := ts.CourseMetadata(r.Context(), courseID); active && metadataErr == nil {
+			setSnapshotFreshnessHeaders(w, metadata)
 		}
 		writeJSON(w, http.StatusOK, successResponse(detail))
 	}
@@ -89,6 +111,9 @@ func getSessionDetailHandler(ts *service.TeacherService) http.HandlerFunc {
 			return
 		}
 
+		if metadata, active, metadataErr := ts.SessionMetadata(r.Context(), courseID, sessionID); active && metadataErr == nil {
+			setSnapshotFreshnessHeaders(w, metadata)
+		}
 		writeJSON(w, http.StatusOK, successResponse(result.Detail))
 	}
 }
