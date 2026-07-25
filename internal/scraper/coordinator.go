@@ -1,0 +1,480 @@
+package scraper
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"math/rand"
+	"net/http"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"qr-command-center/internal/db"
+	"qr-command-center/internal/domain"
+	"qr-command-center/internal/warwick"
+)
+
+type Source interface {
+	Fetch(context.Context, domain.ScrapeTarget) (warwick.SnapshotFetchResult, error)
+}
+
+type Store interface {
+	Commit(context.Context, db.CommitInput) (db.CommitResult, error)
+	ReleaseLease(context.Context, db.ReleaseLeaseRequest) error
+}
+
+type HostObserver interface {
+	Observe(context.Context, domain.HostObservation) error
+}
+
+type CoordinatorConfig struct {
+	FetchTimeout          time.Duration
+	CanonicalPayloadLimit int64
+	Clock                 func() time.Time
+	Random                *rand.Rand
+}
+
+type Coordinator struct {
+	source                Source
+	store                 Store
+	observer              HostObserver
+	fetchTimeout          time.Duration
+	canonicalPayloadLimit int64
+	clock                 func() time.Time
+	randomMu              sync.Mutex
+	random                *rand.Rand
+}
+
+func NewCoordinator(
+	source Source,
+	store Store,
+	observer HostObserver,
+	config CoordinatorConfig,
+) *Coordinator {
+	if source == nil {
+		panic("Coordinator: source must not be nil")
+	}
+	if store == nil {
+		panic("Coordinator: store must not be nil")
+	}
+	if observer == nil {
+		panic("Coordinator: observer must not be nil")
+	}
+	if config.FetchTimeout <= 0 {
+		panic("Coordinator: fetch timeout must be positive")
+	}
+	if config.CanonicalPayloadLimit <= 0 {
+		panic("Coordinator: canonical payload limit must be positive")
+	}
+	if config.Clock == nil {
+		config.Clock = time.Now
+	}
+	if config.Random == nil {
+		config.Random = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
+	return &Coordinator{
+		source:                source,
+		store:                 store,
+		observer:              observer,
+		fetchTimeout:          config.FetchTimeout,
+		canonicalPayloadLimit: config.CanonicalPayloadLimit,
+		clock:                 config.Clock,
+		random:                config.Random,
+	}
+}
+
+type RunResult struct {
+	TargetID        int64
+	LeaseGeneration int64
+	Outcome         string
+	Succeeded       bool
+	Changed         bool
+	NextRunAt       time.Time
+	Commit          db.CommitResult
+}
+
+func (c *Coordinator) RunClaimed(
+	ctx context.Context,
+	target domain.ScrapeTarget,
+) (RunResult, error) {
+	return c.RunClaimedWithRelease(ctx, target, nil)
+}
+
+func (c *Coordinator) RunClaimedWithRelease(
+	ctx context.Context,
+	target domain.ScrapeTarget,
+	releaseAfterFetch func(),
+) (RunResult, error) {
+	if target.ID <= 0 || target.LeaseGeneration <= 0 {
+		return RunResult{}, domain.ErrLeaseLost
+	}
+	if err := target.Ref.Validate(); err != nil {
+		return RunResult{}, err
+	}
+	startedAt := c.clock().UTC()
+	fetchCtx, cancel := context.WithTimeout(ctx, c.fetchTimeout)
+	fetchResult, fetchErr := c.source.Fetch(fetchCtx, target)
+	cancel()
+	if releaseAfterFetch != nil {
+		releaseAfterFetch()
+	}
+	finishedAt := c.clock().UTC()
+
+	if canceledFetch(ctx, fetchErr) {
+		releaseErr := c.store.ReleaseLease(ctx, db.ReleaseLeaseRequest{
+			TargetID:        target.ID,
+			LeaseGeneration: target.LeaseGeneration,
+		})
+		if releaseErr != nil {
+			return RunResult{}, errors.Join(fetchErr, releaseErr)
+		}
+		if fetchErr == nil {
+			fetchErr = context.Canceled
+		}
+		return RunResult{}, fetchErr
+	}
+
+	outcome, errorKind, statusCode, retryAfter := classifyFetch(fetchResult, fetchErr)
+	var payload json.RawMessage
+	var contentHash [32]byte
+	changed := false
+	if fetchErr == nil {
+		var canonicalErr error
+		payload, contentHash, canonicalErr = Canonicalize(
+			target.Ref.Kind,
+			fetchResult.Value,
+			c.canonicalPayloadLimit,
+		)
+		if canonicalErr != nil {
+			fetchErr = canonicalErr
+			outcome = "invalid_payload"
+			errorKind = "canonicalization"
+		} else {
+			changed = !target.HasContentHash() || contentHash != target.CurrentContentHash
+			if changed {
+				outcome = "changed"
+			} else {
+				outcome = "unchanged"
+				payload = nil
+				contentHash = [32]byte{}
+			}
+		}
+	} else if errors.Is(fetchErr, domain.ErrNotModified) {
+		if target.HasCurrentSnapshot {
+			outcome = "not_modified"
+			fetchErr = nil
+		} else {
+			outcome = "invalid_payload"
+			errorKind = "not_modified_without_snapshot"
+			fetchErr = errors.New("upstream returned not modified without a current snapshot")
+		}
+	}
+
+	successful := isSuccessfulOutcome(outcome)
+	currentInterval := target.CurrentInterval
+	recentChanges := append([]bool(nil), target.RecentChanges...)
+	consecutiveFailures := target.ConsecutiveFailures
+	var validatedAt *time.Time
+	var validationSeqAfter *int64
+	nextRunAt := target.NextRunAt
+	if successful {
+		policy := policyForTarget(target)
+		scheduleOutcome := OutcomeUnchanged
+		switch outcome {
+		case "changed":
+			scheduleOutcome = OutcomeChanged
+		case "not_modified":
+			scheduleOutcome = OutcomeNotModified
+		}
+		schedule := NextSchedule(policy, currentInterval, recentChanges, scheduleOutcome)
+		currentInterval = schedule.Interval
+		recentChanges = schedule.History
+		consecutiveFailures = 0
+		value := finishedAt
+		validatedAt = &value
+		seq := target.ValidationSeq + 1
+		validationSeqAfter = &seq
+		c.randomMu.Lock()
+		nextRunAt = finishedAt.Add(ApplyJitter(currentInterval, 0.1, c.random))
+		c.randomMu.Unlock()
+	} else {
+		consecutiveFailures++
+		c.randomMu.Lock()
+		nextRunAt = failureNextRun(
+			finishedAt,
+			outcome,
+			consecutiveFailures,
+			retryAfter,
+			c.random,
+		)
+		c.randomMu.Unlock()
+	}
+
+	observationErr := c.observer.Observe(ctx, domain.HostObservation{
+		Host:       target.Ref.Host,
+		Outcome:    outcome,
+		StatusCode: statusCodeValue(statusCode),
+		RetryAfter: retryAfter,
+		Latency:    finishedAt.Sub(startedAt),
+		ObservedAt: finishedAt,
+	})
+
+	var discovered []domain.TargetSeed
+	var seen []domain.TargetRef
+	if outcome == "changed" {
+		discovered, seen = discoverTargets(target, fetchResult.Value, finishedAt)
+	}
+	input := db.CommitInput{
+		TargetID:            target.ID,
+		WorkerID:            target.LeaseOwner,
+		LeaseGeneration:     target.LeaseGeneration,
+		Outcome:             outcome,
+		StartedAt:           startedAt,
+		FinishedAt:          finishedAt,
+		HTTPStatus:          statusCode,
+		BytesRead:           fetchResult.BytesRead,
+		ErrorKind:           errorKind,
+		ErrorMessage:        safeUpstreamError(fetchErr),
+		NextRunAt:           nextRunAt,
+		CurrentInterval:     currentInterval,
+		ConsecutiveFailures: consecutiveFailures,
+		RecentChanges:       recentChanges,
+		ValidatedAt:         validatedAt,
+		ValidationSeqAfter:  validationSeqAfter,
+		ETag:                fetchResult.Metadata.ETag,
+		LastModified:        fetchResult.Metadata.LastModified,
+		CacheControl:        fetchResult.Metadata.CacheControl,
+		Changed:             changed,
+		ContentHash:         contentHash,
+		Payload:             payload,
+		Discovered:          discovered,
+		SeenChildRefs:       seen,
+	}
+	commitResult, commitErr := c.store.Commit(ctx, input)
+	if commitErr != nil {
+		return RunResult{}, errors.Join(commitErr, observationErr)
+	}
+	result := RunResult{
+		TargetID:        target.ID,
+		LeaseGeneration: target.LeaseGeneration,
+		Outcome:         outcome,
+		Succeeded:       successful,
+		Changed:         changed,
+		NextRunAt:       nextRunAt,
+		Commit:          commitResult,
+	}
+	if observationErr != nil {
+		return result, observationErr
+	}
+	return result, nil
+}
+
+func canceledFetch(parent context.Context, err error) bool {
+	if parent.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.Canceled)
+}
+
+func classifyFetch(
+	result warwick.SnapshotFetchResult,
+	err error,
+) (string, string, *int, time.Duration) {
+	var statusCode *int
+	if result.Metadata.StatusCode > 0 {
+		value := result.Metadata.StatusCode
+		statusCode = &value
+	}
+	if err == nil {
+		return "unchanged", "", statusCode, 0
+	}
+	if errors.Is(err, domain.ErrNotModified) {
+		return "not_modified", "", statusCode, 0
+	}
+	var statusErr *domain.UpstreamStatusError
+	if errors.As(err, &statusErr) {
+		value := statusErr.StatusCode
+		statusCode = &value
+		switch statusErr.StatusCode {
+		case http.StatusTooManyRequests:
+			return "rate_limited", "rate_limited", statusCode, statusErr.RetryAfter
+		case http.StatusRequestTimeout, http.StatusTooEarly,
+			http.StatusInternalServerError, http.StatusBadGateway,
+			http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return "transient_error", "upstream_status", statusCode, statusErr.RetryAfter
+		case http.StatusNotFound, http.StatusGone:
+			return "not_found", "not_found", statusCode, 0
+		default:
+			if statusErr.StatusCode >= 400 && statusErr.StatusCode < 500 {
+				return "permanent_error", "upstream_status", statusCode, 0
+			}
+			return "transient_error", "upstream_status", statusCode, 0
+		}
+	}
+	if errors.Is(err, domain.ErrAuthExpired) || errors.Is(err, domain.ErrAuthConflict) {
+		return "auth_error", "authentication", statusCode, 0
+	}
+	var fetchErr *domain.FetchError
+	if errors.As(err, &fetchErr) {
+		switch fetchErr.Kind {
+		case domain.ErrKindInvalidPayload:
+			return "invalid_payload", "invalid_payload", statusCode, 0
+		case domain.ErrKindRateLimited:
+			return "rate_limited", "rate_limited", statusCode, 0
+		case domain.ErrKindAuthExpired, domain.ErrKindAuthConflict:
+			return "auth_error", "authentication", statusCode, 0
+		default:
+			return "transient_error", "network", statusCode, 0
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "transient_error", "timeout", statusCode, 0
+	}
+	return "transient_error", "network", statusCode, 0
+}
+
+func statusCodeValue(status *int) int {
+	if status == nil {
+		return 0
+	}
+	return *status
+}
+
+func isSuccessfulOutcome(outcome string) bool {
+	return outcome == "changed" || outcome == "unchanged" || outcome == "not_modified"
+}
+
+func policyForTarget(target domain.ScrapeTarget) Policy {
+	var attributes struct {
+		SessionStatus domain.SessionStatus `json:"session_status"`
+	}
+	_ = json.Unmarshal(target.Attributes, &attributes)
+	policy := PolicyFor(target.Ref.Kind, attributes.SessionStatus)
+	if target.MinInterval > 0 {
+		policy.Min = target.MinInterval
+	}
+	if target.MaxInterval > 0 {
+		policy.Max = target.MaxInterval
+	}
+	if target.MaxServeAge > 0 {
+		policy.MaxServeAge = target.MaxServeAge
+	}
+	if target.CurrentInterval > 0 {
+		policy.Initial = target.CurrentInterval
+	}
+	return policy
+}
+
+func failureNextRun(
+	now time.Time,
+	outcome string,
+	consecutiveFailures int,
+	retryAfter time.Duration,
+	rng *rand.Rand,
+) time.Time {
+	switch outcome {
+	case "rate_limited":
+		pause := retryAfter
+		if pause < 15*time.Minute {
+			pause = 15 * time.Minute
+		}
+		return now.Add(pause)
+	case "auth_error":
+		return now.Add(15 * time.Minute)
+	case "not_found":
+		return now.Add(24 * time.Hour)
+	case "permanent_error":
+		return now.Add(24 * time.Hour)
+	case "invalid_payload":
+		return now.Add(time.Hour)
+	default:
+		return now.Add(FullJitter(FailureDelay(consecutiveFailures), rng))
+	}
+}
+
+func discoverTargets(
+	parent domain.ScrapeTarget,
+	value any,
+	now time.Time,
+) ([]domain.TargetSeed, []domain.TargetRef) {
+	var seeds []domain.TargetSeed
+	switch parent.Ref.Kind {
+	case domain.SnapshotCourseCatalog:
+		courses, ok := value.([]domain.CourseSummary)
+		if !ok {
+			return nil, nil
+		}
+		for _, course := range courses {
+			policy := PolicyFor(domain.SnapshotCourseDetail, "")
+			attributes, _ := json.Marshal(map[string]any{
+				"course_name":   course.Name,
+				"course_status": course.Status,
+			})
+			seeds = append(seeds, domain.TargetSeed{
+				Ref: domain.TargetRef{
+					Host: parent.Ref.Host, Kind: domain.SnapshotCourseDetail,
+					ResourceKey: course.CourseID,
+				},
+				Attributes:      attributes,
+				InitialInterval: policy.Initial,
+				MinInterval:     policy.Min,
+				MaxInterval:     policy.Max,
+				MaxServeAge:     policy.MaxServeAge,
+				NextRunAt:       now,
+			})
+		}
+	case domain.SnapshotCourseDetail:
+		detail, ok := value.(*domain.CourseDetail)
+		if !ok || detail == nil {
+			if copied, valueOK := value.(domain.CourseDetail); valueOK {
+				detail = &copied
+			} else {
+				return nil, nil
+			}
+		}
+		for _, session := range detail.Sessions {
+			policy := PolicyFor(domain.SnapshotSessionDetail, session.Status)
+			attributes, _ := json.Marshal(map[string]any{
+				"session_status": session.Status,
+			})
+			seeds = append(seeds, domain.TargetSeed{
+				Ref: domain.TargetRef{
+					Host: parent.Ref.Host, Kind: domain.SnapshotSessionDetail,
+					ParentKey: parent.Ref.ResourceKey, ResourceKey: session.SessionID,
+				},
+				Attributes:      attributes,
+				InitialInterval: policy.Initial,
+				MinInterval:     policy.Min,
+				MaxInterval:     policy.Max,
+				MaxServeAge:     policy.MaxServeAge,
+				NextRunAt:       now,
+			})
+		}
+	}
+	sort.Slice(seeds, func(i, j int) bool {
+		return seeds[i].Ref.IdentityKey() < seeds[j].Ref.IdentityKey()
+	})
+	seen := make([]domain.TargetRef, len(seeds))
+	for index := range seeds {
+		seen[index] = seeds[index].Ref
+	}
+	return seeds, seen
+}
+
+var upstreamSecretPattern = regexp.MustCompile(
+	`(?i)(asp\.net_sessionid|cookie|authorization)\s*[:=]\s*[^\s,;]+`,
+)
+
+func safeUpstreamError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := upstreamSecretPattern.ReplaceAllString(err.Error(), "$1=<redacted>")
+	if len(message) > 2048 {
+		message = message[:2048]
+	}
+	return strings.ToValidUTF8(message, "")
+}
