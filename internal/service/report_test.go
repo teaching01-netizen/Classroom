@@ -37,7 +37,7 @@ func (m *mockFetcher) set(sessionID string, detail *domain.SessionDetail, err er
 	m.responses[sessionID] = &mockResponse{detail: detail, err: err}
 }
 
-func (m *mockFetcher) FetchSessionDetailLive(_ context.Context, sessionID string) (*domain.SessionDetail, error) {
+func (m *mockFetcher) FetchSessionForReport(_ context.Context, _ string, sessionID string) (*domain.SessionDetail, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, sessionID)
@@ -283,7 +283,6 @@ func TestCompute_429SingleRetry(t *testing.T) {
 	// sess-1: first call returns 429, second succeeds (simulating retry).
 	// sess-2: succeeds immediately.
 
-
 	fetcher.set("sess-2", makeDetail([]domain.StudentCheckin{
 		makeStudent("s1", "Alice", true),
 	}), nil)
@@ -470,7 +469,7 @@ func newCallCounter() *callCounter {
 	return &callCounter{calls: make(map[string]int)}
 }
 
-func (c *callCounter) FetchSessionDetailLive(_ context.Context, sessionID string) (*domain.SessionDetail, error) {
+func (c *callCounter) FetchSessionForReport(_ context.Context, _ string, sessionID string) (*domain.SessionDetail, error) {
 	c.mu.Lock()
 	c.calls[sessionID]++
 	c.mu.Unlock()
@@ -505,7 +504,7 @@ func (f *rateLimitFetcher) addResponse(sessionID string, entry *rateLimitEntry) 
 	f.responses[sessionID] = entry
 }
 
-func (f *rateLimitFetcher) FetchSessionDetailLive(_ context.Context, sessionID string) (*domain.SessionDetail, error) {
+func (f *rateLimitFetcher) FetchSessionForReport(_ context.Context, _ string, sessionID string) (*domain.SessionDetail, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	entry, ok := f.responses[sessionID]
@@ -527,7 +526,7 @@ type cancellingFetcher struct {
 	mu          sync.Mutex
 }
 
-func (f *cancellingFetcher) FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error) {
+func (f *cancellingFetcher) FetchSessionForReport(ctx context.Context, _ string, sessionID string) (*domain.SessionDetail, error) {
 	f.mu.Lock()
 	resp, ok := f.responses[sessionID]
 	f.mu.Unlock()
@@ -776,7 +775,7 @@ type slowCall struct {
 	err    error
 }
 
-func (f *slowFetcher) FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error) {
+func (f *slowFetcher) FetchSessionForReport(ctx context.Context, _ string, sessionID string) (*domain.SessionDetail, error) {
 	f.mu.Lock()
 	resp, ok := f.responses[sessionID]
 	if !ok {

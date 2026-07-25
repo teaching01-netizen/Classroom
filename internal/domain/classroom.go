@@ -45,15 +45,15 @@ const (
 )
 
 type CourseSummary struct {
-	CourseID          string  `json:"course_id"`
-	Name              string  `json:"name"`
-	StartDate         string  `json:"start_date"`
-	EndDate           string  `json:"end_date"`
-	EnrolledCount     int     `json:"enrolled_count"`
-	TotalSessions     int     `json:"total_sessions"`
-	CompletedSessions int     `json:"completed_sessions"`
-	AvgAttendanceRate float64 `json:"avg_attendance_rate"`
-	Status            CourseStatus  `json:"status"`
+	CourseID          string       `json:"course_id"`
+	Name              string       `json:"name"`
+	StartDate         string       `json:"start_date"`
+	EndDate           string       `json:"end_date"`
+	EnrolledCount     int          `json:"enrolled_count"`
+	TotalSessions     int          `json:"total_sessions"`
+	CompletedSessions int          `json:"completed_sessions"`
+	AvgAttendanceRate float64      `json:"avg_attendance_rate"`
+	Status            CourseStatus `json:"status"`
 }
 
 type CourseDetail struct {
@@ -62,20 +62,20 @@ type CourseDetail struct {
 }
 
 type SessionSummary struct {
-	SessionID      string `json:"session_id"`
-	SessionNumber  int    `json:"session_number"`
-	Name           string `json:"name"`
-	Date           string `json:"date"`
-	CheckedInCount int    `json:"checked_in_count"`
-	TotalStudents  int    `json:"total_students"`
+	SessionID      string        `json:"session_id"`
+	SessionNumber  int           `json:"session_number"`
+	Name           string        `json:"name"`
+	Date           string        `json:"date"`
+	CheckedInCount int           `json:"checked_in_count"`
+	TotalStudents  int           `json:"total_students"`
 	Status         SessionStatus `json:"status"`
 }
 
 type SessionDetail struct {
 	SessionSummary
 	Students    []StudentCheckin `json:"students"`
-	QRActive    bool            `json:"qr_active"`
-	QRExpiresAt *string         `json:"qr_expires_at"`
+	QRActive    bool             `json:"qr_active"`
+	QRExpiresAt *string          `json:"qr_expires_at"`
 }
 
 type StudentCheckin struct {
@@ -99,9 +99,9 @@ type ToggleCheckinRequest struct {
 }
 
 type ToggleCheckinResponse struct {
-	StudentID  string `json:"student_id"`
-	CheckedIn  bool   `json:"checked_in"`
-	NewCount   int    `json:"new_count"`
+	StudentID string `json:"student_id"`
+	CheckedIn bool   `json:"checked_in"`
+	NewCount  int    `json:"new_count"`
 }
 
 // SessionCell represents a single session's attendance status for one student
@@ -110,7 +110,7 @@ type SessionCell struct {
 	SessionID     string        `json:"sessionId"`
 	SessionNumber int           `json:"sessionNumber"`
 	SessionName   string        `json:"sessionName"`
-	SessionDate   string        `json:"sessionDate"` // YYYY-MM-DD, "" if unknown
+	SessionDate   string        `json:"sessionDate"`   // YYYY-MM-DD, "" if unknown
 	SessionStatus SessionStatus `json:"sessionStatus"` // "done" | "active" | "not_started" | "auth_error"
 	CheckedIn     bool          `json:"checkedIn"`
 	Status        string        `json:"status"` // "ok" | "error" | "empty"
@@ -148,7 +148,7 @@ type CourseAttendanceReport struct {
 	Errors     []ReportError       `json:"errors"`
 	Truncated  bool                `json:"truncated"`
 	Stale      bool                `json:"stale"`
-	Threshold  int                   `json:"threshold"`
+	Threshold  int                 `json:"threshold"`
 	ComputedAt time.Time           `json:"computedAt"`
 	DurationMs int64               `json:"durationMs"`
 }

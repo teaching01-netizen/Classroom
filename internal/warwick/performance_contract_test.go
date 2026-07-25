@@ -140,16 +140,16 @@ func TestGetSessionDetail_RequestCount(t *testing.T) {
 	assert.Equal(t, 1, f.sessionCalls, "GetSessionDetail should make exactly 1 session call")
 }
 
-// TestFetchSessionDetailLive_RequestCount verifies that FetchSessionDetailLive
+// TestFetchSessionForReport_RequestCount verifies that FetchSessionForReport
 // makes exactly one session detail request.
-func TestFetchSessionDetailLive_RequestCount(t *testing.T) {
+func TestFetchSessionForReport_RequestCount(t *testing.T) {
 	f := newRequestCountFixture(t)
 
-	detail, err := f.client.FetchSessionDetailLive(context.Background(), "s1")
+	detail, err := f.client.FetchSessionForReport(context.Background(), "course-1", "s1")
 	require.NoError(t, err)
 	require.NotNil(t, detail)
 
-	assert.Equal(t, 1, f.sessionCalls, "FetchSessionDetailLive should make exactly 1 session call")
+	assert.Equal(t, 1, f.sessionCalls, "FetchSessionForReport should make exactly 1 session call")
 }
 
 // TestLiveReadError_DoesNotReturnPreviousPayload from the existing test suite

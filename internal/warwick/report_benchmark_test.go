@@ -80,7 +80,7 @@ func newBenchmarkSessionFetcher(numStudents int, sessions []domain.SessionSummar
 	return &benchmarkSessionFetcher{details: details}
 }
 
-func (f *benchmarkSessionFetcher) FetchSessionDetailLive(_ context.Context, sessionID string) (*domain.SessionDetail, error) {
+func (f *benchmarkSessionFetcher) FetchSessionForReport(_ context.Context, _ string, sessionID string) (*domain.SessionDetail, error) {
 	return f.details[sessionID], nil
 }
 

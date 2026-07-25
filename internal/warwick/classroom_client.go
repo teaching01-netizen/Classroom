@@ -42,7 +42,7 @@ type ClassroomClient struct {
 	// report) to protect upstream Warwick from fan-out storms. nil = no limiting.
 	rateLimiter *rate.Limiter
 
-	// reportConcurrency bounds concurrent FetchSessionDetailLive calls per report.
+	// reportConcurrency bounds concurrent FetchSessionForReport calls per report.
 	reportConcurrency int
 
 	// courseDetailConcurrency bounds concurrent detail fetches during enrichment.
@@ -198,7 +198,7 @@ func (c *ClassroomClient) SetRateLimiter(l *rate.Limiter) {
 	c.rateLimiter = l
 }
 
-// SetReportConcurrency sets the max concurrent FetchSessionDetailLive calls per report.
+// SetReportConcurrency sets the max concurrent FetchSessionForReport calls per report.
 // Must be called before the client is used. If n <= 0, defaults to 2.
 func (c *ClassroomClient) SetReportConcurrency(n int) {
 	if n > 0 {

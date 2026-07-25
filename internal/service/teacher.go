@@ -25,7 +25,7 @@ type TeacherDataProvider interface {
 	FetchStudentProfiles(ctx context.Context) ([]domain.StudentProfile, error)
 	ToggleCheckin(ctx context.Context, courseID, sessionID, studentID string, checked bool) error
 	GetCourseAttendanceReport(ctx context.Context, courseID, courseName string, sessions []domain.SessionSummary, threshold int, source domain.SessionFetcher) (*domain.CourseAttendanceReport, error)
-	FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error)
+	FetchSessionForReport(ctx context.Context, courseID, sessionID string) (*domain.SessionDetail, error)
 }
 
 // TeacherService owns the business logic for teacher-facing operations.
@@ -79,7 +79,7 @@ func runBoundedJobs(ctx context.Context, count, concurrency int, fn func(index i
 const maxBatchCourseIDs = 100
 
 // NewTeacherService creates a TeacherService. All args must be non-nil.
-// reportConcurrency controls the max concurrent FetchSessionDetailLive calls per report.
+// reportConcurrency controls the max concurrent FetchSessionForReport calls per report.
 func NewTeacherService(dp TeacherDataProvider, defaultFetcher domain.SessionFetcher, reportConcurrency int) *TeacherService {
 	if dp == nil {
 		panic("TeacherService: dp must not be nil")

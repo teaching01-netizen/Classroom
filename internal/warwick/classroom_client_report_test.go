@@ -71,7 +71,7 @@ func (s *versionedSessionDataSource) callCount() int {
 	return s.calls
 }
 
-func (s *versionedSessionDataSource) FetchSessionDetailLive(_ context.Context, _ string) (*domain.SessionDetail, error) {
+func (s *versionedSessionDataSource) FetchSessionForReport(_ context.Context, _, _ string) (*domain.SessionDetail, error) {
 	s.mu.Lock()
 	s.calls++
 	version := s.calls
@@ -91,6 +91,6 @@ type errorSessionDataSource struct {
 	err error
 }
 
-func (s *errorSessionDataSource) FetchSessionDetailLive(context.Context, string) (*domain.SessionDetail, error) {
+func (s *errorSessionDataSource) FetchSessionForReport(context.Context, string, string) (*domain.SessionDetail, error) {
 	return nil, s.err
 }

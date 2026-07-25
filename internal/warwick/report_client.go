@@ -109,7 +109,7 @@ func ComputeCourseAttendanceReport(
 		sessCtx, sessCancel := context.WithTimeout(ctx, 10*time.Second)
 		defer sessCancel()
 
-		detail, err := source.FetchSessionDetailLive(sessCtx, sess.SessionID)
+		detail, err := source.FetchSessionForReport(sessCtx, course.CourseID, sess.SessionID)
 		if err != nil {
 			if ctx.Err() != nil {
 				results[idx] = sessionResult{index: idx, state: "error", err: fmt.Errorf("cancelled")}
@@ -152,7 +152,7 @@ func ComputeCourseAttendanceReport(
 				}
 				retryCtx, retryCancel := context.WithTimeout(ctx, 10*time.Second)
 				defer retryCancel()
-				detail, err = source.FetchSessionDetailLive(retryCtx, sess.SessionID)
+				detail, err = source.FetchSessionForReport(retryCtx, course.CourseID, sess.SessionID)
 				if err != nil {
 					results[idx] = sessionResult{index: idx, state: "error", err: err}
 					return

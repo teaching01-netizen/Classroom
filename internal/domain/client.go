@@ -7,8 +7,3 @@ type QrClient interface {
 	FetchQRContext(ctx context.Context, classID string) (QrResponse, error)
 	FetchQRWithFreshAuthContext(ctx context.Context, classID string) (QrResponse, error)
 }
-
-// SessionFetcher abstracts the source of session student data for attendance reports.
-type SessionFetcher interface {
-	FetchSessionDetailLive(ctx context.Context, sessionID string) (*SessionDetail, error)
-}

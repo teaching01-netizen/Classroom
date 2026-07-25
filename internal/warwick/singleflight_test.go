@@ -165,9 +165,9 @@ func TestSingleflight_GetCourses_DifferentKeysSeparateCalls(t *testing.T) {
 	assert.GreaterOrEqual(t, calls, int32(2), "expected at least 2 upstream calls for 2 distinct keys")
 }
 
-// TestSingleflight_FetchSessionDetailLive_ConcurrentIdentical verifies
+// TestSingleflight_FetchSessionForReport_ConcurrentIdentical verifies
 // that two concurrent identical calls share one upstream call.
-func TestSingleflight_FetchSessionDetailLive_ConcurrentIdentical(t *testing.T) {
+func TestSingleflight_FetchSessionForReport_ConcurrentIdentical(t *testing.T) {
 	var upstreamCalls atomic.Int32
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -193,7 +193,7 @@ func TestSingleflight_FetchSessionDetailLive_ConcurrentIdentical(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			detail, err := client.FetchSessionDetailLive(ctx, "s1")
+			detail, err := client.FetchSessionForReport(ctx, "course-1", "s1")
 			if err != nil {
 				errs <- err
 				return
@@ -205,7 +205,7 @@ func TestSingleflight_FetchSessionDetailLive_ConcurrentIdentical(t *testing.T) {
 	close(results)
 	close(errs)
 
-	assert.Equal(t, int32(1), upstreamCalls.Load(), "expected 1 upstream call for 2 concurrent identical FetchSessionDetailLive requests")
+	assert.Equal(t, int32(1), upstreamCalls.Load(), "expected 1 upstream call for 2 concurrent identical FetchSessionForReport requests")
 
 	var details []*domain.SessionDetail
 	for d := range results {
@@ -237,7 +237,7 @@ func TestSingleflight_RateLimiterCountsOnlyRealUpstreamCalls(t *testing.T) {
 	results := make(chan error, 2)
 	for range 2 {
 		go func() {
-			_, err := client.FetchSessionDetailLive(context.Background(), "same-session")
+			_, err := client.FetchSessionForReport(context.Background(), "course-1", "same-session")
 			results <- err
 		}()
 	}
@@ -474,7 +474,7 @@ func TestSingleflight_DeterministicRepeatedRuns(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				_, _ = client.FetchSessionDetailLive(ctx, "s1")
+				_, _ = client.FetchSessionForReport(ctx, "course-1", "s1")
 			}()
 		}
 		wg.Wait()

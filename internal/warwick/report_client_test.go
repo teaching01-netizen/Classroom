@@ -82,7 +82,7 @@ func (s *alwaysRateLimitedSource) calls() int {
 	return s.count
 }
 
-func (s *alwaysRateLimitedSource) FetchSessionDetailLive(context.Context, string) (*domain.SessionDetail, error) {
+func (s *alwaysRateLimitedSource) FetchSessionForReport(context.Context, string, string) (*domain.SessionDetail, error) {
 	s.mu.Lock()
 	s.count++
 	s.mu.Unlock()

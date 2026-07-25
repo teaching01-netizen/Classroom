@@ -138,7 +138,7 @@ func (m *mockProvider) GetCourseAttendanceReport(ctx context.Context, courseID, 
 	}, nil
 }
 
-func (m *mockProvider) FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error) {
+func (m *mockProvider) FetchSessionForReport(ctx context.Context, courseID, sessionID string) (*domain.SessionDetail, error) {
 	return nil, nil
 }
 

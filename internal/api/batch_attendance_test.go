@@ -20,7 +20,7 @@ import (
 // stubFetcher implements domain.SessionFetcher for tests that need a non-nil fetcher.
 type stubFetcher struct{}
 
-func (s *stubFetcher) FetchSessionDetailLive(_ context.Context, _ string) (*domain.SessionDetail, error) {
+func (s *stubFetcher) FetchSessionForReport(_ context.Context, _, _ string) (*domain.SessionDetail, error) {
 	return nil, nil
 }
 

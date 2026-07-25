@@ -71,7 +71,7 @@ func newConcurrencyTracker(startBlock chan struct{}) *concurrencyTracker {
 	}
 }
 
-func (t *concurrencyTracker) FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error) {
+func (t *concurrencyTracker) FetchSessionForReport(ctx context.Context, _ string, sessionID string) (*domain.SessionDetail, error) {
 	cur := atomic.AddInt32(&t.current, 1)
 	atomic.AddInt32(&t.current, -1) // decrement immediately since we track max via a different mechanism
 
@@ -106,7 +106,7 @@ func (t *concurrencyTracker) Max() int32 {
 }
 
 // TestReportFanOut_Concurrency1 verifies that with concurrency=1, at most 1
-// concurrent FetchSessionDetailLive call is made (VAL-CONCUR-007, 014).
+// concurrent FetchSessionForReport call is made (VAL-CONCUR-007, 014).
 func TestReportFanOut_Concurrency1(t *testing.T) {
 	sessions := make([]domain.SessionSummary, 5)
 	for i := range 5 {
@@ -175,14 +175,14 @@ func TestReportFanOut_ConcurrencyLimits(t *testing.T) {
 	<-done
 }
 
-// slowConcurrencyFetcher blocks FetchSessionDetailLive until 'block' is closed.
+// slowConcurrencyFetcher blocks FetchSessionForReport until 'block' is closed.
 type slowConcurrencyFetcher struct {
 	mu          sync.Mutex
 	activeCount int
 	block       chan struct{}
 }
 
-func (f *slowConcurrencyFetcher) FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error) {
+func (f *slowConcurrencyFetcher) FetchSessionForReport(ctx context.Context, _ string, sessionID string) (*domain.SessionDetail, error) {
 	f.mu.Lock()
 	f.activeCount++
 	f.mu.Unlock()
@@ -237,7 +237,7 @@ func TestRateLimiter_Configurable(t *testing.T) {
 	results := make(chan error, 5)
 	for i := 0; i < 5; i++ {
 		go func() {
-			_, err := client.FetchSessionDetailLive(ctx, "s1")
+			_, err := client.FetchSessionForReport(ctx, "course-1", "s1")
 			results <- err
 		}()
 	}
@@ -268,16 +268,16 @@ func TestRateLimiter_ExceedsBurst(t *testing.T) {
 	client.SetRateLimiter(rate.NewLimiter(rate.Limit(2), 1))
 
 	// First call succeeds (uses the burst token).
-	_, err = client.FetchSessionDetailLive(context.Background(), "s1")
+	_, err = client.FetchSessionForReport(context.Background(), "course-1", "s1")
 	require.NoError(t, err)
 
 	// Second call immediately should be rate limited (no burst tokens left).
-	// FetchSessionDetailLive calls rateLimiter.Wait which blocks until the
+	// FetchSessionForReport calls rateLimiter.Wait which blocks until the
 	// context expires or a token is available. Use a context with short timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err = client.FetchSessionDetailLive(ctx, "s2")
+	_, err = client.FetchSessionForReport(ctx, "course-1", "s2")
 	require.Error(t, err, "should be rate limited when burst is exhausted")
 	// The error could be context.DeadlineExceeded (from Wait) or ErrRateLimited.
 	// Both are acceptable indications of rate limiting.

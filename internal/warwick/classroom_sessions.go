@@ -323,14 +323,15 @@ func (c *ClassroomClient) fetchSessionDetail(ctx context.Context, cookie, sessio
 	}, nil
 }
 
-// FetchSessionDetailLive fetches a session's student list directly from Warwick.
-// Satisfies the SessionFetcher interface used by ComputeCourseAttendanceReport.
-func (c *ClassroomClient) FetchSessionDetailLive(ctx context.Context, sessionID string) (*domain.SessionDetail, error) {
+// FetchSessionForReport fetches one session's student list for report
+// computation. The course ID is part of the typed identity even though the
+// current Warwick endpoint addresses the session directly.
+func (c *ClassroomClient) FetchSessionForReport(ctx context.Context, courseID, sessionID string) (*domain.SessionDetail, error) {
 	if c.pool == nil {
-		return nil, fmt.Errorf("FetchSessionDetailLive requires a session pool")
+		return nil, fmt.Errorf("FetchSessionForReport requires a session pool")
 	}
 
-	key := "session-detail:" + sessionID
+	key := fmt.Sprintf("session-detail:%q:%q", courseID, sessionID)
 	v, err := c.doSingleflight(ctx, key, func(callCtx context.Context) (interface{}, error) {
 		// Consume one limiter token per real upstream request, not per waiter.
 		if c.rateLimiter != nil {
