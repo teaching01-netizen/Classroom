@@ -2,7 +2,7 @@
 set -e
 
 echo "Building frontend..."
-cd web && npm install && npm run build && cd ..
+cd web && npm ci && npm run build && cd ..
 
 echo "Building Go backend..."
 mkdir -p target/release

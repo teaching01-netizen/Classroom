@@ -233,6 +233,8 @@ flowchart TB
         Router[Chi Router]
         Handlers[API Handlers]
         Services[Service Layer]
+        SnapshotProvider[Snapshot Provider]
+        Scheduler[Scrape Scheduler]
         Domain[Domain Models]
     end
     
@@ -250,8 +252,12 @@ flowchart TB
     Router --> Handlers
     Handlers --> Services
     Services --> Domain
-    Services --> Warwick
-    Services --> PostgreSQL
+    Services --> SnapshotProvider
+    SnapshotProvider --> PostgreSQL
+    Scheduler --> Warwick
+    Scheduler --> PostgreSQL
+    PostgreSQL -.-> |Committed version metadata| WS_Client
+    Services --> |Writes and QR TTL| Warwick
     
     style Frontend fill:#1e40af,stroke:#3b82f6,stroke-width:2px
     style Backend fill:#065f46,stroke:#10b981,stroke-width:2px
@@ -293,6 +299,8 @@ flowchart LR
     subgraph Service["service/"]
         RM[RoomManager]
         Teacher[TeacherService]
+        Snapshots[SnapshotProvider]
+        Listener[NotificationListener]
     end
     
     subgraph Domain["domain/"]
@@ -307,6 +315,12 @@ flowchart LR
         CC[Classroom Client]
         Pool[Session Pool]
     end
+
+    subgraph Scraper["scraper/"]
+        Scheduler[Scheduler]
+        Coordinator[Coordinator]
+        Admission[HostController]
+    end
     
     subgraph DB["db/"]
         Repos[Repositories]
@@ -314,11 +328,20 @@ flowchart LR
     end
     
     H --> RM
-    H --> CC
+    H --> Teacher
     WS --> RM
     RM --> Client
     RM --> Repos
-    Teacher --> CC
+    Teacher --> Snapshots
+    Teacher --> |Check-in writes| CC
+    Snapshots --> Repos
+    Scheduler --> Coordinator
+    Coordinator --> CC
+    Coordinator --> Admission
+    Scheduler --> Repos
+    Admission --> Repos
+    Listener --> Repos
+    Listener --> WS
     CC --> Auth
     CC --> Pool
     Client --> Auth
@@ -426,7 +449,8 @@ sequenceDiagram
       <h2>Attendance Dashboard Architecture</h2>
       <p class="description">
         The absence dashboard aggregates attendance data across all courses.
-        It computes from live Warwick session data with bounded request-local concurrency.
+        It derives each response from the current validated PostgreSQL snapshots
+        with bounded request-local concurrency; report results are not persisted.
       </p>
       <div class="diagram-container">
         <pre class="mermaid">
@@ -434,19 +458,22 @@ flowchart TB
     subgraph Request["Request Flow"]
         FE[Frontend Dashboard]
         API[API Handler]
-        Compute[Live Report Compute]
+        Compute[Derived Report Compute]
     end
     
     subgraph DataSources["Data Sources"]
+        Scraper[Bounded Snapshot Scraper]
         WarwickAPI[Warwick API]
         DB[(PostgreSQL)]
     end
     
     FE --> |GET /absence-dashboard| API
     API --> Compute
-    Compute --> |Live course/session reads| WarwickAPI
+    Compute --> |Canonical course/session snapshots| DB
     Compute --> |Return report only| API
-    DB -.-> |Rooms, favourites, saved views only| API
+    Scraper --> |Cluster-wide admitted fetches| WarwickAPI
+    Scraper --> |Fenced commit| DB
+    DB -.-> |Rooms, favourites, saved views| API
     
     style Request fill:#3b82f6,stroke:#60a5fa,stroke-width:2px
     style DataSources fill:#10b981,stroke:#34d399,stroke-width:2px
@@ -459,7 +486,8 @@ flowchart TB
       <h2>Data Flow & Real-Time Updates</h2>
       <p class="description">
         Real-time updates flow from the backend to all connected clients via WebSocket.
-        The RoomManager broadcasts events to subscribed clients.
+        A shared bounded event hub carries room events and committed snapshot metadata.
+        Snapshot payloads are always refetched over REST.
       </p>
       <div class="diagram-container">
         <pre class="mermaid">
@@ -472,18 +500,20 @@ flowchart LR
     
     subgraph Events["Event Types"]
         Sync[FullStateSync]
+        SnapshotSync[SnapshotStateSync]
+        SnapshotCommitted[SnapshotCommitted]
         Created[RoomCreated]
         Updated[RoomUpdated]
         Deleted[RoomDeleted]
     end
     
     subgraph Backend["Event System"]
-        RM[RoomManager]
+        Producers[RoomManager and DB Listener]
         Fanout[Fanout Loop]
         Subs[Subscribers]
     end
     
-    RM --> Fanout
+    Producers --> Fanout
     Fanout --> Subs
     
     Subs --> |WebSocket| C1
@@ -491,6 +521,8 @@ flowchart LR
     Subs --> |WebSocket| C3
     
     Sync --> |Initial State| Subs
+    SnapshotSync --> |Initial Versions| Subs
+    SnapshotCommitted --> |Committed Metadata| Subs
     Created --> |New Room| Subs
     Updated --> |Status Change| Subs
     Deleted --> |Room Removed| Subs
@@ -506,7 +538,7 @@ flowchart LR
     <div class="diagram-section">
       <h2>Technology Stack</h2>
       <div class="tech-stack">
-        <span class="tech-badge">Go 1.21+</span>
+        <span class="tech-badge">Go 1.26.3</span>
         <span class="tech-badge">Chi Router</span>
         <span class="tech-badge">PostgreSQL</span>
         <span class="tech-badge">pgx Pool</span>
@@ -532,13 +564,13 @@ flowchart LR
         </div>
         <div class="flow-step">
           <span class="step-number">3</span>
-          <h4>Live upstream reads</h4>
-          <p>Course, session, profile, check-in, and report reads query Warwick during the admitted request and never fall back to a local upstream snapshot.</p>
+          <h4>Typed snapshots</h4>
+          <p>Course, session, and profile values are canonicalized and versioned in PostgreSQL. Freshness follows successful validation, while live mode remains the system-wide rollback path.</p>
         </div>
         <div class="flow-step">
           <span class="step-number">4</span>
-          <h4>HTTP freshness</h4>
-          <p>API responses and frontend requests explicitly disable intermediary and browser cache reuse while focus, polling, and WebSocket reconnect paths remain active.</p>
+          <h4>Committed repair</h4>
+          <p>Metadata-only WebSocket events trigger REST refetches. Duplicate versions are ignored, and focus, polling, and reconnect reconciliation repair missed hints.</p>
         </div>
       </div>
     </div>

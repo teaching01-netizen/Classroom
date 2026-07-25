@@ -2,6 +2,7 @@ package scraper
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -58,7 +59,7 @@ func claimPermitTargets(t *testing.T, ctx context.Context, repo *db.SnapshotRepo
 	t.Helper()
 	seeds := make([]domain.TargetSeed, count)
 	for index := range count {
-		seeds[index] = permitTargetSeed(string(rune('a'+index)), now)
+		seeds[index] = permitTargetSeed(fmt.Sprintf("target-%04d", index), now)
 	}
 	require.NoError(t, repo.Seed(ctx, seeds))
 	targets, err := repo.ClaimDue(ctx, db.ClaimRequest{

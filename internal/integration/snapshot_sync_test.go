@@ -29,6 +29,9 @@ type snapshotWarwickFixture struct {
 	toggleCalls    int
 	requests       int
 	rateLimited    bool
+	responseDelay  time.Duration
+	activeSessions int
+	maxActive      int
 	api            *httptest.Server
 	login          *httptest.Server
 }
@@ -74,6 +77,25 @@ func newSnapshotWarwickFixture(t *testing.T) *snapshotWarwickFixture {
 			}`))
 		case strings.Contains(r.URL.Path, "ClassAttendanceStudentCheckInSearch"):
 			sessionID := r.Form.Get("CourseCampaignID")
+			fixture.mu.Lock()
+			fixture.activeSessions++
+			if fixture.activeSessions > fixture.maxActive {
+				fixture.maxActive = fixture.activeSessions
+			}
+			responseDelay := fixture.responseDelay
+			fixture.mu.Unlock()
+			defer func() {
+				fixture.mu.Lock()
+				fixture.activeSessions--
+				fixture.mu.Unlock()
+			}()
+			if responseDelay > 0 {
+				select {
+				case <-time.After(responseDelay):
+				case <-r.Context().Done():
+					return
+				}
+			}
 			if sessionID == "timeout" {
 				select {
 				case <-time.After(250 * time.Millisecond):
@@ -127,6 +149,18 @@ func (f *snapshotWarwickFixture) setRateLimited(enabled bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rateLimited = enabled
+}
+
+func (f *snapshotWarwickFixture) setResponseDelay(delay time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.responseDelay = delay
+}
+
+func (f *snapshotWarwickFixture) maxActiveSessions() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxActive
 }
 
 func (f *snapshotWarwickFixture) requestCount() int {
@@ -496,4 +530,79 @@ func TestLiveRollbackSnapshotReadsDisabledKeepsWarwickAsReadSource(t *testing.T)
 	require.NotEqual(t, first[0].Name, second[0].Name)
 	require.Equal(t, int32(2), fixture.courseReads.Load(),
 		"SNAPSHOT_READS_ENABLED=false must preserve live Warwick reads")
+}
+
+func TestTwoSchedulersSharePostgreSQLHostAdmission(t *testing.T) {
+	_, firstRepository, host := snapshotIntegrationRepository(t)
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	secondPool, err := db.NewPool(databaseURL, false)
+	require.NoError(t, err)
+	defer secondPool.Close()
+	secondRepository := db.NewSnapshotRepository(secondPool)
+
+	fixture := newSnapshotWarwickFixture(t)
+	fixture.setResponseDelay(100 * time.Millisecond)
+	sessionPool, err := warwick.NewSessionPool(
+		"snapshot-admission@example.invalid",
+		"fixture-password",
+		fixture.login.URL,
+		1,
+		2,
+		1,
+	)
+	require.NoError(t, err)
+	client := warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher)
+	client.SetBaseURL(fixture.api.URL)
+	client.SetUserID("admission-user")
+	source := warwick.NewSnapshotSource(client, 1<<20)
+
+	now := time.Now().UTC()
+	seeds := make([]domain.TargetSeed, 4)
+	for index := range seeds {
+		seeds[index] = snapshotSeed(domain.TargetRef{
+			Host:        host,
+			Kind:        domain.SnapshotSessionDetail,
+			ParentKey:   "course-1",
+			ResourceKey: fmt.Sprintf("admission-session-%d", index),
+		}, now)
+	}
+	require.NoError(t, firstRepository.Seed(context.Background(), seeds))
+	firstScheduler := snapshotScheduler(
+		firstRepository,
+		source,
+		"admission-worker-1",
+		500*time.Millisecond,
+	)
+	secondScheduler := snapshotScheduler(
+		secondRepository,
+		source,
+		"admission-worker-2",
+		500*time.Millisecond,
+	)
+
+	type schedulerResult struct {
+		tick scraper.TickResult
+		err  error
+	}
+	start := make(chan struct{})
+	results := make(chan schedulerResult, 2)
+	run := func(scheduler *scraper.Scheduler) {
+		<-start
+		tick, runErr := scheduler.RunDue(context.Background(), 2)
+		results <- schedulerResult{tick: tick, err: runErr}
+	}
+	go run(firstScheduler)
+	go run(secondScheduler)
+	close(start)
+
+	totalAttempts := 0
+	for range 2 {
+		result := <-results
+		require.NoError(t, result.err)
+		totalAttempts += result.tick.Attempted
+	}
+	require.Equal(t, 4, totalAttempts)
+	require.Equal(t, 4, fixture.requestCount())
+	require.Equal(t, 2, fixture.maxActiveSessions(),
+		"two scheduler instances must share the configured host concurrency")
 }

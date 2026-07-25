@@ -3,8 +3,10 @@ package warwick
 import (
 	"compress/gzip"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -102,4 +104,34 @@ func TestWarwickClientsCanShareOwnedTransport(t *testing.T) {
 
 	assert.Same(t, transport, qr.client.Transport)
 	assert.Same(t, transport, classroom.client.Transport)
+}
+
+func TestSharedTransportReusesConnectionForSequentialRequests(t *testing.T) {
+	var newConnections atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, "ok")
+		},
+	))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConnections.Add(1)
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+
+	transport := NewSharedTransport(4)
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	const requestCount = 20
+	for range requestCount {
+		response, err := client.Get(server.URL)
+		require.NoError(t, err)
+		_, err = io.Copy(io.Discard, response.Body)
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+	}
+
+	require.Equal(t, int32(1), newConnections.Load())
 }

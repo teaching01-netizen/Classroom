@@ -89,6 +89,8 @@ func TestSnapshotRepositoryScraperStatusReturnsAggregates(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, initial.Due)
 	require.Equal(t, 1, initial.DueByKind[domain.SnapshotCourseCatalog])
+	require.Equal(t, 1, initial.TargetsByKind[domain.SnapshotCourseCatalog])
+	require.Equal(t, 0, initial.CurrentByKind[domain.SnapshotCourseCatalog])
 	require.Equal(t, 0, initial.Leased)
 	require.Equal(t, 1.0, initial.HostRequestsPerSecond)
 	require.Equal(t, 2, initial.HostConcurrency)

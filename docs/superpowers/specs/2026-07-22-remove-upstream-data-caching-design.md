@@ -1,6 +1,8 @@
 # Remove Upstream Data Caching Design
 
-**Status:** Approved 2026-07-22
+**Status:** Superseded for teacher-read storage by
+[ADR 009](../../adr/009-postgresql-snapshot-scraper.md). Retained as migration
+history and as the tested `SNAPSHOT_READS_ENABLED=false` rollback contract.
 
 ## Goal
 

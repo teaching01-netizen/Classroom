@@ -104,6 +104,8 @@ type PruneResult struct {
 type ScraperStatus struct {
 	Due                        int                           `json:"due"`
 	DueByKind                  map[domain.SnapshotKind]int   `json:"due_by_kind"`
+	TargetsByKind              map[domain.SnapshotKind]int   `json:"targets_by_kind"`
+	CurrentByKind              map[domain.SnapshotKind]int   `json:"current_by_kind"`
 	Leased                     int                           `json:"leased"`
 	Failed                     int                           `json:"failed"`
 	ExpiredCurrent             int                           `json:"expired_current"`
@@ -1254,6 +1256,8 @@ func (r *SnapshotRepository) ScraperStatus(
 		OldestValidationAgeSeconds: make(map[domain.SnapshotKind]int64),
 		OldestSnapshotAgeSeconds:   make(map[domain.SnapshotKind]int64),
 		DueByKind:                  make(map[domain.SnapshotKind]int),
+		TargetsByKind:              make(map[domain.SnapshotKind]int),
+		CurrentByKind:              make(map[domain.SnapshotKind]int),
 	}
 	if strings.TrimSpace(host) == "" {
 		return status, errors.New("scraper status host is required")
@@ -1294,12 +1298,18 @@ func (r *SnapshotRepository) ScraperStatus(
 	}
 
 	rows, err := r.pool.Query(ctx, `
-		SELECT kind, COUNT(*)
+		SELECT kind,
+			COUNT(*) FILTER (WHERE enabled=TRUE),
+			COUNT(*) FILTER (
+				WHERE enabled=TRUE AND current_snapshot_id IS NOT NULL
+			),
+			COUNT(*) FILTER (
+				WHERE enabled=TRUE
+				  AND next_run_at <= $2
+				  AND (lease_expires_at IS NULL OR lease_expires_at <= $2)
+			)
 		FROM scrape_targets
 		WHERE host=$1
-		  AND enabled=TRUE
-		  AND next_run_at <= $2
-		  AND (lease_expires_at IS NULL OR lease_expires_at <= $2)
 		GROUP BY kind`,
 		host,
 		now,
@@ -1309,12 +1319,17 @@ func (r *SnapshotRepository) ScraperStatus(
 	}
 	for rows.Next() {
 		var kind string
-		var count int
-		if err := rows.Scan(&kind, &count); err != nil {
+		var targets int
+		var current int
+		var due int
+		if err := rows.Scan(&kind, &targets, &current, &due); err != nil {
 			rows.Close()
 			return status, fmt.Errorf("read scraper due counts: scan: %w", err)
 		}
-		status.DueByKind[domain.SnapshotKind(kind)] = count
+		snapshotKind := domain.SnapshotKind(kind)
+		status.TargetsByKind[snapshotKind] = targets
+		status.CurrentByKind[snapshotKind] = current
+		status.DueByKind[snapshotKind] = due
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
