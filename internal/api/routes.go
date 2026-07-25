@@ -54,6 +54,7 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 	}
 
 	r := chi.NewRouter()
+	r.Use(redactInternalQueryBeforeLogging)
 	r.Use(chimiddleware.Logger)
 	r.Use(corsMiddleware(options.CORSOrigin))
 
@@ -142,6 +143,21 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 	r.Handle("/*", spaFallbackHandler())
 
 	return r, rl
+}
+
+func redactInternalQueryBeforeLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if !strings.HasPrefix(request.URL.Path, "/api/internal/") ||
+			request.URL.RawQuery == "" {
+			next.ServeHTTP(w, request)
+			return
+		}
+		sanitized := request.Clone(request.Context())
+		sanitized.URL.RawQuery = ""
+		sanitized.URL.ForceQuery = false
+		sanitized.RequestURI = sanitized.URL.RequestURI()
+		next.ServeHTTP(w, sanitized)
+	})
 }
 
 type responseStatusRecorder struct {

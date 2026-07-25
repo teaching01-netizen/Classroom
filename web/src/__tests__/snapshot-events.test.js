@@ -52,6 +52,36 @@ describe('snapshot event version routing', () => {
     window.removeEventListener(SNAPSHOT_COMMITTED_EVENT, listener);
   });
 
+  it('state sync retains the maximum version for duplicate resource metadata', () => {
+    applySnapshotStateSync([
+      {
+        kind: 'session_detail',
+        parent_key: 'course-1',
+        resource_key: 'session-1',
+        version: 7,
+      },
+      {
+        kind: 'session_detail',
+        parent_key: 'course-1',
+        resource_key: 'session-1',
+        version: 5,
+      },
+    ]);
+
+    expect(publishSnapshotCommitted({
+      kind: 'session_detail',
+      parent_key: 'course-1',
+      resource_key: 'session-1',
+      version: 6,
+    })).toBe(false);
+    expect(publishSnapshotCommitted({
+      kind: 'session_detail',
+      parent_key: 'course-1',
+      resource_key: 'session-1',
+      version: 8,
+    })).toBe(true);
+  });
+
   it('routes only catalog commits to a courses refetch', () => {
     const callback = vi.fn();
     const { unmount } = renderHook(() => useSnapshotEvents(isCatalogSnapshot, callback));

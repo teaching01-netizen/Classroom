@@ -45,3 +45,9 @@ func TestWireSnapshotRuntimeAlwaysOnAndServerlessWorkerPlans(t *testing.T) {
 		})
 	}
 }
+
+func TestSnapshotPoolCapacityWarningThreshold(t *testing.T) {
+	require.Equal(t, int32(10), snapshotPoolMinimum(2))
+	require.False(t, warnIfSnapshotPoolUndersized(10, 2))
+	require.True(t, warnIfSnapshotPoolUndersized(9, 2))
+}

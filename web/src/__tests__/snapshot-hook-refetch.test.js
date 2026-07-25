@@ -9,6 +9,7 @@ import {
   publishSnapshotCommitted,
   resetSnapshotVersionsForTests,
 } from '../hooks/useSnapshotEvents';
+import { WS_RECONNECT_EVENT } from '../hooks/useWebSocket';
 import { useCourseStore } from '../store/useCourseStore';
 import { useSessionStore } from '../store/useSessionStore';
 
@@ -55,6 +56,20 @@ describe('snapshot-aware data hooks', () => {
         version: 1,
       });
     });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    hook.unmount();
+  });
+
+  it('WebSocket reconnect retains the full REST repair refetch', async () => {
+    const fetchMock = vi.fn(() => response({ courses: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const hook = renderHook(() => useCourses());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent(WS_RECONNECT_EVENT));
+    });
+
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     hook.unmount();
   });

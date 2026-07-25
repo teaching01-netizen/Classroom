@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,6 +70,37 @@ func TestWSGuard_CounterIncrementsAndDecrements(t *testing.T) {
 	// After handler returns, counter should be back to 0
 	after := wsConnCount.Load()
 	assert.Equal(t, int64(0), after, "counter should be decremented after handler returns")
+}
+
+func TestWSGuardAtomicallyEnforcesConcurrentConnectionCap(t *testing.T) {
+	wsConnCount.Store(0)
+	defer wsConnCount.Store(0)
+	const (
+		callers = 100
+		maximum = 3
+	)
+	start := make(chan struct{})
+	var admitted atomic.Int32
+	var callersDone sync.WaitGroup
+	callersDone.Add(callers)
+	for range callers {
+		go func() {
+			defer callersDone.Done()
+			<-start
+			if acquireWebSocketSlot(maximum) {
+				admitted.Add(1)
+			}
+		}()
+	}
+	close(start)
+	callersDone.Wait()
+
+	require.Equal(t, int32(maximum), admitted.Load())
+	require.Equal(t, int64(maximum), wsConnCount.Load())
+	for range admitted.Load() {
+		wsConnCount.Add(-1)
+	}
+	require.Zero(t, wsConnCount.Load())
 }
 
 type websocketMetadataStore struct {

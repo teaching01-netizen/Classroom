@@ -20,10 +20,17 @@ type coordinatorSource struct {
 	result warwick.SnapshotFetchResult
 	err    error
 	calls  int
+	fetch  func(context.Context, domain.ScrapeTarget) (warwick.SnapshotFetchResult, error)
 }
 
-func (s *coordinatorSource) Fetch(context.Context, domain.ScrapeTarget) (warwick.SnapshotFetchResult, error) {
+func (s *coordinatorSource) Fetch(
+	ctx context.Context,
+	target domain.ScrapeTarget,
+) (warwick.SnapshotFetchResult, error) {
 	s.calls++
+	if s.fetch != nil {
+		return s.fetch(ctx, target)
+	}
 	return s.result, s.err
 }
 
@@ -190,7 +197,10 @@ func TestCoordinatorRejectsNotModifiedWithoutCurrentSnapshot(t *testing.T) {
 
 func TestCoordinatorFailureRetainsValidationAndSanitizesError(t *testing.T) {
 	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
-	source := &coordinatorSource{err: errors.New("Cookie: secret ASP.NET_SessionId=fixture")}
+	source := &coordinatorSource{err: errors.New(
+		"Cookie: cookie-secret; ASP.NET_SessionId=session-secret; " +
+			"Password=password-secret; Authorization: Bearer auth-secret",
+	)}
 	store := &coordinatorStore{}
 	coordinator := newCoordinatorForTest(source, store, &coordinatorObserver{}, now)
 	target := coordinatorTarget(domain.SnapshotSessionDetail)
@@ -202,8 +212,15 @@ func TestCoordinatorFailureRetainsValidationAndSanitizesError(t *testing.T) {
 	require.Equal(t, "transient_error", result.Outcome)
 	require.Nil(t, store.inputs[0].ValidationSeqAfter)
 	require.False(t, store.inputs[0].Changed)
-	require.NotContains(t, store.inputs[0].ErrorMessage, "secret")
-	require.NotContains(t, store.inputs[0].ErrorMessage, "fixture")
+	for _, secret := range []string{
+		"cookie-secret",
+		"session-secret",
+		"password-secret",
+		"auth-secret",
+	} {
+		require.NotContains(t, store.inputs[0].ErrorMessage, secret)
+	}
+	require.Contains(t, store.inputs[0].ErrorMessage, "<redacted>")
 	require.Equal(t, 1, store.inputs[0].ConsecutiveFailures)
 }
 
@@ -262,6 +279,120 @@ func TestCoordinatorCanceledFetchReleasesLeaseWithoutFailureRun(t *testing.T) {
 	require.Equal(t, []db.ReleaseLeaseRequest{{
 		TargetID: target.ID, LeaseGeneration: target.LeaseGeneration,
 	}}, store.releases)
+}
+
+func TestCoordinatorCancellationMidFetchReleasesLeaseAndDoesNotCommit(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	started := make(chan struct{})
+	source := &coordinatorSource{
+		fetch: func(ctx context.Context, _ domain.ScrapeTarget) (warwick.SnapshotFetchResult, error) {
+			close(started)
+			<-ctx.Done()
+			return warwick.SnapshotFetchResult{}, ctx.Err()
+		},
+	}
+	store := &coordinatorStore{}
+	observer := &coordinatorObserver{}
+	coordinator := newCoordinatorForTest(source, store, observer, now)
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := coordinator.RunClaimed(ctx, target)
+		done <- runErr
+	}()
+	<-started
+	cancel()
+
+	require.ErrorIs(t, <-done, context.Canceled)
+	require.Empty(t, store.inputs)
+	require.Empty(t, observer.observations)
+	require.Equal(t, []db.ReleaseLeaseRequest{{
+		TargetID: target.ID, LeaseGeneration: target.LeaseGeneration,
+	}}, store.releases)
+}
+
+func TestCoordinatorOversizedCanonicalPayloadIsInvalidAndObservedOnce(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	source := &coordinatorSource{result: warwick.SnapshotFetchResult{
+		Value: []domain.CourseSummary{{
+			CourseID: "course-1",
+			Name:     "payload larger than the deliberately tiny ceiling",
+		}},
+	}}
+	store := &coordinatorStore{}
+	observer := &coordinatorObserver{}
+	coordinator := newCoordinatorForTest(source, store, observer, now)
+	coordinator.canonicalPayloadLimit = 8
+
+	result, err := coordinator.RunClaimed(
+		context.Background(),
+		coordinatorTarget(domain.SnapshotCourseCatalog),
+	)
+	require.NoError(t, err)
+	require.Equal(t, "invalid_payload", result.Outcome)
+	require.False(t, result.Succeeded)
+	require.Len(t, store.inputs, 1)
+	require.False(t, store.inputs[0].Changed)
+	require.Nil(t, store.inputs[0].ValidationSeqAfter)
+	require.Len(t, observer.observations, 1)
+	require.Equal(t, "invalid_payload", observer.observations[0].Outcome)
+}
+
+func TestCoordinatorNotFoundUsesDeterministicLongPauseAndRetainsCurrent(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	source := &coordinatorSource{
+		result: warwick.SnapshotFetchResult{
+			Metadata: warwick.ResponseMetadata{StatusCode: 404},
+		},
+		err: &domain.UpstreamStatusError{StatusCode: 404},
+	}
+	store := &coordinatorStore{}
+	observer := &coordinatorObserver{}
+	coordinator := newCoordinatorForTest(source, store, observer, now)
+	target := coordinatorTarget(domain.SnapshotSessionDetail)
+	target.HasCurrentSnapshot = true
+	target.CurrentVersion = 3
+	target.ValidationSeq = 7
+
+	result, err := coordinator.RunClaimed(context.Background(), target)
+	require.NoError(t, err)
+	require.Equal(t, "not_found", result.Outcome)
+	require.Equal(t, now.Add(24*time.Hour), result.NextRunAt)
+	require.False(t, result.Changed)
+	require.Nil(t, store.inputs[0].ValidationSeqAfter)
+	require.Equal(t, target.ValidationSeq, int64(7))
+	require.Len(t, observer.observations, 1)
+}
+
+func TestCoordinatorTransientRetryAfterWinsOverLocalJitter(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	source := &coordinatorSource{
+		result: warwick.SnapshotFetchResult{
+			Metadata: warwick.ResponseMetadata{StatusCode: 503},
+		},
+		err: &domain.UpstreamStatusError{
+			StatusCode: 503,
+			RetryAfter: 20 * time.Minute,
+		},
+	}
+	store := &coordinatorStore{}
+	coordinator := newCoordinatorForTest(
+		source,
+		store,
+		&coordinatorObserver{},
+		now,
+	)
+
+	result, err := coordinator.RunClaimed(
+		context.Background(),
+		coordinatorTarget(domain.SnapshotSessionDetail),
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, "transient_error", result.Outcome)
+	require.Equal(t, now.Add(20*time.Minute), result.NextRunAt)
+	require.Equal(t, result.NextRunAt, store.inputs[0].NextRunAt)
 }
 
 func TestCoordinatorChangedCourseDiscoversSessionPolicies(t *testing.T) {

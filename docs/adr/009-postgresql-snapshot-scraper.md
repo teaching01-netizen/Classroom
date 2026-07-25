@@ -18,6 +18,9 @@ generation. A completion is accepted only for the current generation.
 PostgreSQL-backed host permits enforce Warwick rate and concurrency limits
 across all application instances. The scheduler owns claims, permits, retry
 timing, prefetch, and concurrency; a fetch performs one bounded attempt.
+Three consecutive transient failures for one target trigger one AIMD host
+decrease for that failure streak; `429` retains its immediate stronger pause
+and reduction policy.
 
 Freshness is based on the last successful validation. Changed, unchanged, and
 HTTP 304 results advance `validation_seq` and `last_validated_at`; only changed
@@ -62,7 +65,7 @@ current pointers, and idempotent `(target_id, lease_generation)` runs.
 
 - Backend unit, integration, real-PostgreSQL, race, vet, storage-boundary, and
   full end-to-end snapshot contracts pass.
-- Frontend lint, 143 Vitest tests, and the Vite production build pass.
+- Frontend lint, 146 Vitest tests, and the Vite production build pass.
 - `govulncheck` reports zero reachable vulnerabilities with Go 1.26.5 and
   `golang.org/x/text` 0.39.0.
 - Frontend dependencies were raised to Vite 8.1.5, Vitest 4.1.10, ESLint

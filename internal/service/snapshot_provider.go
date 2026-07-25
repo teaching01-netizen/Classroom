@@ -35,11 +35,14 @@ func (NoopSnapshotRefresher) SetDueNow(context.Context, domain.TargetRef) error 
 
 // SnapshotProvider implements teacher reads from PostgreSQL snapshots.
 type SnapshotProvider struct {
-	reader    SnapshotReader
-	refresher SnapshotRefresher
-	host      string
-	clock     func() time.Time
+	reader             SnapshotReader
+	refresher          SnapshotRefresher
+	host               string
+	clock              func() time.Time
+	coldRefreshTimeout time.Duration
 }
+
+const defaultColdRefreshTimeout = 10 * time.Second
 
 func NewSnapshotProvider(
 	reader SnapshotReader,
@@ -61,10 +64,11 @@ func NewSnapshotProvider(
 		clock = time.Now
 	}
 	return &SnapshotProvider{
-		reader:    reader,
-		refresher: refresher,
-		host:      host,
-		clock:     clock,
+		reader:             reader,
+		refresher:          refresher,
+		host:               host,
+		clock:              clock,
+		coldRefreshTimeout: defaultColdRefreshTimeout,
 	}
 }
 
@@ -107,7 +111,9 @@ func (p *SnapshotProvider) read(ctx context.Context, ref domain.TargetRef, desti
 		// A cold read gets one bounded synchronous refresh opportunity. The
 		// second read is authoritative even when the refresh itself fails:
 		// another worker may have committed a snapshot concurrently.
-		_ = p.refresher.RefreshNow(ctx, ref)
+		refreshCtx, cancel := context.WithTimeout(ctx, p.coldRefreshTimeout)
+		_ = p.refresher.RefreshNow(refreshCtx, ref)
+		cancel()
 		snapshot, err = p.reader.Current(ctx, ref)
 	}
 	if err != nil {

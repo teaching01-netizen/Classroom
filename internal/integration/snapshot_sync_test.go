@@ -2,9 +2,11 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -32,6 +34,9 @@ type snapshotWarwickFixture struct {
 	responseDelay  time.Duration
 	activeSessions int
 	maxActive      int
+	disabled       bool
+	operations     []string
+	sessionReads   []time.Time
 	api            *httptest.Server
 	login          *httptest.Server
 }
@@ -54,7 +59,12 @@ func newSnapshotWarwickFixture(t *testing.T) *snapshotWarwickFixture {
 		version := fixture.sessionVersion
 		checked := fixture.checked
 		rateLimited := fixture.rateLimited
+		disabled := fixture.disabled
 		fixture.mu.Unlock()
+		if disabled {
+			http.Error(w, "Warwick fixture disabled", http.StatusServiceUnavailable)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -78,6 +88,8 @@ func newSnapshotWarwickFixture(t *testing.T) *snapshotWarwickFixture {
 		case strings.Contains(r.URL.Path, "ClassAttendanceStudentCheckInSearch"):
 			sessionID := r.Form.Get("CourseCampaignID")
 			fixture.mu.Lock()
+			fixture.operations = append(fixture.operations, "session_fetch")
+			fixture.sessionReads = append(fixture.sessionReads, time.Now())
 			fixture.activeSessions++
 			if fixture.activeSessions > fixture.maxActive {
 				fixture.maxActive = fixture.activeSessions
@@ -125,6 +137,7 @@ func newSnapshotWarwickFixture(t *testing.T) *snapshotWarwickFixture {
 			}`, checked)
 		case strings.Contains(r.URL.Path, "ToggleCheckin"):
 			fixture.mu.Lock()
+			fixture.operations = append(fixture.operations, "toggle")
 			fixture.toggleCalls++
 			fixture.checked = r.Form.Get("checked") == "1"
 			fixture.sessionVersion++
@@ -157,6 +170,36 @@ func (f *snapshotWarwickFixture) setResponseDelay(delay time.Duration) {
 	f.responseDelay = delay
 }
 
+func (f *snapshotWarwickFixture) setDisabled(disabled bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.disabled = disabled
+}
+
+func (f *snapshotWarwickFixture) resetOperations() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.operations = nil
+}
+
+func (f *snapshotWarwickFixture) operationLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.operations...)
+}
+
+func (f *snapshotWarwickFixture) resetSessionReadTimes() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sessionReads = nil
+}
+
+func (f *snapshotWarwickFixture) sessionReadTimes() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]time.Time(nil), f.sessionReads...)
+}
+
 func (f *snapshotWarwickFixture) maxActiveSessions() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -175,16 +218,41 @@ func (f *snapshotWarwickFixture) toggleCount() int {
 	return f.toggleCalls
 }
 
+func (f *snapshotWarwickFixture) checkedState() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.checked
+}
+
 func snapshotIntegrationRepository(
 	t *testing.T,
-) (*pgxpool.Pool, *db.SnapshotRepository, string) {
+) (*pgxpool.Pool, *db.SnapshotRepository, string, string) {
 	t.Helper()
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is required for snapshot integration tests")
 	}
-	require.NoError(t, db.RunMigrations(databaseURL))
-	pool, err := db.NewPool(databaseURL, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	admin, err := pgxpool.New(ctx, databaseURL)
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+	schema := fmt.Sprintf("snapshot_integration_%d", time.Now().UnixNano())
+	_, err = admin.Exec(ctx, `CREATE SCHEMA "`+schema+`"`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dropCancel()
+		_, _ = admin.Exec(dropCtx, `DROP SCHEMA "`+schema+`" CASCADE`)
+	})
+	parsedURL, err := url.Parse(databaseURL)
+	require.NoError(t, err)
+	query := parsedURL.Query()
+	query.Set("search_path", schema)
+	parsedURL.RawQuery = query.Encode()
+	scopedDatabaseURL := parsedURL.String()
+	require.NoError(t, db.RunMigrations(scopedDatabaseURL))
+	pool, err := db.NewPool(scopedDatabaseURL, false)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	host := fmt.Sprintf("snapshot-integration-%d.invalid", time.Now().UnixNano())
@@ -196,13 +264,7 @@ func snapshotIntegrationRepository(
 		BaselineConcurrency:       2,
 		Now:                       time.Now().UTC(),
 	}))
-	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, _ = pool.Exec(cleanupCtx, `DELETE FROM scrape_targets WHERE host=$1`, host)
-		_, _ = pool.Exec(cleanupCtx, `DELETE FROM scrape_host_state WHERE host=$1`, host)
-	})
-	return pool, repository, host
+	return pool, repository, host, scopedDatabaseURL
 }
 
 func snapshotSeed(ref domain.TargetRef, now time.Time) domain.TargetSeed {
@@ -254,7 +316,7 @@ func snapshotScheduler(
 }
 
 func TestPostgreSQLSnapshotPipelineAndLiveRollbackContracts(t *testing.T) {
-	pool, repository, host := snapshotIntegrationRepository(t)
+	pool, repository, host, scopedDatabaseURL := snapshotIntegrationRepository(t)
 	fixture := newSnapshotWarwickFixture(t)
 	sessionPool, err := warwick.NewSessionPool(
 		"snapshot-integration@example.invalid",
@@ -295,16 +357,22 @@ func TestPostgreSQLSnapshotPipelineAndLiveRollbackContracts(t *testing.T) {
 	require.Equal(t, int64(1), first.ValidationSeq)
 
 	provider := service.NewSnapshotProvider(repository, scheduler, host, time.Now)
-	requestsBeforeRead := fixture.requestCount()
-	detail, err := provider.GetSessionDetail(
-		context.Background(),
-		"course-1",
-		"session-1",
+	teacher := service.NewTeacherServiceWithDependencies(
+		provider,
+		provider,
+		client,
+		scheduler,
+		2,
+		true,
 	)
+	fixture.setDisabled(true)
+	requestsBeforeRead := fixture.requestCount()
+	course, err := teacher.GetCourseDetail(context.Background(), "course-1")
 	require.NoError(t, err)
-	require.Equal(t, "student-1", detail.Students[0].StudentID)
+	require.Equal(t, "course-1", course.CourseID)
 	require.Equal(t, requestsBeforeRead, fixture.requestCount(),
-		"snapshot teacher read must not contact Warwick")
+		"TeacherService snapshot read must not contact disabled Warwick fixture")
+	fixture.setDisabled(false)
 
 	require.NoError(t, scheduler.RefreshNow(context.Background(), sessionRef))
 	notModified, err := repository.Current(context.Background(), sessionRef)
@@ -319,7 +387,7 @@ func TestPostgreSQLSnapshotPipelineAndLiveRollbackContracts(t *testing.T) {
 	events, unsubscribe := hub.Subscribe()
 	defer unsubscribe()
 	listener := service.NewSnapshotNotificationListener(
-		os.Getenv("TEST_DATABASE_URL"),
+		scopedDatabaseURL,
 		repository,
 		hub,
 	)
@@ -356,14 +424,7 @@ func TestPostgreSQLSnapshotPipelineAndLiveRollbackContracts(t *testing.T) {
 	}
 
 snapshotEventReceived:
-	teacher := service.NewTeacherServiceWithDependencies(
-		provider,
-		provider,
-		client,
-		scheduler,
-		2,
-		true,
-	)
+	fixture.resetOperations()
 	toggle, err := teacher.ToggleCheckin(
 		context.Background(),
 		"course-1",
@@ -374,9 +435,150 @@ snapshotEventReceived:
 	require.NoError(t, err)
 	require.False(t, toggle.SnapshotRefreshPending)
 	require.Equal(t, 1, fixture.toggleCount())
+	operations := fixture.operationLog()
+	require.GreaterOrEqual(t, len(operations), 2)
+	require.Equal(t, "toggle", operations[0],
+		"Warwick mutation must complete before snapshot reconciliation fetches")
+	require.Equal(t, "session_fetch", operations[1])
 	reconciled, err := repository.Current(context.Background(), sessionRef)
 	require.NoError(t, err)
 	require.Equal(t, int64(3), reconciled.Version)
+
+	eventDeadline = time.After(3 * time.Second)
+	for {
+		select {
+		case event := <-events:
+			metadata, ok := event.Data.(domain.SnapshotMetadata)
+			if event.Type == "SnapshotCommitted" &&
+				ok &&
+				metadata.ResourceKey == sessionRef.ResourceKey &&
+				metadata.Version == 3 {
+				goto toggleEventReceived
+			}
+		case <-eventDeadline:
+			t.Fatal("toggle reconciliation event not received")
+		}
+	}
+
+toggleEventReceived:
+	listenerRows, err := pool.Query(context.Background(), `
+		SELECT pid
+		FROM pg_stat_activity
+		WHERE application_name='snapshot-notification-listener'
+		  AND pid <> pg_backend_pid()`)
+	require.NoError(t, err)
+	var listenerPIDs []int32
+	for listenerRows.Next() {
+		var pid int32
+		require.NoError(t, listenerRows.Scan(&pid))
+		listenerPIDs = append(listenerPIDs, pid)
+	}
+	require.NoError(t, listenerRows.Err())
+	listenerRows.Close()
+	require.Len(t, listenerPIDs, 1,
+		"the integration test must disconnect the real LISTEN connection")
+	var terminated bool
+	require.NoError(t, pool.QueryRow(
+		context.Background(),
+		`SELECT pg_terminate_backend($1)`,
+		listenerPIDs[0],
+	).Scan(&terminated))
+	require.True(t, terminated)
+
+	fixture.setSession(4, true)
+	require.NoError(t, scheduler.RefreshNow(context.Background(), sessionRef))
+	afterGap, err := repository.Current(context.Background(), sessionRef)
+	require.NoError(t, err)
+	require.Equal(t, int64(4), afterGap.Version)
+	reconciled = afterGap
+
+	repairEvents := 0
+	repairDeadline := time.After(4 * time.Second)
+	for repairEvents == 0 {
+		select {
+		case event := <-events:
+			metadata, ok := event.Data.(domain.SnapshotMetadata)
+			if event.Type == "SnapshotCommitted" &&
+				ok &&
+				metadata.ResourceKey == sessionRef.ResourceKey &&
+				metadata.Version == 4 {
+				repairEvents++
+			}
+		case <-repairDeadline:
+			t.Fatal("listener reconnect did not reconcile the missed committed version")
+		}
+	}
+	noDuplicateDeadline := time.After(250 * time.Millisecond)
+	for {
+		select {
+		case event := <-events:
+			metadata, ok := event.Data.(domain.SnapshotMetadata)
+			if event.Type == "SnapshotCommitted" &&
+				ok &&
+				metadata.ResourceKey == sessionRef.ResourceKey &&
+				metadata.Version == 4 {
+				repairEvents++
+			}
+		case <-noDuplicateDeadline:
+			require.Equal(t, 1, repairEvents,
+				"reconnect reconciliation must publish one repair event")
+			goto listenerGapVerified
+		}
+	}
+
+listenerGapVerified:
+	type concurrentToggleResult struct {
+		response *domain.ToggleCheckinResponse
+		err      error
+	}
+	toggleStart := make(chan struct{})
+	toggleResults := make(chan concurrentToggleResult, 2)
+	for _, desired := range []bool{false, true} {
+		desired := desired
+		go func() {
+			<-toggleStart
+			response, toggleErr := teacher.ToggleCheckin(
+				context.Background(),
+				"course-1",
+				"session-1",
+				"student-1",
+				desired,
+			)
+			toggleResults <- concurrentToggleResult{
+				response: response,
+				err:      toggleErr,
+			}
+		}()
+	}
+	close(toggleStart)
+	for range 2 {
+		result := <-toggleResults
+		require.NoError(t, result.err)
+		require.NotNil(t, result.response)
+	}
+	// If one request coalesced behind the other's validation, its desired
+	// state is intentionally marked pending. The due marker must allow one
+	// bounded repair attempt to converge without any stale-generation commit.
+	require.NoError(t, scheduler.RefreshNow(context.Background(), sessionRef))
+	concurrentReconciled, err := repository.Current(context.Background(), sessionRef)
+	require.NoError(t, err)
+	var concurrentDetail domain.SessionDetail
+	require.NoError(t, json.Unmarshal(concurrentReconciled.Payload, &concurrentDetail))
+	require.Len(t, concurrentDetail.Students, 1)
+	require.Equal(t, fixture.checkedState(), concurrentDetail.Students[0].CheckedIn)
+	targetAfterToggles, err := repository.Target(context.Background(), sessionRef)
+	require.NoError(t, err)
+	require.Empty(t, targetAfterToggles.LeaseOwner)
+	require.Nil(t, targetAfterToggles.LeaseExpiresAt)
+	var runCount, distinctGenerations int
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT COUNT(*), COUNT(DISTINCT lease_generation)
+		FROM scrape_runs
+		WHERE target_id=$1`,
+		targetAfterToggles.ID,
+	).Scan(&runCount, &distinctGenerations))
+	require.Equal(t, runCount, distinctGenerations)
+	reconciled = concurrentReconciled
 
 	timeoutRef := domain.TargetRef{
 		Host: host, Kind: domain.SnapshotSessionDetail,
@@ -493,13 +695,25 @@ snapshotEventReceived:
 	var secretRows int
 	require.NoError(t, pool.QueryRow(context.Background(), `
 		SELECT
-			(SELECT COUNT(*) FROM scrape_snapshots
-			 WHERE payload::text ILIKE '%integration-cookie%'
-			    OR payload::text ILIKE '%fixture-password%')
+			(SELECT COUNT(*) FROM scrape_host_state AS row
+			 WHERE to_jsonb(row)::text ILIKE '%integration-cookie%'
+			    OR to_jsonb(row)::text ILIKE '%fixture-password%')
 			+
-			(SELECT COUNT(*) FROM scrape_runs
-			 WHERE COALESCE(error_message, '') ILIKE '%integration-cookie%'
-			    OR COALESCE(error_message, '') ILIKE '%fixture-password%')`,
+			(SELECT COUNT(*) FROM scrape_targets AS row
+			 WHERE to_jsonb(row)::text ILIKE '%integration-cookie%'
+			    OR to_jsonb(row)::text ILIKE '%fixture-password%')
+			+
+			(SELECT COUNT(*) FROM scrape_runs AS row
+			 WHERE to_jsonb(row)::text ILIKE '%integration-cookie%'
+			    OR to_jsonb(row)::text ILIKE '%fixture-password%')
+			+
+			(SELECT COUNT(*) FROM scrape_snapshots AS row
+			 WHERE to_jsonb(row)::text ILIKE '%integration-cookie%'
+			    OR to_jsonb(row)::text ILIKE '%fixture-password%')
+			+
+			(SELECT COUNT(*) FROM scrape_host_permits AS row
+			 WHERE to_jsonb(row)::text ILIKE '%integration-cookie%'
+			    OR to_jsonb(row)::text ILIKE '%fixture-password%')`,
 	).Scan(&secretRows))
 	require.Zero(t, secretRows)
 	var forbiddenColumns int
@@ -532,10 +746,79 @@ func TestLiveRollbackSnapshotReadsDisabledKeepsWarwickAsReadSource(t *testing.T)
 		"SNAPSHOT_READS_ENABLED=false must preserve live Warwick reads")
 }
 
+func TestConcurrentColdSnapshotMissesCoalesceByValidationSequence(t *testing.T) {
+	_, repository, host, _ := snapshotIntegrationRepository(t)
+	fixture := newSnapshotWarwickFixture(t)
+	fixture.setResponseDelay(100 * time.Millisecond)
+	sessionPool, err := warwick.NewSessionPool(
+		"snapshot-cold@example.invalid",
+		"fixture-password",
+		fixture.login.URL,
+		1,
+		2,
+		1,
+	)
+	require.NoError(t, err)
+	client := warwick.NewClassroomClientFromPool(
+		sessionPool,
+		warwick.TierTeacher,
+	)
+	client.SetBaseURL(fixture.api.URL)
+	client.SetUserID("cold-user")
+	source := warwick.NewSnapshotSource(client, 1<<20)
+	scheduler := snapshotScheduler(
+		repository,
+		source,
+		"cold-worker",
+		500*time.Millisecond,
+	)
+	provider := service.NewSnapshotProvider(
+		repository,
+		scheduler,
+		host,
+		time.Now,
+	)
+
+	type coldResult struct {
+		detail *domain.SessionDetail
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan coldResult, 2)
+	for range 2 {
+		go func() {
+			<-start
+			detail, readErr := provider.GetSessionDetail(
+				context.Background(),
+				"course-cold",
+				"cold-session",
+			)
+			results <- coldResult{detail: detail, err: readErr}
+		}()
+	}
+	close(start)
+	for range 2 {
+		result := <-results
+		require.NoError(t, result.err)
+		require.NotNil(t, result.detail)
+		require.Equal(t, "cold-session", result.detail.SessionID)
+	}
+	require.Equal(
+		t,
+		1,
+		fixture.requestCount(),
+		"concurrent cold misses must share one Warwick validation attempt",
+	)
+	ref := provider.SessionRef("course-cold", "cold-session")
+	current, err := repository.Current(context.Background(), ref)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), current.Version)
+	require.Equal(t, int64(1), current.ValidationSeq)
+}
+
 func TestTwoSchedulersSharePostgreSQLHostAdmission(t *testing.T) {
-	_, firstRepository, host := snapshotIntegrationRepository(t)
-	databaseURL := os.Getenv("TEST_DATABASE_URL")
-	secondPool, err := db.NewPool(databaseURL, false)
+	_, firstRepository, host, scopedDatabaseURL := snapshotIntegrationRepository(t)
+	secondPool, err := db.NewPool(scopedDatabaseURL, false)
 	require.NoError(t, err)
 	defer secondPool.Close()
 	secondRepository := db.NewSnapshotRepository(secondPool)
@@ -605,4 +888,92 @@ func TestTwoSchedulersSharePostgreSQLHostAdmission(t *testing.T) {
 	require.Equal(t, 4, fixture.requestCount())
 	require.Equal(t, 2, fixture.maxActiveSessions(),
 		"two scheduler instances must share the configured host concurrency")
+}
+
+func TestTwoSchedulersSharePostgreSQLHostRate(t *testing.T) {
+	pool, firstRepository, host, scopedDatabaseURL := snapshotIntegrationRepository(t)
+	secondPool, err := db.NewPool(scopedDatabaseURL, false)
+	require.NoError(t, err)
+	defer secondPool.Close()
+	secondRepository := db.NewSnapshotRepository(secondPool)
+
+	fixture := newSnapshotWarwickFixture(t)
+	sessionPool, err := warwick.NewSessionPool(
+		"snapshot-rate@example.invalid",
+		"fixture-password",
+		fixture.login.URL,
+		1,
+		2,
+		1,
+	)
+	require.NoError(t, err)
+	client := warwick.NewClassroomClientFromPool(sessionPool, warwick.TierTeacher)
+	client.SetBaseURL(fixture.api.URL)
+	client.SetUserID("rate-user")
+	source := warwick.NewSnapshotSource(client, 1<<20)
+
+	now := time.Now().UTC()
+	require.NoError(t, firstRepository.Seed(context.Background(), []domain.TargetSeed{
+		snapshotSeed(domain.TargetRef{
+			Host: host, Kind: domain.SnapshotSessionDetail,
+			ParentKey: "course-rate", ResourceKey: "rate-session-1",
+		}, now),
+		snapshotSeed(domain.TargetRef{
+			Host: host, Kind: domain.SnapshotSessionDetail,
+			ParentKey: "course-rate", ResourceKey: "rate-session-2",
+		}, now),
+	}))
+	_, err = pool.Exec(context.Background(), `
+		UPDATE scrape_host_state
+		SET baseline_requests_per_second=1,
+			current_requests_per_second=1,
+			burst=1,
+			available_tokens=1,
+			tokens_updated_at=clock_timestamp(),
+			baseline_concurrency=2,
+			current_concurrency=2,
+			paused_until=NULL,
+			updated_at=clock_timestamp()
+		WHERE host=$1`,
+		host,
+	)
+	require.NoError(t, err)
+	fixture.resetSessionReadTimes()
+
+	firstScheduler := snapshotScheduler(
+		firstRepository,
+		source,
+		"rate-worker-1",
+		500*time.Millisecond,
+	)
+	secondScheduler := snapshotScheduler(
+		secondRepository,
+		source,
+		"rate-worker-2",
+		500*time.Millisecond,
+	)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, scheduler := range []*scraper.Scheduler{firstScheduler, secondScheduler} {
+		scheduler := scheduler
+		go func() {
+			<-start
+			tick, runErr := scheduler.RunDue(context.Background(), 1)
+			if runErr == nil && tick.Attempted != 1 {
+				runErr = fmt.Errorf("expected one attempt, got %+v", tick)
+			}
+			results <- runErr
+		}()
+	}
+	close(start)
+	require.NoError(t, <-results)
+	require.NoError(t, <-results)
+
+	readTimes := fixture.sessionReadTimes()
+	require.Len(t, readTimes, 2)
+	if readTimes[1].Before(readTimes[0]) {
+		readTimes[0], readTimes[1] = readTimes[1], readTimes[0]
+	}
+	require.GreaterOrEqual(t, readTimes[1].Sub(readTimes[0]), 850*time.Millisecond,
+		"independent schedulers must share the one-request-per-second host token bucket")
 }

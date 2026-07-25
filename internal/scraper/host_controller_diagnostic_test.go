@@ -19,7 +19,7 @@ func TestHostPermitContentionDiagnostics(t *testing.T) {
 	if os.Getenv("RUN_SNAPSHOT_DIAGNOSTICS") != "1" {
 		t.Skip("set RUN_SNAPSHOT_DIAGNOSTICS=1 with TEST_DATABASE_URL")
 	}
-	controller, repo, ctx, now := newHostControllerTest(t, 5, 5, 4)
+	controller, repo, ctx, now, _ := newHostControllerTest(t, 5, 5, 4)
 	const (
 		instanceCount  = 4
 		opsPerInstance = 50

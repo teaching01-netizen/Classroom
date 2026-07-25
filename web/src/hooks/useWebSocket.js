@@ -16,7 +16,11 @@ export const useWebSocket = () => {
   const MAX_RECONNECT = 10;
 
   useEffect(() => {
+    let stopped = false;
+    let reconnectTimer = null;
+
     const connect = () => {
+      if (stopped) return;
       wsRef.current = new WebSocket(WS_URL);
 
       wsRef.current.onopen = () => {
@@ -59,9 +63,13 @@ export const useWebSocket = () => {
 
       wsRef.current.onclose = () => {
         useRoomStore.getState().setIsWsConnected(false);
+        if (stopped) return;
         reconnectAttempts.current += 1;
         if (reconnectAttempts.current <= MAX_RECONNECT) {
-          setTimeout(connect, 3000);
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, 3000);
         }
       };
 
@@ -71,9 +79,16 @@ export const useWebSocket = () => {
     connect();
 
     return () => {
+      stopped = true;
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       if (wsRef.current) {
+        wsRef.current.onclose = null;
         wsRef.current.close();
       }
+      useRoomStore.getState().setIsWsConnected(false);
     };
   }, []);
 };

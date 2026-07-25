@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+// @vitest-environment jsdom
+import { act, renderHook } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useWebSocket } from '../hooks/useWebSocket';
 import { useSessionStore } from '../store/useSessionStore';
 import { useRoomStore } from '../store/useRoomStore';
 
@@ -10,6 +13,12 @@ beforeEach(() => {
     isLoading: false,
     error: null,
   });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('SESSION_STATS_UPDATED handling', () => {
@@ -44,5 +53,40 @@ describe('WebSocket room updates via getState()', () => {
     expect(typeof addRoom).toBe('function');
     expect(typeof updateRoom).toBe('function');
     expect(typeof removeRoom).toBe('function');
+  });
+});
+
+describe('WebSocket reconnect lifecycle', () => {
+  it('cancels a pending reconnect and closes the socket on unmount', () => {
+    vi.useFakeTimers();
+    const sockets = [];
+    class FakeWebSocket {
+      constructor(url) {
+        this.url = url;
+        this.closed = false;
+        sockets.push(this);
+      }
+
+      close() {
+        this.closed = true;
+        this.onclose?.();
+      }
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket);
+    const hook = renderHook(() => useWebSocket());
+    expect(sockets).toHaveLength(1);
+
+    act(() => {
+      sockets[0].onclose();
+    });
+    expect(vi.getTimerCount()).toBe(1);
+
+    hook.unmount();
+    expect(sockets[0].closed).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(sockets).toHaveLength(1);
   });
 });

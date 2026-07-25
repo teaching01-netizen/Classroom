@@ -88,6 +88,12 @@ warwick_session_pool_wait_seconds
 All labels are bounded. Do not add target, course, session, student, worker, URL,
 or error-message labels.
 
+The PostgreSQL pool should provide at least
+`8 + SCRAPER_MAX_CONCURRENCY` connections for API traffic, the dedicated
+listener, health/operations work, and bounded scraper bursts. Startup emits
+`snapshot_database_pool_below_recommended_minimum` if a deployment config falls
+below that planning floor.
+
 ## Stage 2: snapshot reads
 
 Set:
@@ -152,6 +158,15 @@ go test ./internal/scraper -run '^$' \
 go tool pprof /tmp/snapshot-scheduler-cpu.pprof
 ```
 
+Runtime trace:
+
+```bash
+go test ./internal/scraper -run '^$' \
+  -bench BenchmarkSchedulerDispatch \
+  -trace /tmp/snapshot-scheduler.trace
+go tool trace /tmp/snapshot-scheduler.trace
+```
+
 PostgreSQL plan, commit, JSONB-size, pool-wait, and four-client permit
 contention diagnostics:
 
@@ -173,27 +188,34 @@ go test ./internal/warwick \
 
 ### Local reference, 2026-07-26
 
-Environment: Apple M1 arm64, Go 1.26.3, local PostgreSQL 14.23 over loopback.
+Environment: Apple M1 arm64, Go 1.26.5, local PostgreSQL 14.23 over loopback.
 These numbers are a developer reference, not a production SLO; rerun on
 PostgreSQL 16 and the deployed instance/database topology before cutover.
 
 | Diagnostic | Representative result |
 | --- | ---: |
-| Canonicalize 250 courses | 148.9 µs/op, 80,575 B/op, 6 allocs/op |
-| Canonicalize course with 50 sessions | 15.5 µs/op, 13,398 B/op, 6 allocs/op |
-| Canonicalize session with 500 students | 346.0 µs/op, 186,179 B/op, 1,006 allocs/op |
-| Canonicalize 2,000 profiles | 838.2 µs/op, 380,080 B/op, 7 allocs/op |
-| Dispatch 32 scheduler targets | 87.5 µs/op, 51,428 B/op, 407 allocs/op |
-| Claim query, 5,000 targets | 0.258 ms; due index used |
-| Commit transaction, 50 samples | p50 0.429 ms; p95 0.917 ms |
+| Canonicalize 250 courses | 140.5 µs/op, 80,672 B/op, 6 allocs/op |
+| Canonicalize course with 50 sessions | 13.8 µs/op, 13,395 B/op, 6 allocs/op |
+| Canonicalize session with 500 students | 326.0 µs/op, 186,884 B/op, 1,006 allocs/op |
+| Canonicalize 2,000 profiles | 800.0 µs/op, 394,118 B/op, 8 allocs/op |
+| Dispatch 32 scheduler targets | 92.4 µs/op, 56,955 B/op, 409 allocs/op |
+| Claim query, 5,000 targets | 0.109 ms execution; due index used |
+| Commit transaction, 50 samples | p50 0.814 ms; p95 2.10 ms |
 | Canonical JSONB fixture | 89 bytes min/p50/p95/max |
-| DB empty-acquire wait | 1.62 ms total, 1 occurrence |
-| Host permit transaction, 4 clients/200 ops | p50 2.07 ms; p95 5.13 ms; 200 admitted |
+| DB empty-acquire wait | 2.60 ms total, 1 occurrence |
+| Host permit transaction, 4 clients/200 ops | p50 1.42 ms; p95 2.35 ms; 200 admitted |
 | Sequential HTTP connection reuse | 20 requests on 1 connection |
 
 Record the same set during staging, including production-shaped payload-size
 distribution. Investigate changes with profiles and query plans before raising
 host rate or concurrency.
+
+Set `GOMEMLIMIT` below the container memory limit. Change `GOGC` only after
+reviewing heap profiles. During staging, watch goroutine count, file
+descriptors, HTTP connection reuse, PostgreSQL pool wait, heap size, canonical
+JSON size, listener reconnects, and permit expiry. Use a representative CPU
+profile for PGO decisions; do not enable PGO from a synthetic microbenchmark
+alone.
 
 ## Dependency security checks
 
@@ -209,11 +231,16 @@ npm audit --omit=dev
 The release toolchain is Go 1.26.5 with `golang.org/x/text` 0.39.0;
 `govulncheck` must report zero reachable vulnerabilities.
 
-As of 2026-07-26, npm maps React Router's server-action/RSC CSRF advisory to
-both `react-router` and `react-router-dom`, so the production audit reports two
-high package nodes for one advisory. This SPA uses only `BrowserRouter`,
-`Routes`, `Route`, `Link`, `useNavigate`, and `useParams`; it has no React
-Server Components, SSR runtime, data router, loader, action, or server-action
-endpoint. Treat that as a documented reachability exception, keep React Router
-at 7.18.1 or newer, and re-evaluate the exception whenever routing architecture
-or the advisory's fixed range changes. No critical advisory is accepted.
+As of 2026-07-26, npm maps
+[GHSA-qwww-vcr4-c8h2](https://github.com/advisories/GHSA-qwww-vcr4-c8h2)
+to both `react-router` and
+`react-router-dom`, so the production audit reports two high package nodes for
+one advisory. GitHub limits this advisory to unstable React Server Component
+APIs and lists 8.3.0 as the patched release. This SPA uses only
+`BrowserRouter`, `Routes`, `Route`, `Link`, `useNavigate`, and `useParams`; it
+has no React Server Components, SSR runtime, data router, loader, action, or
+server-action endpoint. Treat that as a documented reachability exception,
+keep React Router at 7.18.1 or newer, and re-evaluate the exception whenever
+routing architecture or the advisory's fixed range changes. Do not downgrade
+to an older line merely to silence npm's range match. No critical advisory is
+accepted.

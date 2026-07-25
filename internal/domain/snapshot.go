@@ -53,13 +53,14 @@ func (r TargetRef) IdentityKey() string {
 }
 
 var (
-	ErrSnapshotNotFound  = errors.New("snapshot not found")
-	ErrSnapshotExpired   = errors.New("snapshot expired")
-	ErrNotModified       = errors.New("upstream not modified")
-	ErrLeaseLost         = errors.New("scrape lease lost")
-	ErrHostPaused        = errors.New("scrape host paused")
-	ErrTargetLeased      = errors.New("scrape target already leased")
-	ErrPermitUnavailable = errors.New("host permit unavailable")
+	ErrSnapshotNotFound      = errors.New("snapshot not found")
+	ErrSnapshotExpired       = errors.New("snapshot expired")
+	ErrSnapshotRefreshFailed = errors.New("snapshot refresh failed")
+	ErrNotModified           = errors.New("upstream not modified")
+	ErrLeaseLost             = errors.New("scrape lease lost")
+	ErrHostPaused            = errors.New("scrape host paused")
+	ErrTargetLeased          = errors.New("scrape target already leased")
+	ErrPermitUnavailable     = errors.New("host permit unavailable")
 )
 
 type ConditionalHeaders struct {
@@ -180,12 +181,13 @@ type PermitDecision struct {
 }
 
 type HostObservation struct {
-	Host       string
-	Outcome    string
-	StatusCode int
-	RetryAfter time.Duration
-	Latency    time.Duration
-	ObservedAt time.Time
+	Host                string
+	Outcome             string
+	StatusCode          int
+	RetryAfter          time.Duration
+	Latency             time.Duration
+	ConsecutiveFailures int
+	ObservedAt          time.Time
 }
 
 type SessionFetcher interface {

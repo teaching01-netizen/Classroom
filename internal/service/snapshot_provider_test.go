@@ -56,11 +56,19 @@ type snapshotRefresherFake struct {
 	refreshes []domain.TargetRef
 	due       []domain.TargetRef
 	err       error
+	block     <-chan struct{}
 	onRefresh func(domain.TargetRef)
 }
 
-func (r *snapshotRefresherFake) RefreshNow(_ context.Context, ref domain.TargetRef) error {
+func (r *snapshotRefresherFake) RefreshNow(ctx context.Context, ref domain.TargetRef) error {
 	r.refreshes = append(r.refreshes, ref)
+	if r.block != nil {
+		select {
+		case <-r.block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if r.onRefresh != nil {
 		r.onRefresh(ref)
 	}
@@ -144,6 +152,29 @@ func TestSnapshotProviderColdRefreshFailurePreservesNotFound(t *testing.T) {
 	provider := NewSnapshotProvider(reader, refresher, "warwick.humantix.cloud", func() time.Time { return now })
 	_, err := provider.GetCourses(context.Background())
 	require.ErrorIs(t, err, domain.ErrSnapshotNotFound)
+}
+
+func TestSnapshotProviderBoundsColdRefreshWithoutCallerDeadline(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	reader := &snapshotReaderFake{
+		snapshots: map[string]domain.Snapshot{},
+		errors:    map[string]error{},
+	}
+	refresher := &snapshotRefresherFake{block: make(chan struct{})}
+	provider := NewSnapshotProvider(
+		reader,
+		refresher,
+		"warwick.humantix.cloud",
+		func() time.Time { return now },
+	)
+	provider.coldRefreshTimeout = 20 * time.Millisecond
+
+	started := time.Now()
+	_, err := provider.GetCourses(context.Background())
+	require.ErrorIs(t, err, domain.ErrSnapshotNotFound)
+	require.Less(t, time.Since(started), time.Second)
+	require.Len(t, refresher.refreshes, 1)
+	require.Len(t, reader.calls, 2)
 }
 
 func TestSnapshotProviderServesOverdueButRejectsExpired(t *testing.T) {

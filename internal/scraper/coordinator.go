@@ -220,6 +220,12 @@ func (c *Coordinator) RunClaimedWithRelease(
 		StatusCode: statusCodeValue(statusCode),
 		RetryAfter: retryAfter,
 		Latency:    finishedAt.Sub(startedAt),
+		ConsecutiveFailures: func() int {
+			if successful {
+				return 0
+			}
+			return consecutiveFailures
+		}(),
 		ObservedAt: finishedAt,
 	})
 
@@ -397,7 +403,11 @@ func failureNextRun(
 	case "invalid_payload":
 		return now.Add(time.Hour)
 	default:
-		return now.Add(FullJitter(FailureDelay(consecutiveFailures), rng))
+		delay := FullJitter(FailureDelay(consecutiveFailures), rng)
+		if retryAfter > delay {
+			delay = retryAfter
+		}
+		return now.Add(delay)
 	}
 }
 
@@ -470,15 +480,20 @@ func discoverTargets(
 	return seeds, seen
 }
 
-var upstreamSecretPattern = regexp.MustCompile(
-	`(?i)(asp\.net_sessionid|cookie|authorization)\s*[:=]\s*[^\s,;]+`,
+var upstreamSecretAssignmentPattern = regexp.MustCompile(
+	`(?i)\b(asp\.net_sessionid|cookie|authorization|password|credential|token)\b\s*[:=]\s*[^,;\r\n]+`,
+)
+
+var upstreamBearerSecretPattern = regexp.MustCompile(
+	`(?i)\bbearer\s+[a-z0-9._~+/=-]+`,
 )
 
 func safeUpstreamError(err error) string {
 	if err == nil {
 		return ""
 	}
-	message := upstreamSecretPattern.ReplaceAllString(err.Error(), "$1=<redacted>")
+	message := upstreamSecretAssignmentPattern.ReplaceAllString(err.Error(), "$1=<redacted>")
+	message = upstreamBearerSecretPattern.ReplaceAllString(message, "Bearer <redacted>")
 	if len(message) > 2048 {
 		message = message[:2048]
 	}

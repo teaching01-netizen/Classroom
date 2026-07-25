@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -378,6 +379,15 @@ func (r *SnapshotRepository) ClaimDue(ctx context.Context, request ClaimRequest)
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("claim due targets: rows: %w", err)
 	}
+	// PostgreSQL does not guarantee row order for UPDATE ... RETURNING, even
+	// when the locking CTE that selected the rows is ordered. Keep dispatcher
+	// priority deterministic after the fenced claims have been materialized.
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].NextRunAt.Equal(targets[j].NextRunAt) {
+			return targets[i].ID < targets[j].ID
+		}
+		return targets[i].NextRunAt.Before(targets[j].NextRunAt)
+	})
 	return targets, nil
 }
 
@@ -426,19 +436,31 @@ func (r *SnapshotRepository) ClaimOne(ctx context.Context, request ClaimOneReque
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return domain.ScrapeTarget{}, fmt.Errorf("claim target: %w", err)
 	}
-	var exists bool
-	if queryErr := r.pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM scrape_targets
-			WHERE host=$1 AND kind=$2 AND parent_key=$3 AND resource_key=$4
-		)`,
+	var enabled bool
+	var leaseExpiresAt *time.Time
+	var pausedUntil *time.Time
+	queryErr := r.pool.QueryRow(ctx, `
+		SELECT target.enabled, target.lease_expires_at, host_state.paused_until
+		FROM scrape_targets AS target
+		JOIN scrape_host_state AS host_state ON host_state.host = target.host
+		WHERE target.host=$1 AND target.kind=$2
+		  AND target.parent_key=$3 AND target.resource_key=$4`,
 		request.Ref.Host, request.Ref.Kind, request.Ref.ParentKey, request.Ref.ResourceKey,
-	).Scan(&exists); queryErr != nil {
-		return domain.ScrapeTarget{}, fmt.Errorf("claim target existence: %w", queryErr)
-	}
-	if !exists {
+	).Scan(&enabled, &leaseExpiresAt, &pausedUntil)
+	if errors.Is(queryErr, pgx.ErrNoRows) || !enabled {
 		return domain.ScrapeTarget{}, domain.ErrSnapshotNotFound
 	}
+	if queryErr != nil {
+		return domain.ScrapeTarget{}, fmt.Errorf("inspect unavailable target claim: %w", queryErr)
+	}
+	if pausedUntil != nil && pausedUntil.After(request.Now) {
+		return domain.ScrapeTarget{}, domain.ErrHostPaused
+	}
+	// A matching enabled target can be unavailable because it has a live
+	// lease, or because a concurrent transaction briefly held its row lock.
+	// RefreshNow re-reads target state and retries only after no live lease
+	// remains, so either case safely coalesces without duplicate work.
+	_ = leaseExpiresAt
 	return domain.ScrapeTarget{}, domain.ErrTargetLeased
 }
 
@@ -661,6 +683,13 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 	target.MaxServeAge = time.Duration(maxServeAgeSeconds) * time.Second
 	if target.LeaseGeneration != input.LeaseGeneration {
 		return CommitResult{}, domain.ErrLeaseLost
+	}
+	if target.LeaseOwner == nil || *target.LeaseOwner != input.WorkerID {
+		return CommitResult{}, fmt.Errorf(
+			"%w: lease owner mismatch for generation %d",
+			domain.ErrLeaseLost,
+			input.LeaseGeneration,
+		)
 	}
 
 	successful := successfulOutcome(input.Outcome)
@@ -939,10 +968,15 @@ func trimBoolHistory(history []bool) []bool {
 	return copied
 }
 
-var secretAssignment = regexp.MustCompile(`(?i)(asp\.net_sessionid|cookie|authorization)\s*[:=]\s*[^\s,;]+`)
+var secretAssignment = regexp.MustCompile(
+	`(?i)\b(asp\.net_sessionid|cookie|authorization|password|credential|token)\b\s*[:=]\s*[^,;\r\n]+`,
+)
+
+var bearerSecret = regexp.MustCompile(`(?i)\bbearer\s+[a-z0-9._~+/=-]+`)
 
 func sanitizeErrorMessage(message string) string {
 	message = secretAssignment.ReplaceAllString(message, "$1=<redacted>")
+	message = bearerSecret.ReplaceAllString(message, "Bearer <redacted>")
 	if utf8.RuneCountInString(message) <= 512 {
 		return message
 	}
@@ -1755,6 +1789,38 @@ func (r *SnapshotRepository) ObserveHost(ctx context.Context, observation domain
 			observation.ObservedAt,
 			healthy,
 			pausedUntil,
+		)
+	case "transient_error":
+		currentRPS := state.CurrentRequestsPerSecond
+		currentConcurrency := state.CurrentConcurrency
+		// Apply one multiplicative decrease when a target reaches the
+		// documented transient-failure threshold. Later failures in the same
+		// streak do not repeatedly collapse the host; a successful validation
+		// resets the target streak.
+		if observation.ConsecutiveFailures == 3 {
+			currentRPS /= 2
+			if currentRPS < 0.25 {
+				currentRPS = 0.25
+			}
+			currentConcurrency--
+			if currentConcurrency < 1 {
+				currentConcurrency = 1
+			}
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE scrape_host_state
+			SET current_requests_per_second=$2,
+				current_concurrency=$3,
+				available_tokens=LEAST($4::numeric, burst::numeric),
+				tokens_updated_at=$5,
+				healthy_streak=0,
+				updated_at=$5
+			WHERE host=$1`,
+			observation.Host,
+			currentRPS,
+			currentConcurrency,
+			available,
+			observation.ObservedAt,
 		)
 	default:
 		_, err = tx.Exec(ctx, `

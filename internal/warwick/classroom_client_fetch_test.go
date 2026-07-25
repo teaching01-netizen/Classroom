@@ -510,6 +510,73 @@ func TestUserIDDetectionRetriesAfterCancellation(t *testing.T) {
 	assert.Equal(t, "11111111-2222-3333-4444-555555555555", client.resolveUserID(context.Background(), "cookie"))
 }
 
+type countingRoundTripper struct {
+	delegate http.RoundTripper
+	calls    atomic.Int32
+}
+
+func (transport *countingRoundTripper) RoundTrip(
+	request *http.Request,
+) (*http.Response, error) {
+	transport.calls.Add(1)
+	return transport.delegate.RoundTrip(request)
+}
+
+func TestUserIDDetectionReusesConfiguredTransport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(
+			"d.UserID = '11111111-2222-3333-4444-555555555555'",
+		))
+	}))
+	defer server.Close()
+	transport := &countingRoundTripper{
+		delegate: server.Client().Transport,
+	}
+	client := NewClassroomClient(NewWarwickAuth("", "", ""))
+	client.SetBaseURL(server.URL)
+	client.SetTransport(transport)
+
+	require.Equal(
+		t,
+		"11111111-2222-3333-4444-555555555555",
+		client.detectUserIDFromPage(context.Background(), "fixture-cookie"),
+	)
+	require.Equal(t, int32(1), transport.calls.Load())
+}
+
+func TestUserIDDetectionRejectsCrossOriginRedirectWithoutForwardingCookie(t *testing.T) {
+	var redirectedCalls atomic.Int32
+	var redirectedCookie atomic.Value
+	redirected := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		request *http.Request,
+	) {
+		redirectedCalls.Add(1)
+		redirectedCookie.Store(request.Header.Get("Cookie"))
+		_, _ = w.Write([]byte(
+			"d.UserID = '11111111-2222-3333-4444-555555555555'",
+		))
+	}))
+	defer redirected.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		request *http.Request,
+	) {
+		http.Redirect(w, request, redirected.URL+"/capture", http.StatusFound)
+	}))
+	defer origin.Close()
+	client := NewClassroomClient(NewWarwickAuth("", "", ""))
+	client.SetBaseURL(origin.URL)
+	client.SetTransport(origin.Client().Transport)
+
+	require.Empty(
+		t,
+		client.detectUserIDFromPage(context.Background(), "fixture-cookie"),
+	)
+	require.Zero(t, redirectedCalls.Load())
+	require.Nil(t, redirectedCookie.Load())
+}
+
 func TestFetchStudentProfiles_Success(t *testing.T) {
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

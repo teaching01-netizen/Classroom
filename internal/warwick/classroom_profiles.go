@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -216,8 +217,10 @@ func (c *ClassroomClient) fetchStudentProfiles(ctx context.Context, cookie strin
 // Uses a redirect-following client because /admin/ returns 302 → the actual page.
 // Returns empty string on any failure (non-fatal).
 func (c *ClassroomClient) detectUserIDFromPage(ctx context.Context, cookie string) string {
-	detector := &http.Client{
-		Timeout: 15 * time.Second,
+	detector, err := c.userIDDetectionClient()
+	if err != nil {
+		slog.Debug("warwick_userid_detect_client_failed", "error", err)
+		return ""
 	}
 
 	// The ClassAttendance page contains the DataTables JS with d.UserID hardcoded.
@@ -233,6 +236,34 @@ func (c *ClassroomClient) detectUserIDFromPage(ctx context.Context, cookie strin
 
 	slog.Debug("warwick_userid_detect_all_pages_failed")
 	return ""
+}
+
+func (c *ClassroomClient) userIDDetectionClient() (*http.Client, error) {
+	origin, err := url.Parse(c.baseURL)
+	if err != nil ||
+		(origin.Scheme != "http" && origin.Scheme != "https") ||
+		origin.Host == "" ||
+		origin.User != nil {
+		return nil, errors.New("invalid Warwick base URL for user ID detection")
+	}
+	return &http.Client{
+		Transport: c.client.Transport,
+		Timeout:   15 * time.Second,
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("Warwick user ID detection exceeded redirect limit")
+			}
+			if !strings.EqualFold(request.URL.Scheme, origin.Scheme) ||
+				!strings.EqualFold(request.URL.Host, origin.Host) ||
+				request.URL.User != nil {
+				// Returning ErrUseLastResponse prevents following the
+				// destination while still giving the caller ownership of the
+				// redirect response body.
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}, nil
 }
 
 func (c *ClassroomClient) tryDetectUserID(ctx context.Context, client *http.Client, cookie, path string) string {
@@ -268,7 +299,7 @@ func (c *ClassroomClient) tryDetectUserID(ctx context.Context, client *http.Clie
 	// This is more reliable than generic UUID scanning which picks up student IDs.
 	bodyStr := string(body)
 	if matches := userIDFromJSRegex.FindStringSubmatch(bodyStr); len(matches) > 1 {
-		slog.Info("warwick_userid_detected", "path", path, "user_id", matches[1])
+		slog.Info("warwick_userid_detected", "path", path)
 		return matches[1]
 	}
 

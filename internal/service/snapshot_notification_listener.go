@@ -16,6 +16,7 @@ import (
 )
 
 const snapshotNotificationPayloadLimit = 8 * 1024
+const snapshotNotificationApplicationName = "snapshot-notification-listener"
 
 type SnapshotMetadataStore interface {
 	ListMetadata(context.Context, time.Time) ([]domain.SnapshotMetadata, error)
@@ -57,7 +58,12 @@ func NewSnapshotNotificationListener(
 		store,
 		hub,
 		func(ctx context.Context) (notificationConnection, error) {
-			return pgx.Connect(ctx, databaseURL)
+			config, err := pgx.ParseConfig(databaseURL)
+			if err != nil {
+				return nil, fmt.Errorf("parse snapshot listener database URL: %w", err)
+			}
+			config.RuntimeParams["application_name"] = snapshotNotificationApplicationName
+			return pgx.ConnectConfig(ctx, config)
 		},
 		time.Now,
 		waitForNotificationBackoff,
@@ -117,7 +123,9 @@ func (l *SnapshotNotificationListener) Run(ctx context.Context) error {
 		connection, err := l.connect(ctx)
 		if err == nil {
 			err = l.runConnection(ctx, connection)
-			_ = connection.Close(context.Background())
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = connection.Close(closeCtx)
+			cancel()
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()

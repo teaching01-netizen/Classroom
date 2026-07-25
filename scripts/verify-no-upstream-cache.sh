@@ -32,6 +32,13 @@ if rg -n '\.Payload\b|json:"payload"' --glob '*.go' --glob '!**/*_test.go' "$roo
   exit 1
 fi
 
+log_secret_pattern='slog\.(Debug|Info|Warn|Error)\([^)]*(ASP\.NET_SessionId|"cookie"|"authorization"|"password"|response\.Body|request\.Header|snapshot\.Payload)'
+if rg -n -i "$log_secret_pattern" --glob '*.go' --glob '!**/*_test.go' "$root/internal"; then
+  echo "secret, raw response, request header, or snapshot payload passed to structured logging"
+  exit 1
+fi
+go run "$root/scripts/check-sensitive-logging.go" "$root/internal"
+
 high_cardinality_metric_labels='"(target|target_id|resource|resource_key|course|course_id|session|session_id|student|student_id|worker|worker_id|error|error_message)"'
 if rg -n "\\[\\]string\\{[^}]*$high_cardinality_metric_labels" \
     --glob '*.go' --glob '!**/*_test.go' "$metrics_source"; then
@@ -42,6 +49,11 @@ fi
 rg -n 'payload JSONB NOT NULL' "$snapshot_migration" >/dev/null
 if rg -n -i 's3|gcs|blob[_ -]?store|object[_ -]?store' "$snapshot_migration" "$snapshot_repository"; then
   echo "snapshot persistence must remain PostgreSQL-only"
+  exit 1
+fi
+
+if rg -n 'time\.Sleep\(' "$root/internal/scraper/scheduler.go"; then
+  echo "scheduler run loop must use context-aware timers, not time.Sleep"
   exit 1
 fi
 

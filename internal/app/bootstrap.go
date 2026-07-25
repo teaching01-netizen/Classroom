@@ -117,6 +117,12 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 
 	snapshotRepository := db.NewSnapshotRepository(dbPool)
 	snapshotRuntimeEnabled := cfg.Scraper.Enabled || cfg.Scraper.SnapshotReadsEnabled
+	if snapshotRuntimeEnabled {
+		warnIfSnapshotPoolUndersized(
+			dbPool.Config().MaxConns,
+			cfg.Scraper.BaselineConcurrency,
+		)
+	}
 	var scheduler *scraper.Scheduler
 	var snapshotProvider *service.SnapshotProvider
 	persistentWorkers := make([]service.ManagedWorker, 0, 1)
@@ -173,6 +179,7 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 				TickLimit:           cfg.Scraper.TickLimit,
 				PollInterval:        5 * time.Second,
 				RefreshPollInterval: 100 * time.Millisecond,
+				RefreshPollMax:      500 * time.Millisecond,
 				SnapshotRetention:   cfg.Scraper.SnapshotRetention,
 				RunRetention:        cfg.Scraper.RunRetention,
 				PruneBatchSize:      1000,
@@ -272,6 +279,32 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 		DBPool:   dbPool,
 		EventHub: eventHub,
 	}, nil
+}
+
+func snapshotPoolMinimum(maxScrapeConcurrency int) int32 {
+	if maxScrapeConcurrency < 1 {
+		maxScrapeConcurrency = 1
+	}
+	// Reserve eight connections for API traffic, LISTEN, health checks, and
+	// short operational bursts, in addition to the maximum scrape workers.
+	return int32(8 + maxScrapeConcurrency)
+}
+
+func warnIfSnapshotPoolUndersized(maxConnections int32, maxScrapeConcurrency int) bool {
+	minimum := snapshotPoolMinimum(maxScrapeConcurrency)
+	if maxConnections >= minimum {
+		return false
+	}
+	slog.Warn(
+		"snapshot_database_pool_below_recommended_minimum",
+		"configured_max_connections",
+		maxConnections,
+		"recommended_minimum",
+		minimum,
+		"scrape_concurrency",
+		maxScrapeConcurrency,
+	)
+	return true
 }
 
 func rootSnapshotSeeds(host string, now time.Time) []domain.TargetSeed {

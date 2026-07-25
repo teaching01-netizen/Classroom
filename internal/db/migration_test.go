@@ -101,15 +101,27 @@ func TestMigration009CreatesSnapshotCoordinationSchema(t *testing.T) {
 		)`, schema).Scan(&currentSnapshotConstraint))
 	require.True(t, currentSnapshotConstraint)
 
-	var dueIndex bool
-	require.NoError(t, database.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM pg_indexes
-			WHERE schemaname = $1
-			  AND indexname = 'idx_scrape_targets_due'
-		)`, schema).Scan(&dueIndex))
-	require.True(t, dueIndex)
+	for _, indexName := range []string{
+		"idx_scrape_targets_due",
+		"idx_scrape_targets_lease_expiry",
+		"idx_scrape_targets_parent",
+		"idx_scrape_runs_target_finished",
+		"idx_scrape_runs_finished",
+		"idx_scrape_snapshots_target_fetched",
+		"idx_scrape_snapshots_target_hash",
+		"idx_scrape_snapshots_run_unique",
+		"idx_scrape_host_permits_host_expiry",
+	} {
+		var exists bool
+		require.NoError(t, database.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_indexes
+				WHERE schemaname = $1
+				  AND indexname = $2
+			)`, schema, indexName).Scan(&exists))
+		require.Truef(t, exists, "migration 009 index %s must exist", indexName)
+	}
 
 	require.NoError(t, migrator.Steps(-1))
 	for _, relation := range []string{

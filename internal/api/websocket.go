@@ -17,6 +17,21 @@ import (
 
 var wsConnCount atomic.Int64
 
+func acquireWebSocketSlot(maximum int64) bool {
+	if maximum <= 0 {
+		return false
+	}
+	for {
+		current := wsConnCount.Load()
+		if current >= maximum {
+			return false
+		}
+		if wsConnCount.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
 func wsHandler(rm *service.RoomManager, maxConns int64, activityRecorder service.ActivityRecorder) http.HandlerFunc {
 	var hub *service.EventHub
 	if rm != nil {
@@ -33,11 +48,10 @@ func wsHandlerWithSnapshots(
 	activityRecorder service.ActivityRecorder,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if wsConnCount.Load() >= maxConns {
+		if !acquireWebSocketSlot(maxConns) {
 			http.Error(w, "too many WebSocket connections", http.StatusServiceUnavailable)
 			return
 		}
-		wsConnCount.Add(1)
 		defer wsConnCount.Add(-1)
 
 		conn, err := websocket.Accept(w, r, nil)

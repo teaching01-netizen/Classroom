@@ -1,8 +1,10 @@
 package service
 
 import (
+	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"qr-command-center/internal/metrics"
 )
@@ -35,11 +37,16 @@ type EventHub struct {
 	publishCh       chan AppEvent
 	operations      chan any
 	done            chan struct{}
+	stopped         chan struct{}
 	closeOnce       sync.Once
 	closed          atomic.Bool
 	dropped         atomic.Uint64
+	lastDropWarning atomic.Int64
 	subscriberDepth int
+	clock           func() time.Time
 }
+
+const eventHubDropWarningInterval = time.Minute
 
 func NewEventHub(publishDepth, subscriberDepth int) *EventHub {
 	if publishDepth <= 0 {
@@ -52,13 +59,16 @@ func NewEventHub(publishDepth, subscriberDepth int) *EventHub {
 		publishCh:       make(chan AppEvent, publishDepth),
 		operations:      make(chan any),
 		done:            make(chan struct{}),
+		stopped:         make(chan struct{}),
 		subscriberDepth: subscriberDepth,
+		clock:           time.Now,
 	}
 	go hub.run()
 	return hub
 }
 
 func (h *EventHub) run() {
+	defer close(h.stopped)
 	subscribers := make(map[uint64]chan AppEvent)
 	var nextID uint64
 	for {
@@ -68,10 +78,7 @@ func (h *EventHub) run() {
 				select {
 				case subscriber <- event:
 				default:
-					h.dropped.Add(1)
-					if event.Type == "SnapshotCommitted" {
-						metrics.WarwickSnapshotWebsocketDropsTotal.Inc()
-					}
+					h.recordDrop(event, "subscriber")
 				}
 			}
 		case operation := <-h.operations:
@@ -151,11 +158,44 @@ func (h *EventHub) Publish(event AppEvent) bool {
 	case h.publishCh <- event:
 		return true
 	default:
-		h.dropped.Add(1)
-		if event.Type == "SnapshotCommitted" {
-			metrics.WarwickSnapshotWebsocketDropsTotal.Inc()
-		}
+		h.recordDrop(event, "ingress")
 		return false
+	}
+}
+
+func (h *EventHub) recordDrop(event AppEvent, queue string) {
+	total := h.dropped.Add(1)
+	if event.Type == "SnapshotCommitted" {
+		metrics.WarwickSnapshotWebsocketDropsTotal.Inc()
+	}
+	now := h.clock().UnixNano()
+	for {
+		last := h.lastDropWarning.Load()
+		if last != 0 &&
+			time.Duration(now-last) < eventHubDropWarningInterval {
+			return
+		}
+		if h.lastDropWarning.CompareAndSwap(last, now) {
+			slog.Warn(
+				"event_hub_events_dropped",
+				"event_class", eventHubEventClass(event.Type),
+				"queue", queue,
+				"dropped_total", total,
+			)
+			return
+		}
+	}
+}
+
+func eventHubEventClass(eventType string) string {
+	switch eventType {
+	case "SnapshotCommitted", "SnapshotStateSync":
+		return "snapshot"
+	case "RoomCreated", "RoomUpdated", "RoomDeleted", "FullStateSync",
+		"CHECKIN_UPDATED", "SESSION_STATS_UPDATED":
+		return "room"
+	default:
+		return "application"
 	}
 }
 
@@ -173,5 +213,6 @@ func (h *EventHub) Close() {
 	h.closeOnce.Do(func() {
 		h.closed.Store(true)
 		close(h.done)
+		<-h.stopped
 	})
 }

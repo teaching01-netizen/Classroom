@@ -97,8 +97,15 @@ func (s *SnapshotSource) withSampledHTTPTrace(
 	var dnsStarted time.Time
 	var connectStarted time.Time
 	var tlsStarted time.Time
+	var getConnStarted time.Time
+	var requestWrittenAt time.Time
 	var timingMu sync.Mutex
 	trace := &httptrace.ClientTrace{
+		GetConn: func(string) {
+			timingMu.Lock()
+			getConnStarted = time.Now()
+			timingMu.Unlock()
+		},
 		DNSStart: func(httptrace.DNSStartInfo) {
 			timingMu.Lock()
 			dnsStarted = time.Now()
@@ -151,6 +158,16 @@ func (s *SnapshotSource) withSampledHTTPTrace(
 			}
 		},
 		GotConn: func(info httptrace.GotConnInfo) {
+			timingMu.Lock()
+			waitStarted := getConnStarted
+			timingMu.Unlock()
+			if !waitStarted.IsZero() {
+				slog.Debug(
+					"warwick_scrape_httptrace_pool_wait",
+					"kind", kind,
+					"duration", time.Since(waitStarted),
+				)
+			}
 			slog.Debug(
 				"warwick_scrape_httptrace_connection",
 				"kind", kind,
@@ -158,11 +175,22 @@ func (s *SnapshotSource) withSampledHTTPTrace(
 				"was_idle", info.WasIdle,
 			)
 		},
+		WroteRequest: func(httptrace.WroteRequestInfo) {
+			timingMu.Lock()
+			requestWrittenAt = time.Now()
+			timingMu.Unlock()
+		},
 		GotFirstResponseByte: func() {
+			timingMu.Lock()
+			writtenAt := requestWrittenAt
+			timingMu.Unlock()
+			if writtenAt.IsZero() {
+				writtenAt = startedAt
+			}
 			slog.Debug(
-				"warwick_scrape_httptrace_first_byte",
+				"warwick_scrape_httptrace_ttfb",
 				"kind", kind,
-				"duration", time.Since(startedAt),
+				"duration", time.Since(writtenAt),
 			)
 		},
 	}
@@ -303,6 +331,14 @@ func (s *SnapshotSource) fetchCatalog(
 	if err != nil {
 		return result, err
 	}
+	if err := validateCompleteDataTable(
+		"ClassAttendanceSearch",
+		response.RecordsTotal,
+		response.RecordsFiltered,
+		len(response.Data),
+	); err != nil {
+		return result, err
+	}
 	courses := make([]domain.CourseSummary, 0, len(response.Data))
 	for _, row := range response.Data {
 		courseID := fmt.Sprintf("%v", row.ID)
@@ -372,6 +408,14 @@ func (s *SnapshotSource) fetchCourse(
 	if err != nil {
 		return result, err
 	}
+	if err := validateCompleteDataTable(
+		"ClassAttendanceDetailSearch",
+		response.RecordsTotal,
+		response.RecordsFiltered,
+		len(response.Data),
+	); err != nil {
+		return result, err
+	}
 	var attributes struct {
 		CourseName string `json:"course_name"`
 	}
@@ -435,6 +479,14 @@ func (s *SnapshotSource) fetchSession(
 	if err != nil {
 		return result, err
 	}
+	if err := validateCompleteDataTable(
+		"ClassAttendanceStudentCheckInSearch",
+		response.RecordsTotal,
+		response.RecordsFiltered,
+		len(response.Data),
+	); err != nil {
+		return result, err
+	}
 	students := make([]domain.StudentCheckin, 0, len(response.Data))
 	checkedIn := 0
 	for _, row := range response.Data {
@@ -469,8 +521,8 @@ func (s *SnapshotSource) fetchProfiles(
 	profiles := make([]domain.StudentProfile, 0)
 	var totalBytes int64
 	var firstMetadata ResponseMetadata
-	total := 1
-	for start := 0; start < total; start += profilePageSize {
+	total := -1
+	for start := 0; total < 0 || start < total; start += profilePageSize {
 		request := DefaultDataTablesRequest([]string{"StudentID", "StudentGuid", "FullName", "School"})
 		request.Start = start
 		request.Length = profilePageSize
@@ -494,10 +546,26 @@ func (s *SnapshotSource) fetchProfiles(
 		if err != nil {
 			return SnapshotFetchResult{Metadata: metadata, BytesRead: totalBytes}, err
 		}
-		total = response.RecordsTotal
-		if total < 0 || total > maxProfileRecords {
+		if response.RecordsTotal < 0 ||
+			response.RecordsFiltered < 0 ||
+			response.RecordsFiltered > response.RecordsTotal ||
+			response.RecordsFiltered > maxProfileRecords {
 			return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes},
 				domain.NewInvalidPayloadError("UserGroupSearch record count outside supported range")
+		}
+		if total < 0 {
+			total = response.RecordsFiltered
+		} else if response.RecordsFiltered != total {
+			return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes},
+				domain.NewInvalidPayloadError("UserGroupSearch record count changed during pagination")
+		}
+		expectedRows := total - start
+		if expectedRows > profilePageSize {
+			expectedRows = profilePageSize
+		}
+		if expectedRows < 0 || len(response.Data) != expectedRows {
+			return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes},
+				domain.NewInvalidPayloadError("UserGroupSearch returned an incomplete page")
 		}
 		for _, row := range response.Data {
 			profiles = append(profiles, domain.StudentProfile{
@@ -507,13 +575,30 @@ func (s *SnapshotSource) fetchProfiles(
 				School:      row.School,
 			})
 		}
-		if len(response.Data) == 0 {
-			break
-		}
 	}
 	return SnapshotFetchResult{
 		Value: profiles, Metadata: firstMetadata, BytesRead: totalBytes,
 	}, nil
+}
+
+func validateCompleteDataTable(
+	endpoint string,
+	recordsTotal int,
+	recordsFiltered int,
+	rows int,
+) error {
+	if recordsTotal < 0 ||
+		recordsFiltered < 0 ||
+		recordsFiltered > recordsTotal ||
+		rows != recordsFiltered {
+		return domain.NewInvalidPayloadError(
+			fmt.Sprintf(
+				"%s returned an incomplete or inconsistent collection",
+				endpoint,
+			),
+		)
+	}
+	return nil
 }
 
 func (s *SnapshotSource) requestJSON(

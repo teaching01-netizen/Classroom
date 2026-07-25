@@ -4,13 +4,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
@@ -213,6 +216,163 @@ func TestSnapshotRepositoryClaimsAreFenced(t *testing.T) {
 	require.ErrorIs(t, err, domain.ErrLeaseLost)
 }
 
+func TestSnapshotRepositoryIndependentWorkersCannotDoubleClaimAndClaimsAreOrdered(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	only := catalogSeed(now)
+	only.Ref.ResourceKey = "single"
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{only}))
+
+	secondConfig := repo.pool.Config().Copy()
+	secondPool, err := pgxpool.NewWithConfig(ctx, secondConfig)
+	require.NoError(t, err)
+	t.Cleanup(secondPool.Close)
+	secondRepo := NewSnapshotRepository(secondPool)
+
+	start := make(chan struct{})
+	results := make(chan []domain.ScrapeTarget, 2)
+	errorsCh := make(chan error, 2)
+	var workers sync.WaitGroup
+	for index, repository := range []*SnapshotRepository{repo, secondRepo} {
+		index := index
+		repository := repository
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			claimed, claimErr := repository.ClaimDue(ctx, ClaimRequest{
+				Now:           now,
+				Limit:         1,
+				WorkerID:      fmt.Sprintf("independent-worker-%d", index),
+				LeaseDuration: 2 * time.Minute,
+			})
+			results <- claimed
+			errorsCh <- claimErr
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	close(errorsCh)
+
+	totalClaimed := 0
+	for claimErr := range errorsCh {
+		require.NoError(t, claimErr)
+	}
+	for claimed := range results {
+		totalClaimed += len(claimed)
+	}
+	require.Equal(t, 1, totalClaimed,
+		"independent PostgreSQL clients must not claim one target twice")
+	_, err = repo.pool.Exec(ctx, `
+		UPDATE scrape_targets SET enabled=FALSE
+		WHERE host=$1 AND kind=$2 AND parent_key=$3 AND resource_key=$4`,
+		only.Ref.Host, only.Ref.Kind, only.Ref.ParentKey, only.Ref.ResourceKey,
+	)
+	require.NoError(t, err)
+
+	orderSeeds := make([]domain.TargetSeed, 3)
+	for index, offset := range []time.Duration{3 * time.Minute, time.Minute, 2 * time.Minute} {
+		orderSeeds[index] = catalogSeed(now.Add(offset))
+		orderSeeds[index].Ref.ResourceKey = fmt.Sprintf("ordered-%d", index)
+	}
+	require.NoError(t, repo.Seed(ctx, orderSeeds))
+	ordered, err := repo.ClaimDue(ctx, ClaimRequest{
+		Now:           now.Add(4 * time.Minute),
+		Limit:         3,
+		WorkerID:      "ordering-worker",
+		LeaseDuration: 2 * time.Minute,
+	})
+	require.NoError(t, err)
+	require.Len(t, ordered, 3)
+	require.Equal(t, []string{"ordered-1", "ordered-2", "ordered-0"}, []string{
+		ordered[0].Ref.ResourceKey,
+		ordered[1].Ref.ResourceKey,
+		ordered[2].Ref.ResourceKey,
+	})
+}
+
+func TestSnapshotRepositoryFenceUsesGenerationAndAllowsExpiredUnreclaimedCommit(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	expired := catalogSeed(now)
+	expired.Ref.ResourceKey = "expired-unreclaimed"
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{expired}))
+	expiredClaim, err := repo.ClaimOne(ctx, ClaimOneRequest{
+		Ref: expired.Ref, Now: now, WorkerID: "same-worker",
+		LeaseDuration: time.Minute,
+	})
+	require.NoError(t, err)
+	_, err = repo.pool.Exec(ctx, `
+		UPDATE scrape_targets
+		SET lease_expires_at=$2
+		WHERE id=$1`,
+		expiredClaim.ID,
+		now.Add(-time.Second),
+	)
+	require.NoError(t, err)
+	_, err = repo.Commit(ctx, changedCommit(
+		expiredClaim,
+		"same-worker",
+		now.Add(time.Second),
+		json.RawMessage(`{"state":"accepted"}`),
+	))
+	require.NoError(t, err,
+		"an expired but unreclaimed matching generation remains authoritative")
+
+	reclaimed := catalogSeed(now)
+	reclaimed.Ref.ResourceKey = "same-worker-reclaimed"
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{reclaimed}))
+	oldClaim, err := repo.ClaimOne(ctx, ClaimOneRequest{
+		Ref: reclaimed.Ref, Now: now, WorkerID: "same-worker",
+		LeaseDuration: time.Minute,
+	})
+	require.NoError(t, err)
+	newClaim, err := repo.ClaimOne(ctx, ClaimOneRequest{
+		Ref: reclaimed.Ref, Now: now.Add(2 * time.Minute), WorkerID: "same-worker",
+		LeaseDuration: time.Minute,
+	})
+	require.NoError(t, err)
+	require.Greater(t, newClaim.LeaseGeneration, oldClaim.LeaseGeneration)
+	_, err = repo.Commit(ctx, changedCommit(
+		oldClaim,
+		"same-worker",
+		now.Add(2*time.Minute),
+		json.RawMessage(`{"state":"stale"}`),
+	))
+	require.ErrorIs(t, err, domain.ErrLeaseLost,
+		"worker identity must not bypass generation fencing")
+}
+
+func TestSnapshotRepositoryCommitVerifiesLeaseOwnerForDiagnostics(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	seed.Ref.ResourceKey = "owner-diagnostic"
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+	target, err := repo.ClaimOne(ctx, ClaimOneRequest{
+		Ref: seed.Ref, Now: now, WorkerID: "actual-worker",
+		LeaseDuration: time.Minute,
+	})
+	require.NoError(t, err)
+
+	_, err = repo.Commit(ctx, changedCommit(
+		target,
+		"different-worker",
+		now,
+		json.RawMessage(`{"state":"wrong-owner"}`),
+	))
+	require.ErrorIs(t, err, domain.ErrLeaseLost)
+	require.ErrorContains(t, err, "owner mismatch")
+
+	stored, err := repo.Target(ctx, seed.Ref)
+	require.NoError(t, err)
+	require.Equal(t, target.LeaseGeneration, stored.LeaseGeneration)
+	require.Equal(t, "actual-worker", stored.LeaseOwner)
+	require.Equal(t, int64(0), stored.CurrentVersion)
+}
+
 func TestSnapshotRepositoryCommitLifecycleAndIdempotency(t *testing.T) {
 	repo, ctx := newSnapshotRepositoryTest(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -285,6 +445,177 @@ func TestSnapshotRepositoryCommitLifecycleAndIdempotency(t *testing.T) {
 	require.Equal(t, now.Add(2*time.Minute), current.ValidatedAt)
 }
 
+func TestSnapshotRepositoryAtoBtoACreatesThreeHistoricalVersions(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	seed.Ref.ResourceKey = "a-to-b-to-a"
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+	payloads := []json.RawMessage{
+		json.RawMessage(`{"state":"a"}`),
+		json.RawMessage(`{"state":"b"}`),
+		json.RawMessage(`{"state":"a"}`),
+	}
+	for index, payload := range payloads {
+		at := now.Add(time.Duration(index) * time.Minute)
+		require.NoError(t, repo.SetDueNow(ctx, seed.Ref, at))
+		target, err := repo.ClaimOne(ctx, ClaimOneRequest{
+			Ref: seed.Ref, Now: at, WorkerID: "history-worker",
+			LeaseDuration: 2 * time.Minute,
+		})
+		require.NoError(t, err)
+		_, err = repo.Commit(ctx, changedCommit(target, "history-worker", at, payload))
+		require.NoError(t, err)
+	}
+	current, err := repo.Current(ctx, seed.Ref)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), current.Version)
+	require.JSONEq(t, string(payloads[2]), string(current.Payload))
+
+	rows, err := repo.pool.Query(ctx, `
+		SELECT version, content_hash
+		FROM scrape_snapshots
+		WHERE target_id=$1
+		ORDER BY version`,
+		current.TargetID,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+	var hashes [][]byte
+	for rows.Next() {
+		var version int64
+		var hash []byte
+		require.NoError(t, rows.Scan(&version, &hash))
+		require.Equal(t, int64(len(hashes)+1), version)
+		hashes = append(hashes, append([]byte(nil), hash...))
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, hashes, 3)
+	require.Equal(t, hashes[0], hashes[2])
+	require.NotEqual(t, hashes[0], hashes[1])
+}
+
+func TestSnapshotRepositoryHostPausePreventsClaimsUntilResume(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	seed.Ref.ResourceKey = "paused"
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+	resumeAt := now.Add(15 * time.Minute)
+	_, err := repo.pool.Exec(ctx, `
+		UPDATE scrape_host_state
+		SET paused_until=$2
+		WHERE host=$1`,
+		testSnapshotHost,
+		resumeAt,
+	)
+	require.NoError(t, err)
+
+	paused, err := repo.ClaimDue(ctx, ClaimRequest{
+		Now: now, Limit: 1, WorkerID: "paused-worker",
+		LeaseDuration: time.Minute,
+	})
+	require.NoError(t, err)
+	require.Empty(t, paused)
+
+	resumed, err := repo.ClaimDue(ctx, ClaimRequest{
+		Now: resumeAt, Limit: 1, WorkerID: "resumed-worker",
+		LeaseDuration: time.Minute,
+	})
+	require.NoError(t, err)
+	require.Len(t, resumed, 1)
+	require.Equal(t, seed.Ref, resumed[0].Ref)
+}
+
+func TestSnapshotRepositoryClaimOneReportsHostPause(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	seed.Ref.ResourceKey = "paused-one"
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+	_, err := repo.pool.Exec(ctx, `
+		UPDATE scrape_host_state
+		SET paused_until=$2
+		WHERE host=$1`,
+		testSnapshotHost,
+		now.Add(15*time.Minute),
+	)
+	require.NoError(t, err)
+
+	_, err = repo.ClaimOne(ctx, ClaimOneRequest{
+		Ref: seed.Ref, Now: now, WorkerID: "paused-worker",
+		LeaseDuration: time.Minute,
+	})
+	require.ErrorIs(t, err, domain.ErrHostPaused)
+}
+
+func TestSnapshotRepositoryAmbiguousCommitRetryDoesNotDuplicateVersionOrNotification(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	seed.Ref.ResourceKey = fmt.Sprintf("ambiguous-%d", now.UnixNano())
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+	target, err := repo.ClaimOne(ctx, ClaimOneRequest{
+		Ref: seed.Ref, Now: now, WorkerID: "ambiguous-worker",
+		LeaseDuration: 2 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	listener, err := pgx.Connect(ctx, repo.pool.Config().ConnString())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = listener.Close(closeCtx)
+	})
+	_, err = listener.Exec(ctx, `LISTEN snapshot_committed`)
+	require.NoError(t, err)
+
+	input := changedCommit(
+		target,
+		"ambiguous-worker",
+		now,
+		json.RawMessage(`{"state":"committed"}`),
+	)
+	first, err := repo.Commit(ctx, input)
+	require.NoError(t, err)
+	require.NotNil(t, first.Snapshot)
+	notificationCtx, cancelNotification := context.WithTimeout(ctx, time.Second)
+	notification, err := listener.WaitForNotification(notificationCtx)
+	cancelNotification()
+	require.NoError(t, err)
+	require.Contains(t, notification.Payload, seed.Ref.ResourceKey)
+
+	retried, err := repo.Commit(ctx, input)
+	require.NoError(t, err)
+	require.Equal(t, first.RunID, retried.RunID)
+	require.Equal(t, first.Snapshot.ID, retried.Snapshot.ID)
+
+	var runCount, snapshotCount int
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM scrape_runs WHERE target_id=$1`,
+		target.ID,
+	).Scan(&runCount))
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM scrape_snapshots WHERE target_id=$1`,
+		target.ID,
+	).Scan(&snapshotCount))
+	require.Equal(t, 1, runCount)
+	require.Equal(t, 1, snapshotCount)
+
+	noDuplicateCtx, cancelNoDuplicate := context.WithTimeout(ctx, 150*time.Millisecond)
+	defer cancelNoDuplicate()
+	for {
+		duplicate, waitErr := listener.WaitForNotification(noDuplicateCtx)
+		if errors.Is(waitErr, context.DeadlineExceeded) {
+			break
+		}
+		require.NoError(t, waitErr)
+		require.NotContains(t, duplicate.Payload, seed.Ref.ResourceKey,
+			"an idempotent retry must not publish a second notification")
+	}
+}
+
 func TestSnapshotRepositoryFailedCommitRetainsLastGood(t *testing.T) {
 	repo, ctx := newSnapshotRepositoryTest(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -298,7 +629,8 @@ func TestSnapshotRepositoryFailedCommitRetainsLastGood(t *testing.T) {
 		Ref: target.Ref, Now: now.Add(time.Minute), WorkerID: "worker", LeaseDuration: 2 * time.Minute,
 	})
 	require.NoError(t, err)
-	message := strings.Repeat("é", 600) + " ASP.NET_SessionId=fixture"
+	message := "Authorization: Bearer auth-secret; Password=password-secret; " +
+		"ASP.NET_SessionId=session-secret; " + strings.Repeat("é", 600)
 	_, err = repo.Commit(ctx, CommitInput{
 		TargetID:            failing.ID,
 		WorkerID:            "worker",
@@ -326,7 +658,13 @@ func TestSnapshotRepositoryFailedCommitRetainsLastGood(t *testing.T) {
 		WHERE target_id = $1 ORDER BY id DESC LIMIT 1`, target.ID).Scan(&stored))
 	require.LessOrEqual(t, utf8.RuneCountInString(stored), 512)
 	require.True(t, utf8.ValidString(stored))
-	require.NotContains(t, stored, "ASP.NET_SessionId")
+	for _, secret := range []string{
+		"auth-secret",
+		"password-secret",
+		"session-secret",
+	} {
+		require.NotContains(t, stored, secret)
+	}
 }
 
 func TestSnapshotRepositoryFailedFirstCommitStoresEmptyChangeHistory(t *testing.T) {
@@ -390,6 +728,90 @@ func TestSnapshotRepositoryFullIdentityAndDiscoveryRetirement(t *testing.T) {
 	require.Zero(t, countB, "a catalog parent must not retire unrelated session children")
 }
 
+func TestSnapshotRepositoryDiscoveryUsesEarliestScheduleAndTwoOmissionRetirement(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	parentRef := domain.TargetRef{
+		Host: testSnapshotHost, Kind: domain.SnapshotCourseDetail,
+		ResourceKey: "retirement-course",
+	}
+	child := domain.TargetSeed{
+		Ref: domain.TargetRef{
+			Host: testSnapshotHost, Kind: domain.SnapshotSessionDetail,
+			ParentKey: parentRef.ResourceKey, ResourceKey: "retirement-session",
+		},
+		Attributes:      json.RawMessage(`{"session_status":"active"}`),
+		InitialInterval: 5 * time.Minute,
+		MinInterval:     time.Minute,
+		MaxInterval:     30 * time.Minute,
+		MaxServeAge:     2 * time.Hour,
+		NextRunAt:       now.Add(time.Hour),
+	}
+	parent := catalogSeed(now)
+	parent.Ref = parentRef
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{parent, child}))
+
+	later := child
+	later.NextRunAt = now.Add(2 * time.Hour)
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{later}))
+	storedChild, err := repo.Target(ctx, child.Ref)
+	require.NoError(t, err)
+	require.Equal(t, child.NextRunAt, storedChild.NextRunAt,
+		"discovery upsert must retain the earlier due time")
+
+	commitParent := func(at time.Time, state string) {
+		require.NoError(t, repo.SetDueNow(ctx, parentRef, at))
+		target, claimErr := repo.ClaimOne(ctx, ClaimOneRequest{
+			Ref: parentRef, Now: at, WorkerID: "retirement-worker",
+			LeaseDuration: 2 * time.Minute,
+		})
+		require.NoError(t, claimErr)
+		input := changedCommit(
+			target,
+			"retirement-worker",
+			at,
+			json.RawMessage(fmt.Sprintf(`{"state":%q}`, state)),
+		)
+		input.SeenChildRefs = nil
+		_, commitErr := repo.Commit(ctx, input)
+		require.NoError(t, commitErr)
+	}
+
+	commitParent(now, "first-omission")
+	storedChild, err = repo.Target(ctx, child.Ref)
+	require.NoError(t, err)
+	require.Equal(t, 1, storedChild.MissingCount)
+	var enabled bool
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT enabled FROM scrape_targets WHERE id=$1`,
+		storedChild.ID,
+	).Scan(&enabled))
+	require.True(t, enabled)
+
+	commitParent(now.Add(time.Minute), "second-omission")
+	storedChild, err = repo.Target(ctx, child.Ref)
+	require.NoError(t, err)
+	require.Equal(t, 2, storedChild.MissingCount)
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT enabled FROM scrape_targets WHERE id=$1`,
+		storedChild.ID,
+	).Scan(&enabled))
+	require.False(t, enabled)
+
+	reappeared := child
+	reappeared.NextRunAt = now.Add(3 * time.Hour)
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{reappeared}))
+	storedChild, err = repo.Target(ctx, child.Ref)
+	require.NoError(t, err)
+	require.Zero(t, storedChild.MissingCount)
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT enabled FROM scrape_targets WHERE id=$1`,
+		storedChild.ID,
+	).Scan(&enabled))
+	require.True(t, enabled)
+	require.Equal(t, child.NextRunAt, storedChild.NextRunAt)
+}
+
 func TestSnapshotRepositoryCurrentNotFoundBeforeSuccess(t *testing.T) {
 	repo, ctx := newSnapshotRepositoryTest(t)
 	now := time.Now().UTC()
@@ -405,7 +827,7 @@ func TestSnapshotRepositoryPruneKeepsCurrentAndLatestThree(t *testing.T) {
 	seed := catalogSeed(now)
 	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
 
-	for version := 1; version <= 5; version++ {
+	for version := 1; version <= 7; version++ {
 		at := now.Add(time.Duration(version) * time.Minute)
 		require.NoError(t, repo.SetDueNow(ctx, seed.Ref, at))
 		target, err := repo.ClaimOne(ctx, ClaimOneRequest{
@@ -423,7 +845,8 @@ func TestSnapshotRepositoryPruneKeepsCurrentAndLatestThree(t *testing.T) {
 		RunRetention: 30 * 24 * time.Hour, BatchSize: 2,
 	})
 	require.NoError(t, err)
-	require.Equal(t, 2, result.SnapshotsDeleted)
+	require.Equal(t, 4, result.SnapshotsDeleted,
+		"pruning must repeat across more than one non-empty batch")
 
 	var versions []int64
 	rows, err := repo.pool.Query(ctx, `SELECT version FROM scrape_snapshots ORDER BY version`)
@@ -434,5 +857,5 @@ func TestSnapshotRepositoryPruneKeepsCurrentAndLatestThree(t *testing.T) {
 		require.NoError(t, rows.Scan(&version))
 		versions = append(versions, version)
 	}
-	require.Equal(t, []int64{3, 4, 5}, versions)
+	require.Equal(t, []int64{5, 6, 7}, versions)
 }

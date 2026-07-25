@@ -1,12 +1,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/stretchr/testify/require"
 
 	"qr-command-center/internal/db"
@@ -106,4 +109,38 @@ func TestScraperStatusReturnsAggregatesOnly(t *testing.T) {
 	} {
 		require.NotContains(t, recorder.Body.String(), prohibited)
 	}
+}
+
+func TestInternalScraperQueryIsRemovedBeforeRequestLogging(t *testing.T) {
+	const fixtureToken = "fixture-trigger-token-must-not-be-logged"
+	var logs bytes.Buffer
+	requestLogger := chimiddleware.RequestLogger(
+		&chimiddleware.DefaultLogFormatter{
+			Logger:  log.New(&logs, "", 0),
+			NoColor: true,
+		},
+	)
+	var observedQuery string
+	handler := redactInternalQueryBeforeLogging(
+		requestLogger(http.HandlerFunc(func(
+			w http.ResponseWriter,
+			request *http.Request,
+		) {
+			observedQuery = request.URL.RawQuery
+			w.WriteHeader(http.StatusUnauthorized)
+		})),
+	)
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/internal/scraper/status?token="+fixtureToken,
+		nil,
+	)
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	require.Empty(t, observedQuery)
+	require.NotContains(t, logs.String(), fixtureToken)
+	require.NotContains(t, logs.String(), "token=")
+	require.Contains(t, logs.String(), "/api/internal/scraper/status")
 }

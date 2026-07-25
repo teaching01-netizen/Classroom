@@ -72,3 +72,33 @@ func TestStartBackgroundRuntime_ServerlessStartsPersistentListenerOnly(t *testin
 	}
 	require.False(t, listener.IsRunning())
 }
+
+func TestStartBackgroundRuntimeRepeatedStartStopLeavesNoWorkersRunning(t *testing.T) {
+	for iteration := range 25 {
+		persistent := &runtimeWorker{}
+		alwaysOn := &runtimeWorker{}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := StartBackgroundRuntime(ctx, false, BackgroundRuntime{
+			Persistent: []service.ManagedWorker{persistent},
+			AlwaysOn:   []service.ManagedWorker{alwaysOn},
+		})
+		require.Eventuallyf(
+			t,
+			func() bool {
+				return persistent.IsRunning() && alwaysOn.IsRunning()
+			},
+			time.Second,
+			time.Millisecond,
+			"workers did not start on iteration %d",
+			iteration,
+		)
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("workers leaked on iteration %d", iteration)
+		}
+		require.False(t, persistent.IsRunning())
+		require.False(t, alwaysOn.IsRunning())
+	}
+}

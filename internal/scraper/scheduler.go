@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -47,10 +48,12 @@ type SchedulerConfig struct {
 	TickLimit           int
 	PollInterval        time.Duration
 	RefreshPollInterval time.Duration
+	RefreshPollMax      time.Duration
 	SnapshotRetention   time.Duration
 	RunRetention        time.Duration
 	PruneBatchSize      int
 	Clock               func() time.Time
+	Random              *rand.Rand
 	Wait                func(context.Context, time.Duration) error
 }
 
@@ -66,11 +69,14 @@ type Scheduler struct {
 	tickLimit           int
 	pollInterval        time.Duration
 	refreshPollInterval time.Duration
+	refreshPollMax      time.Duration
 	snapshotRetention   time.Duration
 	runRetention        time.Duration
 	pruneBatchSize      int
 	clock               func() time.Time
 	wait                func(context.Context, time.Duration) error
+	randomMu            sync.Mutex
+	random              *rand.Rand
 	maintenanceMu       sync.Mutex
 	lastMaintenanceDay  string
 }
@@ -102,8 +108,17 @@ func NewScheduler(
 	if config.PollInterval <= 0 || config.RefreshPollInterval <= 0 {
 		panic("Scheduler: poll intervals must be positive")
 	}
+	if config.RefreshPollMax == 0 {
+		config.RefreshPollMax = 500 * time.Millisecond
+	}
+	if config.RefreshPollMax < config.RefreshPollInterval {
+		panic("Scheduler: refresh poll maximum must not be shorter than its minimum")
+	}
 	if config.Clock == nil {
 		config.Clock = time.Now
+	}
+	if config.Random == nil {
+		config.Random = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
 	if config.Wait == nil {
 		config.Wait = waitWithTimer
@@ -123,11 +138,13 @@ func NewScheduler(
 		tickLimit:           config.TickLimit,
 		pollInterval:        config.PollInterval,
 		refreshPollInterval: config.RefreshPollInterval,
+		refreshPollMax:      config.RefreshPollMax,
 		snapshotRetention:   config.SnapshotRetention,
 		runRetention:        config.RunRetention,
 		pruneBatchSize:      config.PruneBatchSize,
 		clock:               config.Clock,
 		wait:                config.Wait,
+		random:              config.Random,
 	}
 }
 
@@ -361,7 +378,7 @@ func (s *Scheduler) RefreshNow(ctx context.Context, ref domain.TargetRef) error 
 	metrics.WarwickScrapeClaimConflictsTotal.Inc()
 
 	for {
-		if err := s.wait(ctx, s.refreshPollInterval); err != nil {
+		if err := s.wait(ctx, s.refreshPollDelay()); err != nil {
 			return err
 		}
 		current, readErr := s.repository.Target(ctx, ref)
@@ -371,7 +388,52 @@ func (s *Scheduler) RefreshNow(ctx context.Context, ref domain.TargetRef) error 
 		if current.ValidationSeq > baseline.ValidationSeq {
 			return nil
 		}
+		if current.ConsecutiveFailures > baseline.ConsecutiveFailures {
+			return fmt.Errorf(
+				"%w: coalesced attempt for %s ended without validation",
+				domain.ErrSnapshotRefreshFailed,
+				ref.IdentityKey(),
+			)
+		}
+		now := s.clock().UTC()
+		if current.LeaseExpiresAt != nil && current.LeaseExpiresAt.After(now) {
+			continue
+		}
+		target, claimErr := s.repository.ClaimOne(ctx, db.ClaimOneRequest{
+			Ref:           ref,
+			Now:           now,
+			WorkerID:      s.workerID,
+			LeaseDuration: s.leaseDuration,
+		})
+		if errors.Is(claimErr, domain.ErrTargetLeased) {
+			continue
+		}
+		if claimErr != nil {
+			return claimErr
+		}
+		attempted, result, runErr := s.executeClaimed(ctx, target)
+		if runErr != nil {
+			return runErr
+		}
+		if !attempted || !result.Succeeded {
+			return fmt.Errorf(
+				"snapshot refresh %s finished with outcome %s",
+				ref.IdentityKey(),
+				result.Outcome,
+			)
+		}
+		return nil
 	}
+}
+
+func (s *Scheduler) refreshPollDelay() time.Duration {
+	if s.refreshPollMax == s.refreshPollInterval {
+		return s.refreshPollInterval
+	}
+	s.randomMu.Lock()
+	defer s.randomMu.Unlock()
+	span := s.refreshPollMax - s.refreshPollInterval
+	return s.refreshPollInterval + time.Duration(s.random.Int63n(int64(span)+1))
 }
 
 func seedForRef(ref domain.TargetRef, now time.Time) domain.TargetSeed {
@@ -394,12 +456,10 @@ func (s *Scheduler) runDailyMaintenance(ctx context.Context) {
 	now := s.clock().UTC()
 	day := now.Format("2006-01-02")
 	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
 	if s.lastMaintenanceDay == day {
-		s.maintenanceMu.Unlock()
 		return
 	}
-	s.lastMaintenanceDay = day
-	s.maintenanceMu.Unlock()
 	if _, err := s.repository.Prune(ctx, db.PruneRequest{
 		Now:               now,
 		SnapshotRetention: s.snapshotRetention,
@@ -407,6 +467,10 @@ func (s *Scheduler) runDailyMaintenance(ctx context.Context) {
 		BatchSize:         s.pruneBatchSize,
 	}); err != nil && ctx.Err() == nil {
 		slog.Warn("snapshot_maintenance_failed", "error", err)
+		return
+	}
+	if ctx.Err() == nil {
+		s.lastMaintenanceDay = day
 	}
 }
 

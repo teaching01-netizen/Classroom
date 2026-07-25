@@ -1,11 +1,16 @@
 package warwick
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +19,22 @@ import (
 
 	"qr-command-center/internal/domain"
 )
+
+type snapshotRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn snapshotRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+type trackingResponseBody struct {
+	io.Reader
+	closed atomic.Bool
+}
+
+func (body *trackingResponseBody) Close() error {
+	body.closed.Store(true)
+	return nil
+}
 
 func snapshotTestClient(server *httptest.Server, bodyLimit int64) *SnapshotSource {
 	auth := NewWarwickAuth("teacher@example.com", "password", server.URL+"/admin/")
@@ -94,6 +115,64 @@ func TestSnapshotSourceParsesTypedCatalogAndMetadata(t *testing.T) {
 	require.Equal(t, "course-1", courses[0].CourseID)
 	require.Equal(t, `"v1"`, result.Metadata.ETag)
 	require.Positive(t, result.BytesRead)
+}
+
+func TestSnapshotSourceSampledTraceRecordsPoolWaitTTFBAndReuseState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		_ *http.Request,
+	) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(
+			`{"recordsTotal":0,"recordsFiltered":0,"data":[]}`,
+		))
+	}))
+	defer server.Close()
+	source := snapshotTestClient(server, 1<<20)
+	source.SetHTTPTraceSampleRate(1)
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(
+		&logs,
+		&slog.HandlerOptions{Level: slog.LevelDebug},
+	)))
+	defer slog.SetDefault(previousLogger)
+
+	_, err := source.Fetch(context.Background(), catalogTarget())
+
+	require.NoError(t, err)
+	require.Contains(t, logs.String(), "warwick_scrape_httptrace_pool_wait")
+	require.Contains(t, logs.String(), "warwick_scrape_httptrace_connection")
+	require.Contains(t, logs.String(), "warwick_scrape_httptrace_ttfb")
+	require.Contains(t, logs.String(), "kind=course_catalog")
+}
+
+func TestSnapshotSourceRejectsIncompleteSingleResponseRepresentation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `"unsafe-partial"`)
+		_, _ = w.Write([]byte(`{
+			"draw":1,
+			"recordsTotal":501,
+			"recordsFiltered":501,
+			"data":[{
+				"ID":"course-1",
+				"CourseName":"Only the first row",
+				"Cycle":"",
+				"Enrolled":1,
+				"StartDate":"2026-07-01T00:00:00",
+				"EndDate":"2026-08-01T00:00:00"
+			}]
+		}`))
+	}))
+	defer server.Close()
+	source := snapshotTestClient(server, 1<<20)
+
+	_, err := source.Fetch(context.Background(), catalogTarget())
+	var fetchErr *domain.FetchError
+	require.ErrorAs(t, err, &fetchErr)
+	require.Equal(t, domain.ErrKindInvalidPayload, fetchErr.Kind)
+	require.NotContains(t, err.Error(), "Only the first row")
 }
 
 func TestSnapshotSourceParsesRetryAfterAndDoesNotRetryGenericFailure(t *testing.T) {
@@ -190,6 +269,80 @@ func TestSnapshotSourceProfilesRemainUnconditional(t *testing.T) {
 	require.Empty(t, result.Metadata.ETag)
 }
 
+func TestSnapshotSourceProfilesRequireCompleteConsistentPagination(t *testing.T) {
+	t.Run("complete two-page aggregate", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, r.ParseForm())
+			require.Empty(t, r.Header.Get("If-None-Match"))
+			start := r.Form.Get("start")
+			count := profilePageSize
+			if start == "500" {
+				count = 1
+			}
+			rows := make([]UserGroupRow, count)
+			for index := range rows {
+				rows[index] = UserGroupRow{
+					StudentID:   start + "-" + string(rune('a'+index%26)),
+					StudentGuid: start + "-guid-" + string(rune('a'+index%26)),
+					FullName:    "Student",
+					School:      "School",
+				}
+			}
+			calls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			require.NoError(t, json.NewEncoder(w).Encode(UserGroupSearchResponse{
+				Draw:            1,
+				RecordsTotal:    501,
+				RecordsFiltered: 501,
+				Data:            rows,
+			}))
+		}))
+		defer server.Close()
+		source := snapshotTestClient(server, 1<<20)
+		target := domain.ScrapeTarget{
+			ID: 1,
+			Ref: domain.TargetRef{
+				Host:        "warwick.humantix.cloud",
+				Kind:        domain.SnapshotStudentProfiles,
+				ResourceKey: "profiles",
+			},
+		}
+
+		result, err := source.Fetch(context.Background(), target)
+		require.NoError(t, err)
+		require.Len(t, result.Value.([]domain.StudentProfile), 501)
+		require.Equal(t, int32(2), calls.Load())
+	})
+
+	t.Run("short non-final page", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"draw":1,
+				"recordsTotal":501,
+				"recordsFiltered":501,
+				"data":[{"StudentID":"one","StudentGuid":"one","FullName":"One","School":"W"}]
+			}`))
+		}))
+		defer server.Close()
+		source := snapshotTestClient(server, 1<<20)
+		target := domain.ScrapeTarget{
+			ID: 1,
+			Ref: domain.TargetRef{
+				Host:        "warwick.humantix.cloud",
+				Kind:        domain.SnapshotStudentProfiles,
+				ResourceKey: "profiles",
+			},
+		}
+
+		_, err := source.Fetch(context.Background(), target)
+		var fetchErr *domain.FetchError
+		require.ErrorAs(t, err, &fetchErr)
+		require.Equal(t, domain.ErrKindInvalidPayload, fetchErr.Kind)
+	})
+}
+
 func TestSnapshotSourceRenewsAuthenticationOnce(t *testing.T) {
 	var loginCalls atomic.Int32
 	var fetchCalls atomic.Int32
@@ -216,6 +369,165 @@ func TestSnapshotSourceRenewsAuthenticationOnce(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(1), loginCalls.Load())
 	require.Equal(t, int32(2), fetchCalls.Load())
+}
+
+func TestSnapshotSourceConcurrentAuthRenewalIsCoalescedPerSession(t *testing.T) {
+	var loginCalls atomic.Int32
+	var fetchCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/admin/" {
+			loginCalls.Add(1)
+			http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "fresh-cookie"})
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		fetchCalls.Add(1)
+		cookie, _ := r.Cookie(sessionCookieName)
+		if cookie == nil || cookie.Value != "fresh-cookie" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(
+			`{"draw":1,"recordsTotal":0,"recordsFiltered":0,"data":[]}`,
+		))
+	}))
+	defer server.Close()
+
+	pool, err := NewSessionPool(
+		"teacher@example.com",
+		"password",
+		server.URL+"/admin/",
+		1,
+		1,
+		1,
+		server.Client().Transport.(*http.Transport),
+	)
+	require.NoError(t, err)
+	teacherSession := pool.sessions[1]
+	teacherSession.cookie = "stale-cookie"
+	teacherSession.obtainedAt = time.Now().Add(-2 * time.Hour)
+	teacherSession.expiresAt = time.Now().Add(time.Hour)
+
+	client := NewClassroomClientFromPool(pool, TierTeacher)
+	client.SetBaseURL(server.URL)
+	client.SetTransport(server.Client().Transport)
+	client.SetUserID("user-1")
+	source := NewSnapshotSource(client, 1<<20)
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var callers sync.WaitGroup
+	for range 2 {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			<-start
+			_, fetchErr := source.Fetch(context.Background(), catalogTarget())
+			results <- fetchErr
+		}()
+	}
+	close(start)
+	callers.Wait()
+	close(results)
+	for fetchErr := range results {
+		require.NoError(t, fetchErr)
+	}
+	require.Equal(t, int32(1), loginCalls.Load())
+	require.Equal(t, int32(3), fetchCalls.Load(),
+		"one stale request plus two successful reads are expected")
+}
+
+func TestSnapshotSourceClosesResponseBodiesOnEveryPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+		bodyLimit   int64
+	}{
+		{"not modified", http.StatusNotModified, "", "", 1 << 20},
+		{"authentication", http.StatusUnauthorized, "text/plain", "ignored", 1 << 20},
+		{"upstream error", http.StatusBadGateway, "text/plain", "ignored", 1 << 20},
+		{"content type", http.StatusOK, "text/plain", `{}`, 1 << 20},
+		{"body limit", http.StatusOK, "application/json", strings.Repeat("x", 32), 8},
+		{"decode", http.StatusOK, "application/json", `{`, 1 << 20},
+		{
+			"success",
+			http.StatusOK,
+			"application/json",
+			`{"draw":1,"recordsTotal":0,"recordsFiltered":0,"data":[]}`,
+			1 << 20,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := &trackingResponseBody{Reader: strings.NewReader(test.body)}
+			server := httptest.NewServer(http.NotFoundHandler())
+			defer server.Close()
+			source := snapshotTestClient(server, test.bodyLimit)
+			source.client.SetTransport(snapshotRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				if test.contentType != "" {
+					header.Set("Content-Type", test.contentType)
+				}
+				return &http.Response{
+					StatusCode: test.status,
+					Header:     header,
+					Body:       body,
+				}, nil
+			}))
+
+			_, _ = source.Fetch(context.Background(), catalogTarget())
+			require.True(t, body.closed.Load(), "response body must always close")
+		})
+	}
+}
+
+func TestSnapshotSourceDoesNotRetryNetworkOrStatusFailures(t *testing.T) {
+	t.Run("network", func(t *testing.T) {
+		var calls atomic.Int32
+		server := httptest.NewServer(http.NotFoundHandler())
+		defer server.Close()
+		source := snapshotTestClient(server, 1<<20)
+		source.client.SetTransport(snapshotRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return nil, errors.New("fixture network failure")
+		}))
+
+		_, err := source.Fetch(context.Background(), catalogTarget())
+		require.Error(t, err)
+		require.Equal(t, int32(1), calls.Load())
+	})
+
+	for _, status := range []int{
+		http.StatusRequestTimeout,
+		http.StatusTooEarly,
+		http.StatusTooManyRequests,
+		http.StatusNotFound,
+		http.StatusGone,
+		http.StatusUnprocessableEntity,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			source := snapshotTestClient(server, 1<<20)
+
+			_, err := source.Fetch(context.Background(), catalogTarget())
+			var statusErr *domain.UpstreamStatusError
+			require.ErrorAs(t, err, &statusErr)
+			require.Equal(t, status, statusErr.StatusCode)
+			require.Equal(t, int32(1), calls.Load())
+		})
+	}
 }
 
 func TestSnapshotSourceReturnsTypedServerError(t *testing.T) {

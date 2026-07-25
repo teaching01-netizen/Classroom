@@ -3,6 +3,7 @@ package scraper
 import (
 	"context"
 	"errors"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,18 +16,22 @@ import (
 )
 
 type schedulerRepository struct {
-	mu             sync.Mutex
-	targets        []domain.ScrapeTarget
-	claimLimits    []int
-	releases       []db.ReleaseLeaseRequest
-	reschedules    []time.Time
-	remainingDue   int
-	countDueCalls  int
-	targetReads    []domain.ScrapeTarget
-	claimOneTarget domain.ScrapeTarget
-	claimOneErr    error
-	seeds          [][]domain.TargetSeed
-	prunes         int
+	mu              sync.Mutex
+	targets         []domain.ScrapeTarget
+	claimLimits     []int
+	releases        []db.ReleaseLeaseRequest
+	reschedules     []time.Time
+	remainingDue    int
+	countDueCalls   int
+	targetReads     []domain.ScrapeTarget
+	claimOneTarget  domain.ScrapeTarget
+	claimOneErr     error
+	claimOneTargets []domain.ScrapeTarget
+	claimOneErrors  []error
+	claimOneCalls   int
+	seeds           [][]domain.TargetSeed
+	prunes          int
+	pruneErrors     []error
 }
 
 func (r *schedulerRepository) ClaimDue(_ context.Context, request db.ClaimRequest) ([]domain.ScrapeTarget, error) {
@@ -46,6 +51,22 @@ func (r *schedulerRepository) ClaimDue(_ context.Context, request db.ClaimReques
 }
 
 func (r *schedulerRepository) ClaimOne(context.Context, db.ClaimOneRequest) (domain.ScrapeTarget, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.claimOneCalls++
+	if len(r.claimOneTargets) > 0 || len(r.claimOneErrors) > 0 {
+		var target domain.ScrapeTarget
+		var err error
+		if len(r.claimOneTargets) > 0 {
+			target = r.claimOneTargets[0]
+			r.claimOneTargets = r.claimOneTargets[1:]
+		}
+		if len(r.claimOneErrors) > 0 {
+			err = r.claimOneErrors[0]
+			r.claimOneErrors = r.claimOneErrors[1:]
+		}
+		return target, err
+	}
 	return r.claimOneTarget, r.claimOneErr
 }
 
@@ -96,6 +117,11 @@ func (r *schedulerRepository) Prune(context.Context, db.PruneRequest) (db.PruneR
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.prunes++
+	if len(r.pruneErrors) > 0 {
+		err := r.pruneErrors[0]
+		r.pruneErrors = r.pruneErrors[1:]
+		return db.PruneResult{}, err
+	}
 	return db.PruneResult{}, nil
 }
 
@@ -210,10 +236,12 @@ func newSchedulerTest(
 		TickLimit:           50,
 		PollInterval:        time.Second,
 		RefreshPollInterval: 100 * time.Millisecond,
+		RefreshPollMax:      500 * time.Millisecond,
 		SnapshotRetention:   30 * 24 * time.Hour,
 		RunRetention:        30 * 24 * time.Hour,
 		PruneBatchSize:      1000,
 		Clock:               func() time.Time { return now },
+		Random:              rand.New(rand.NewSource(7)),
 		Wait: func(ctx context.Context, _ time.Duration) error {
 			return ctx.Err()
 		},
@@ -335,6 +363,38 @@ func TestRefreshNowCoalescesOnValidationSequence(t *testing.T) {
 	require.Zero(t, runner.attempts.Load(), "coalesced refresh must not issue duplicate upstream work")
 }
 
+func TestRefreshNowPollJitterIsDeterministicAndBounded(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	newScheduler := func() *Scheduler {
+		return newSchedulerTest(
+			&schedulerRepository{},
+			&schedulerPermitController{},
+			&schedulerRunner{},
+			now,
+		)
+	}
+
+	first := newScheduler()
+	firstDelays := []time.Duration{
+		first.refreshPollDelay(),
+		first.refreshPollDelay(),
+		first.refreshPollDelay(),
+	}
+	second := newScheduler()
+	secondDelays := []time.Duration{
+		second.refreshPollDelay(),
+		second.refreshPollDelay(),
+		second.refreshPollDelay(),
+	}
+
+	require.Equal(t, firstDelays, secondDelays, "injected random source must make tests deterministic")
+	for _, delay := range firstDelays {
+		require.GreaterOrEqual(t, delay, 100*time.Millisecond)
+		require.LessOrEqual(t, delay, 500*time.Millisecond)
+	}
+	require.NotEqual(t, firstDelays[0], firstDelays[1], "polling must be jittered")
+}
+
 func TestRefreshNowExecutesClaimedTargetAndAcceptsUnchanged(t *testing.T) {
 	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
 	target := schedulerTargets(1, now)[0]
@@ -364,4 +424,158 @@ func TestRefreshNowReturnsFailedAttempt(t *testing.T) {
 	err := scheduler.RefreshNow(context.Background(), target.Ref)
 	require.Error(t, err)
 	require.False(t, errors.Is(err, context.Canceled))
+}
+
+func TestRefreshNowCallerTimeoutDoesNotIssueDuplicateWork(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	target := schedulerTargets(1, now)[0]
+	target.ValidationSeq = 4
+	repository := &schedulerRepository{
+		targetReads:    []domain.ScrapeTarget{target, target},
+		claimOneErr:    domain.ErrTargetLeased,
+		claimOneTarget: domain.ScrapeTarget{},
+	}
+	controller := &schedulerPermitController{}
+	runner := &schedulerRunner{}
+	scheduler := newSchedulerTest(repository, controller, runner, now)
+	scheduler.wait = func(ctx context.Context, _ time.Duration) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err := scheduler.RefreshNow(ctx, target.Ref)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Zero(t, runner.attempts.Load(),
+		"a timed-out coalesced caller must not launch duplicate upstream work")
+}
+
+func TestRefreshNowReturnsHostPauseWithoutPolling(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	target := schedulerTargets(1, now)[0]
+	repository := &schedulerRepository{
+		targetReads: []domain.ScrapeTarget{target},
+		claimOneErr: domain.ErrHostPaused,
+	}
+	scheduler := newSchedulerTest(
+		repository,
+		&schedulerPermitController{},
+		&schedulerRunner{},
+		now,
+	)
+	var waits atomic.Int32
+	scheduler.wait = func(context.Context, time.Duration) error {
+		waits.Add(1)
+		return nil
+	}
+
+	err := scheduler.RefreshNow(context.Background(), target.Ref)
+	require.ErrorIs(t, err, domain.ErrHostPaused)
+	require.Zero(t, waits.Load())
+	require.Equal(t, 1, repository.claimOneCalls)
+}
+
+func TestRefreshNowReclaimsAfterContendedLeaseDisappears(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	target := schedulerTargets(1, now)[0]
+	baseline := target
+	baseline.ValidationSeq = 4
+	released := baseline
+	released.LeaseOwner = ""
+	released.LeaseExpiresAt = nil
+	claimed := released
+	claimed.LeaseOwner = "worker"
+	claimed.LeaseGeneration++
+	claimed.LeaseExpiresAt = pointerTime(now.Add(2 * time.Minute))
+	repository := &schedulerRepository{
+		targetReads:     []domain.ScrapeTarget{baseline, released},
+		claimOneTargets: []domain.ScrapeTarget{{}, claimed},
+		claimOneErrors:  []error{domain.ErrTargetLeased, nil},
+	}
+	runner := &schedulerRunner{}
+	scheduler := newSchedulerTest(
+		repository,
+		&schedulerPermitController{},
+		runner,
+		now,
+	)
+	scheduler.wait = func(context.Context, time.Duration) error { return nil }
+
+	require.NoError(t, scheduler.RefreshNow(context.Background(), target.Ref))
+	require.Equal(t, 2, repository.claimOneCalls)
+	require.Equal(t, int32(1), runner.attempts.Load())
+}
+
+func TestRefreshNowReturnsCoalescedTerminalFailureWithoutDuplicateWork(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	target := schedulerTargets(1, now)[0]
+	target.ValidationSeq = 4
+	target.ConsecutiveFailures = 2
+	failed := target
+	failed.LeaseOwner = ""
+	failed.LeaseExpiresAt = nil
+	failed.ConsecutiveFailures = 3
+	failed.NextRunAt = now.Add(4 * time.Minute)
+	repository := &schedulerRepository{
+		targetReads:     []domain.ScrapeTarget{target, failed},
+		claimOneTargets: []domain.ScrapeTarget{{}},
+		claimOneErrors:  []error{domain.ErrTargetLeased},
+	}
+	runner := &schedulerRunner{}
+	scheduler := newSchedulerTest(
+		repository,
+		&schedulerPermitController{},
+		runner,
+		now,
+	)
+	scheduler.wait = func(context.Context, time.Duration) error { return nil }
+
+	err := scheduler.RefreshNow(context.Background(), target.Ref)
+
+	require.ErrorIs(t, err, domain.ErrSnapshotRefreshFailed)
+	require.Equal(t, 1, repository.claimOneCalls)
+	require.Zero(t, runner.attempts.Load(),
+		"a coalesced terminal failure must not amplify upstream work")
+}
+
+func TestSchedulerRunsMaintenanceOncePerUTCDay(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	current := now
+	repository := &schedulerRepository{}
+	scheduler := newSchedulerTest(
+		repository,
+		&schedulerPermitController{},
+		&schedulerRunner{},
+		now,
+	)
+	scheduler.clock = func() time.Time { return current }
+
+	_, err := scheduler.RunDue(context.Background(), 1)
+	require.NoError(t, err)
+	_, err = scheduler.RunDue(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, repository.prunes)
+
+	current = now.Add(24 * time.Hour)
+	_, err = scheduler.RunDue(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, 2, repository.prunes)
+}
+
+func TestSchedulerRetriesFailedMaintenanceOnSameUTCDay(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	repository := &schedulerRepository{pruneErrors: []error{errors.New("temporary prune failure")}}
+	scheduler := newSchedulerTest(
+		repository,
+		&schedulerPermitController{},
+		&schedulerRunner{},
+		now,
+	)
+
+	_, err := scheduler.RunDue(context.Background(), 1)
+	require.NoError(t, err)
+	_, err = scheduler.RunDue(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, 2, repository.prunes)
 }
