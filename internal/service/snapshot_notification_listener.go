@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -40,6 +41,8 @@ type SnapshotNotificationListener struct {
 	wait        notificationWaiter
 	versions    map[string]int64
 	initialized bool
+	ready       chan struct{}
+	readyOnce   sync.Once
 }
 
 func NewSnapshotNotificationListener(
@@ -87,7 +90,12 @@ func newSnapshotNotificationListener(
 		clock:    clock,
 		wait:     wait,
 		versions: make(map[string]int64),
+		ready:    make(chan struct{}),
 	}
+}
+
+func (l *SnapshotNotificationListener) Ready() <-chan struct{} {
+	return l.ready
 }
 
 func (l *SnapshotNotificationListener) Run(ctx context.Context) error {
@@ -161,6 +169,7 @@ func (l *SnapshotNotificationListener) reconcile(ctx context.Context) error {
 		l.observe(item, l.initialized)
 	}
 	l.initialized = true
+	l.readyOnce.Do(func() { close(l.ready) })
 	return nil
 }
 

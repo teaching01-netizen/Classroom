@@ -105,6 +105,11 @@ func TestSnapshotNotificationListenerReconnectRepairsMissedVersion(t *testing.T)
 	done := make(chan error, 1)
 	go func() { done <- listener.Run(ctx) }()
 
+	select {
+	case <-listener.Ready():
+	case <-time.After(time.Second):
+		t.Fatal("listener did not report initial reconciliation readiness")
+	}
 	event, ok := receiveEvent(t, events)
 	require.True(t, ok)
 	require.Equal(t, "SnapshotCommitted", event.Type)

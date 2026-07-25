@@ -340,9 +340,9 @@ func (r *SnapshotRepository) ClaimDue(ctx context.Context, request ClaimRequest)
 			FROM scrape_targets AS target
 			JOIN scrape_host_state AS host_state ON host_state.host = target.host
 			WHERE target.enabled = TRUE
-			  AND target.next_run_at <= $1
-			  AND (target.lease_expires_at IS NULL OR target.lease_expires_at <= $1)
-			  AND (host_state.paused_until IS NULL OR host_state.paused_until <= $1)
+			  AND target.next_run_at <= $1::timestamptz
+			  AND (target.lease_expires_at IS NULL OR target.lease_expires_at <= $1::timestamptz)
+			  AND (host_state.paused_until IS NULL OR host_state.paused_until <= $1::timestamptz)
 			ORDER BY target.next_run_at, target.id
 			FOR UPDATE OF target SKIP LOCKED
 			LIMIT $2
@@ -350,9 +350,9 @@ func (r *SnapshotRepository) ClaimDue(ctx context.Context, request ClaimRequest)
 		UPDATE scrape_targets AS target
 		SET lease_owner = $3,
 			lease_generation = target.lease_generation + 1,
-			lease_expires_at = $1 + make_interval(secs => $4),
-			last_attempt_at = $1,
-			updated_at = $1
+			lease_expires_at = $1::timestamptz + make_interval(secs => $4),
+			last_attempt_at = $1::timestamptz,
+			updated_at = $1::timestamptz
 		FROM due
 		WHERE target.id = due.id
 		RETURNING `+targetReturningColumns,
@@ -396,16 +396,16 @@ func (r *SnapshotRepository) ClaimOne(ctx context.Context, request ClaimOneReque
 			  AND target.parent_key = $3
 			  AND target.resource_key = $4
 			  AND target.enabled = TRUE
-			  AND (target.lease_expires_at IS NULL OR target.lease_expires_at <= $5)
-			  AND (host_state.paused_until IS NULL OR host_state.paused_until <= $5)
+			  AND (target.lease_expires_at IS NULL OR target.lease_expires_at <= $5::timestamptz)
+			  AND (host_state.paused_until IS NULL OR host_state.paused_until <= $5::timestamptz)
 			FOR UPDATE OF target SKIP LOCKED
 		)
 		UPDATE scrape_targets AS target
 		SET lease_owner = $6,
 			lease_generation = target.lease_generation + 1,
-			lease_expires_at = $5 + make_interval(secs => $7),
-			last_attempt_at = $5,
-			updated_at = $5
+			lease_expires_at = $5::timestamptz + make_interval(secs => $7),
+			last_attempt_at = $5::timestamptz,
+			updated_at = $5::timestamptz
 		FROM selected
 		WHERE target.id = selected.id
 		RETURNING `+targetReturningColumns,
@@ -451,6 +451,7 @@ func scanScrapeTarget(row pgx.Row) (domain.ScrapeTarget, error) {
 	var maxServeAge int64
 	var etag *string
 	var lastModified *string
+	var leaseOwner *string
 	err := row.Scan(
 		&target.ID,
 		&target.Ref.Host,
@@ -473,12 +474,15 @@ func scanScrapeTarget(row pgx.Row) (domain.ScrapeTarget, error) {
 		&target.RecentChanges,
 		&etag,
 		&lastModified,
-		&target.LeaseOwner,
+		&leaseOwner,
 		&target.LeaseGeneration,
 		&target.LeaseExpiresAt,
 	)
 	if err != nil {
 		return domain.ScrapeTarget{}, err
+	}
+	if leaseOwner != nil {
+		target.LeaseOwner = *leaseOwner
 	}
 	target.Ref.Kind = domain.SnapshotKind(kind)
 	target.Attributes = append(json.RawMessage(nil), attributes...)
@@ -925,7 +929,8 @@ func nullIfEmpty(value string) any {
 }
 
 func trimBoolHistory(history []bool) []bool {
-	copied := append([]bool(nil), history...)
+	copied := make([]bool, len(history))
+	copy(copied, history)
 	if len(copied) > 10 {
 		copied = copied[len(copied)-10:]
 	}
@@ -1669,7 +1674,7 @@ func (r *SnapshotRepository) ObserveHost(ctx context.Context, observation domain
 			UPDATE scrape_host_state
 			SET current_requests_per_second=$2,
 				current_concurrency=1,
-				available_tokens=LEAST($3, burst),
+				available_tokens=LEAST($3::numeric, burst::numeric),
 				tokens_updated_at=$4,
 				consecutive_429s=consecutive_429s+1,
 				last_429_at=$4,
@@ -1687,7 +1692,7 @@ func (r *SnapshotRepository) ObserveHost(ctx context.Context, observation domain
 		pausedUntil := observation.ObservedAt.Add(15 * time.Minute)
 		_, err = tx.Exec(ctx, `
 			UPDATE scrape_host_state
-			SET available_tokens=LEAST($2, burst),
+			SET available_tokens=LEAST($2::numeric, burst::numeric),
 				tokens_updated_at=$3,
 				healthy_streak=0,
 				paused_until=$4,
@@ -1721,7 +1726,7 @@ func (r *SnapshotRepository) ObserveHost(ctx context.Context, observation domain
 			UPDATE scrape_host_state
 			SET current_requests_per_second=$2,
 				current_concurrency=$3,
-				available_tokens=LEAST($4, burst),
+				available_tokens=LEAST($4::numeric, burst::numeric),
 				tokens_updated_at=$5,
 				consecutive_429s=0,
 				healthy_streak=$6,
@@ -1739,7 +1744,7 @@ func (r *SnapshotRepository) ObserveHost(ctx context.Context, observation domain
 	default:
 		_, err = tx.Exec(ctx, `
 			UPDATE scrape_host_state
-			SET available_tokens=LEAST($2, burst),
+			SET available_tokens=LEAST($2::numeric, burst::numeric),
 				tokens_updated_at=$3,
 				healthy_streak=0,
 				updated_at=$3

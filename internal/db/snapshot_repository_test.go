@@ -113,6 +113,47 @@ func TestSnapshotRepositoryScraperStatusReturnsAggregates(t *testing.T) {
 	require.Empty(t, active.OldestValidationAgeSeconds)
 }
 
+func TestSnapshotRepositoryTargetReadsNullableLeaseOwner(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	seed := catalogSeed(now)
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+
+	target, err := repo.Target(ctx, seed.Ref)
+
+	require.NoError(t, err)
+	require.Empty(t, target.LeaseOwner)
+	require.Nil(t, target.LeaseExpiresAt)
+}
+
+func TestSnapshotRepositoryObserveHostPersistsFractionalTokens(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	seed := catalogSeed(now)
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+	target := claimOneTestTarget(t, ctx, repo, now, "fractional-worker")
+	decision, err := repo.AcquireHostPermit(ctx, AcquireHostPermitRequest{
+		Host:            testSnapshotHost,
+		TargetID:        target.ID,
+		WorkerID:        "fractional-worker",
+		LeaseGeneration: target.LeaseGeneration,
+		Now:             now,
+		TTL:             time.Minute,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, decision.Permit)
+	require.NoError(t, repo.ReleaseHostPermit(ctx, decision.Permit.ID))
+
+	require.NoError(t, repo.ObserveHost(ctx, domain.HostObservation{
+		Host:       testSnapshotHost,
+		Outcome:    "changed",
+		ObservedAt: now.Add(100 * time.Millisecond),
+	}))
+	state, err := repo.HostState(ctx, testSnapshotHost)
+	require.NoError(t, err)
+	require.InDelta(t, 0.1, state.AvailableTokens, 0.001)
+}
+
 func claimOneTestTarget(t *testing.T, ctx context.Context, repo *SnapshotRepository, now time.Time, worker string) domain.ScrapeTarget {
 	t.Helper()
 	targets, err := repo.ClaimDue(ctx, ClaimRequest{
@@ -284,6 +325,33 @@ func TestSnapshotRepositoryFailedCommitRetainsLastGood(t *testing.T) {
 	require.LessOrEqual(t, utf8.RuneCountInString(stored), 512)
 	require.True(t, utf8.ValidString(stored))
 	require.NotContains(t, stored, "ASP.NET_SessionId")
+}
+
+func TestSnapshotRepositoryFailedFirstCommitStoresEmptyChangeHistory(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{catalogSeed(now)}))
+	target := claimOneTestTarget(t, ctx, repo, now, "worker")
+
+	_, err := repo.Commit(ctx, CommitInput{
+		TargetID:            target.ID,
+		WorkerID:            "worker",
+		LeaseGeneration:     target.LeaseGeneration,
+		Outcome:             "transient_error",
+		StartedAt:           now,
+		FinishedAt:          now.Add(time.Second),
+		ErrorKind:           "timeout",
+		ErrorMessage:        "request timed out",
+		NextRunAt:           now.Add(time.Minute),
+		CurrentInterval:     time.Hour,
+		ConsecutiveFailures: 1,
+	})
+
+	require.NoError(t, err)
+	stored, err := repo.Target(ctx, target.Ref)
+	require.NoError(t, err)
+	require.Empty(t, stored.RecentChanges)
+	require.Equal(t, 1, stored.ConsecutiveFailures)
 }
 
 func TestSnapshotRepositoryFullIdentityAndDiscoveryRetirement(t *testing.T) {
