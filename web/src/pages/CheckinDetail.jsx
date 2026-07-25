@@ -173,8 +173,9 @@ export function CheckinDetail() {
   const totalCount = students.length;
 
   const handleExportCSV = () => {
-    const headers = ['Name', 'Nickname', 'School', 'Status', 'Points'];
+    const headers = ['WCode', 'Name', 'Nickname', 'School', 'Status', 'Points'];
     const rows = students.map((s) => [
+      s.student_id,
       s.name,
       s.nickname,
       s.school,
