@@ -301,6 +301,53 @@ func TestTeacherServiceSnapshotReportMarksOverdueInputsStale(t *testing.T) {
 	require.True(t, report.Stale)
 }
 
+func TestTeacherServiceSnapshotReportBoundsFreshnessQueryFailure(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	reader := &snapshotReaderFake{
+		snapshots:  map[string]domain.Snapshot{},
+		errors:     map[string]error{},
+		overdueErr: errors.New("database details must not escape"),
+	}
+	provider := NewSnapshotProvider(
+		reader,
+		&snapshotRefresherFake{},
+		"warwick.humantix.cloud",
+		func() time.Time { return now },
+	)
+	courseRef := provider.CourseRef("course-1")
+	profilesRef := provider.ProfilesRef()
+	reader.snapshots[courseRef.IdentityKey()] = providerSnapshot(
+		courseRef,
+		domain.CourseDetail{
+			CourseSummary: domain.CourseSummary{CourseID: "course-1", Name: "Course"},
+			Sessions:      []domain.SessionSummary{},
+		},
+		now,
+		now.Add(time.Hour),
+	)
+	reader.snapshots[profilesRef.IdentityKey()] = providerSnapshot(
+		profilesRef,
+		[]domain.StudentProfile{},
+		now,
+		now.Add(time.Hour),
+	)
+	svc := NewTeacherServiceWithDependencies(
+		provider,
+		provider,
+		snapshotCheckinWriterFake{},
+		&snapshotRefresherFake{},
+		2,
+		true,
+	)
+
+	report, err := svc.GetAttendanceReport(context.Background(), "course-1", 4, "")
+
+	require.NoError(t, err)
+	require.True(t, report.Truncated)
+	require.Len(t, report.Errors, 1)
+	require.Equal(t, "snapshot freshness unavailable", report.Errors[0].Reason)
+}
+
 func TestTeacherServiceLiveRollbackAllowsRequestLevelLiveSource(t *testing.T) {
 	provider := newMockProvider()
 	svc := NewTeacherService(provider, provider, 2)

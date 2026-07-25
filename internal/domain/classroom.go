@@ -99,9 +99,10 @@ type ToggleCheckinRequest struct {
 }
 
 type ToggleCheckinResponse struct {
-	StudentID string `json:"student_id"`
-	CheckedIn bool   `json:"checked_in"`
-	NewCount  int    `json:"new_count"`
+	StudentID              string `json:"student_id"`
+	CheckedIn              bool   `json:"checked_in"`
+	NewCount               int    `json:"new_count"`
+	SnapshotRefreshPending bool   `json:"snapshot_refresh_pending"`
 }
 
 // SessionCell represents a single session's attendance status for one student

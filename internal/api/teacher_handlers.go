@@ -134,7 +134,8 @@ func toggleCheckinHandler(ts *service.TeacherService) http.HandlerFunc {
 			return
 		}
 
-		if err := ts.ToggleCheckin(r.Context(), courseID, sessionID, req.StudentID, req.Checked); err != nil {
+		response, err := ts.ToggleCheckin(r.Context(), courseID, sessionID, req.StudentID, req.Checked)
+		if err != nil {
 			if mapServiceError(w, err) {
 				return
 			}
@@ -142,11 +143,7 @@ func toggleCheckinHandler(ts *service.TeacherService) http.HandlerFunc {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, successResponse(domain.ToggleCheckinResponse{
-			StudentID: req.StudentID,
-			CheckedIn: req.Checked,
-			NewCount:  0,
-		}))
+		writeJSON(w, http.StatusOK, successResponse(response))
 
 	}
 }

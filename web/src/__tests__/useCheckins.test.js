@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { useSessionStore } from '../store/useSessionStore';
+import { useCheckins } from '../hooks/useCheckins';
 
 beforeEach(() => {
   useSessionStore.setState({
@@ -124,6 +126,55 @@ describe('useCheckins - toggleCheckin', () => {
     const { students } = useSessionStore.getState();
     expect(students[0].checked_in).toBe(true);
     expect(students[1].checked_in).toBe(false);
+  });
+
+  it('keeps optimistic state and reconciles when the snapshot refresh is pending', async () => {
+    let sessionReads = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
+      if (options.method === 'POST') {
+        return {
+          json: async () => ({
+            success: true,
+            data: {
+              student_id: '1',
+              checked_in: true,
+              snapshot_refresh_pending: true,
+            },
+          }),
+        };
+      }
+      if (String(url).endsWith('/sessions/s1')) {
+        sessionReads += 1;
+        return {
+          json: async () => ({
+            success: true,
+            data: {
+              students: [{
+                student_id: '1',
+                name: 'Alice',
+                checked_in: sessionReads > 1,
+              }],
+            },
+          }),
+        };
+      }
+      return { json: async () => ({ success: true, data: {} }) };
+    }));
+
+    const { result, unmount } = renderHook(() => useCheckins('c1', 's1'));
+    await waitFor(() => {
+      expect(result.current.students).toHaveLength(1);
+    });
+
+    await act(async () => {
+      await result.current.toggleCheckin('1', true);
+    });
+
+    await waitFor(() => {
+      expect(sessionReads).toBeGreaterThanOrEqual(2);
+      expect(result.current.students[0].checked_in).toBe(true);
+    });
+    unmount();
   });
 });
 

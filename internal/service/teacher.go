@@ -212,9 +212,65 @@ func (s *TeacherService) GetSessionDetail(ctx context.Context, courseID, session
 	return &SessionDetailResult{Detail: res.detail, Profiles: profRes.profiles}, nil
 }
 
-// ToggleCheckin toggles a student's check-in status for a session.
-func (s *TeacherService) ToggleCheckin(ctx context.Context, courseID, sessionID, studentID string, checked bool) error {
-	return s.checkins.ToggleCheckin(ctx, courseID, sessionID, studentID, checked)
+// ToggleCheckin writes to Warwick first, then reconciles the session snapshot.
+// A successful Warwick mutation remains successful when reconciliation is
+// delayed; SnapshotRefreshPending tells clients to keep their repair polling.
+func (s *TeacherService) ToggleCheckin(
+	ctx context.Context,
+	courseID string,
+	sessionID string,
+	studentID string,
+	checked bool,
+) (*domain.ToggleCheckinResponse, error) {
+	if err := s.checkins.ToggleCheckin(ctx, courseID, sessionID, studentID, checked); err != nil {
+		return nil, err
+	}
+
+	response := &domain.ToggleCheckinResponse{
+		StudentID: studentID,
+		CheckedIn: checked,
+	}
+	if !s.snapshotMode {
+		return response, nil
+	}
+
+	snapshots, ok := s.reader.(snapshotAwareReader)
+	if !ok {
+		response.SnapshotRefreshPending = true
+		return response, nil
+	}
+	ref := snapshots.SessionRef(courseID, sessionID)
+	pending := s.refresher.SetDueNow(ctx, ref) != nil
+
+	refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	refreshErr := s.refresher.RefreshNow(refreshCtx, ref)
+	cancel()
+	if refreshErr != nil {
+		pending = true
+	} else {
+		detail, err := s.reader.GetSessionDetail(ctx, courseID, sessionID)
+		if err != nil || detail == nil {
+			pending = true
+		} else {
+			response.NewCount = detail.CheckedInCount
+			reflected := false
+			for _, student := range detail.Students {
+				if student.StudentID == studentID {
+					reflected = student.CheckedIn == checked
+					break
+				}
+			}
+			pending = pending || !reflected
+		}
+	}
+
+	if pending {
+		// SetDueNow is idempotent and leaves the target available for a worker
+		// or the next explicit coalesced refresh. Never patch snapshot JSON.
+		_ = s.refresher.SetDueNow(ctx, ref)
+	}
+	response.SnapshotRefreshPending = pending
+	return response, nil
 }
 
 // GetAttendanceReport computes an attendance report from live session data.
@@ -298,7 +354,15 @@ func (s *TeacherService) markReportStale(
 		refs = append(refs, snapshots.SessionRef(courseID, session.SessionID))
 	}
 	overdue, err := snapshots.AnyOverdue(ctx, refs)
-	report.Stale = overdue || err != nil
+	if err != nil {
+		report.Stale = true
+		report.Truncated = true
+		report.Errors = append(report.Errors, domain.ReportError{
+			Reason: "snapshot freshness unavailable",
+		})
+		return
+	}
+	report.Stale = overdue
 }
 
 func (s *TeacherService) snapshotMetadata(

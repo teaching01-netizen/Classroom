@@ -1,0 +1,177 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"qr-command-center/internal/domain"
+)
+
+type checkinWriterFake struct {
+	err   error
+	calls int
+}
+
+func (w *checkinWriterFake) ToggleCheckin(
+	context.Context,
+	string,
+	string,
+	string,
+	bool,
+) error {
+	w.calls++
+	return w.err
+}
+
+func checkinSnapshotProvider(
+	t *testing.T,
+	now time.Time,
+	checked bool,
+	refresher *snapshotRefresherFake,
+) (*SnapshotProvider, *snapshotReaderFake) {
+	t.Helper()
+	reader := &snapshotReaderFake{
+		snapshots: map[string]domain.Snapshot{},
+		errors:    map[string]error{},
+	}
+	provider := NewSnapshotProvider(
+		reader,
+		refresher,
+		"warwick.humantix.cloud",
+		func() time.Time { return now },
+	)
+	sessionRef := provider.SessionRef("course-1", "session-1")
+	reader.snapshots[sessionRef.IdentityKey()] = providerSnapshot(
+		sessionRef,
+		domain.SessionDetail{
+			SessionSummary: domain.SessionSummary{
+				SessionID:      "session-1",
+				CheckedInCount: 1,
+			},
+			Students: []domain.StudentCheckin{{
+				StudentID: "student-1",
+				CheckedIn: checked,
+			}},
+		},
+		now,
+		now.Add(time.Hour),
+	)
+	return provider, reader
+}
+
+func TestToggleCheckinWarwickFailureDoesNotScheduleSnapshotWork(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	refresher := &snapshotRefresherFake{}
+	provider, _ := checkinSnapshotProvider(t, now, false, refresher)
+	writerErr := errors.New("Warwick rejected write")
+	writer := &checkinWriterFake{err: writerErr}
+	service := NewTeacherServiceWithDependencies(provider, provider, writer, refresher, 2, true)
+
+	response, err := service.ToggleCheckin(
+		context.Background(),
+		"course-1",
+		"session-1",
+		"student-1",
+		true,
+	)
+
+	require.ErrorIs(t, err, writerErr)
+	require.Nil(t, response)
+	require.Empty(t, refresher.due)
+	require.Empty(t, refresher.refreshes)
+}
+
+func TestToggleCheckinReconciledSnapshotIsNotPending(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	refresher := &snapshotRefresherFake{}
+	provider, _ := checkinSnapshotProvider(t, now, true, refresher)
+	writer := &checkinWriterFake{}
+	service := NewTeacherServiceWithDependencies(provider, provider, writer, refresher, 2, true)
+
+	response, err := service.ToggleCheckin(
+		context.Background(),
+		"course-1",
+		"session-1",
+		"student-1",
+		true,
+	)
+
+	require.NoError(t, err)
+	require.False(t, response.SnapshotRefreshPending)
+	require.Equal(t, 1, response.NewCount)
+	require.Len(t, refresher.due, 1)
+	require.Len(t, refresher.refreshes, 1)
+}
+
+func TestToggleCheckinOldValidatedStateRemainsPendingAndSchedulesFollowup(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	refresher := &snapshotRefresherFake{}
+	provider, _ := checkinSnapshotProvider(t, now, false, refresher)
+	service := NewTeacherServiceWithDependencies(
+		provider,
+		provider,
+		&checkinWriterFake{},
+		refresher,
+		2,
+		true,
+	)
+
+	response, err := service.ToggleCheckin(
+		context.Background(),
+		"course-1",
+		"session-1",
+		"student-1",
+		true,
+	)
+
+	require.NoError(t, err)
+	require.True(t, response.SnapshotRefreshPending)
+	require.Len(t, refresher.refreshes, 1)
+	require.Len(t, refresher.due, 2)
+}
+
+func TestToggleCheckinRefreshFailureReturnsWriteSuccessPending(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	refresher := &snapshotRefresherFake{err: errors.New("refresh failed")}
+	provider, _ := checkinSnapshotProvider(t, now, false, refresher)
+	service := NewTeacherServiceWithDependencies(
+		provider,
+		provider,
+		&checkinWriterFake{},
+		refresher,
+		2,
+		true,
+	)
+
+	response, err := service.ToggleCheckin(
+		context.Background(),
+		"course-1",
+		"session-1",
+		"student-1",
+		true,
+	)
+
+	require.NoError(t, err)
+	require.True(t, response.SnapshotRefreshPending)
+	require.Len(t, refresher.due, 2)
+}
+
+func TestToggleCheckinLiveRollbackDoesNotScheduleSnapshotWork(t *testing.T) {
+	provider := newMockProvider()
+	service := NewTeacherService(provider, provider, 2)
+
+	response, err := service.ToggleCheckin(
+		context.Background(),
+		"course-1",
+		"session-1",
+		"student-1",
+		true,
+	)
+
+	require.NoError(t, err)
+	require.False(t, response.SnapshotRefreshPending)
+}

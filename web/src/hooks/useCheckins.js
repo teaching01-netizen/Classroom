@@ -56,6 +56,11 @@ export const useCheckins = (courseId, sessionId) => {
       const result = await response.json();
       if (!result.success) {
         updateStudentCheckin(studentId, !checked);
+      } else if (result.data?.snapshot_refresh_pending) {
+        // The Warwick write succeeded but the committed snapshot has not
+        // converged yet. Reconcile immediately, while the existing 10-second
+        // polling and WebSocket-reconnect repair paths remain active.
+        fetchStudentsNoAbort();
       }
     } catch (err) {
       updateStudentCheckin(studentId, !checked);
