@@ -28,6 +28,8 @@ type RouterOptions struct {
 	WSMaxConns       int64
 	CORSOrigin       string
 	ActivityRecorder service.ActivityRecorder
+	EventHub         *service.EventHub
+	SnapshotMetadata service.SnapshotMetadataStore
 }
 
 // Stop shuts down all rate limiter cleanup goroutines.
@@ -94,8 +96,19 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 		r.Post("/dashboard-views/{id}/use", touchDashboardViewHandler(viewSvc))
 	})
 
-	r.Get("/ws", wsHandler(rm, options.WSMaxConns, options.ActivityRecorder))
-	r.Get("/ws/", wsHandler(rm, options.WSMaxConns, options.ActivityRecorder))
+	eventHub := options.EventHub
+	if eventHub == nil && rm != nil {
+		eventHub = rm.EventHub()
+	}
+	websocketHandler := wsHandlerWithSnapshots(
+		rm,
+		eventHub,
+		options.SnapshotMetadata,
+		options.WSMaxConns,
+		options.ActivityRecorder,
+	)
+	r.Get("/ws", websocketHandler)
+	r.Get("/ws/", websocketHandler)
 
 	r.Handle("/*", spaFallbackHandler())
 

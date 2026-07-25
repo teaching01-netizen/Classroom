@@ -20,10 +20,7 @@ const (
 	minEmitInterval            = 5 * time.Second
 )
 
-type RoomManagerEvent struct {
-	Type string
-	Data interface{}
-}
+type RoomManagerEvent = AppEvent
 
 type RoomState struct {
 	room               domain.Room
@@ -38,60 +35,41 @@ type RoomManager struct {
 	lifecycleMu   sync.Mutex
 	mu            sync.RWMutex
 	rooms         map[string]*RoomState
-	eventCh       chan RoomManagerEvent
+	eventHub      *EventHub
 	qrClient      domain.QrClient
 	repository    db.RoomRepository
 	emitMu        sync.Mutex
 	lastEmittedAt map[string]time.Time // roomID → last emit time (rate limiting)
-
-	subscribers []chan RoomManagerEvent
-	subscribeMu sync.Mutex
 }
 
 func NewRoomManager(qrClient domain.QrClient, repository db.RoomRepository) *RoomManager {
+	return NewRoomManagerWithEventHub(qrClient, repository, NewEventHub(100, 256))
+}
+
+func NewRoomManagerWithEventHub(
+	qrClient domain.QrClient,
+	repository db.RoomRepository,
+	eventHub *EventHub,
+) *RoomManager {
+	if eventHub == nil {
+		panic("RoomManager: event hub must not be nil")
+	}
 	rm := &RoomManager{
 		rooms:         make(map[string]*RoomState),
-		eventCh:       make(chan RoomManagerEvent, 100),
+		eventHub:      eventHub,
 		qrClient:      qrClient,
 		repository:    repository,
 		lastEmittedAt: make(map[string]time.Time),
 	}
-	go rm.fanoutLoop()
 	return rm
 }
 
 func (rm *RoomManager) Subscribe() (<-chan RoomManagerEvent, func()) {
-	ch := make(chan RoomManagerEvent, 256)
-	rm.subscribeMu.Lock()
-	rm.subscribers = append(rm.subscribers, ch)
-	rm.subscribeMu.Unlock()
-	unsub := func() {
-		rm.subscribeMu.Lock()
-		defer rm.subscribeMu.Unlock()
-		for i, c := range rm.subscribers {
-			if c == ch {
-				rm.subscribers = append(rm.subscribers[:i], rm.subscribers[i+1:]...)
-				return
-			}
-		}
-	}
-	return ch, unsub
+	return rm.eventHub.Subscribe()
 }
 
-func (rm *RoomManager) fanoutLoop() {
-	for event := range rm.eventCh {
-		rm.subscribeMu.Lock()
-		subs := make([]chan RoomManagerEvent, len(rm.subscribers))
-		copy(subs, rm.subscribers)
-		rm.subscribeMu.Unlock()
-		for _, ch := range subs {
-			select {
-			case ch <- event:
-			default:
-				slog.Warn("dropping event for slow subscriber")
-			}
-		}
-	}
+func (rm *RoomManager) EventHub() *EventHub {
+	return rm.eventHub
 }
 
 func (rm *RoomManager) LoadRoomsFromDB() error {
@@ -296,9 +274,7 @@ func (rm *RoomManager) emit(event RoomManagerEvent) {
 		}
 	}
 
-	select {
-	case rm.eventCh <- event:
-	default:
+	if !rm.eventHub.Publish(event) {
 		slog.Warn("event channel full, dropping event", "type", event.Type)
 	}
 }
