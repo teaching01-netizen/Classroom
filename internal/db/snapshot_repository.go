@@ -101,6 +101,30 @@ type PruneResult struct {
 	PermitsDeleted   int
 }
 
+type AcquireHostPermitRequest struct {
+	Host            string
+	TargetID        int64
+	WorkerID        string
+	LeaseGeneration int64
+	Now             time.Time
+	TTL             time.Duration
+}
+
+type HostState struct {
+	Host                      string
+	BaselineRequestsPerSecond float64
+	CurrentRequestsPerSecond  float64
+	Burst                     int
+	AvailableTokens           float64
+	TokensUpdatedAt           time.Time
+	BaselineConcurrency       int
+	CurrentConcurrency        int
+	Consecutive429s           int
+	Last429At                 *time.Time
+	HealthyStreak             int
+	PausedUntil               *time.Time
+}
+
 func (r *SnapshotRepository) SeedHost(ctx context.Context, seed HostStateSeed) error {
 	if strings.TrimSpace(seed.Host) == "" {
 		return errors.New("seed host is required")
@@ -1172,6 +1196,419 @@ func (r *SnapshotRepository) CountDue(ctx context.Context, now time.Time) (int, 
 		return 0, fmt.Errorf("count due targets: %w", err)
 	}
 	return count, nil
+}
+
+func (r *SnapshotRepository) AcquireHostPermit(
+	ctx context.Context,
+	request AcquireHostPermitRequest,
+) (domain.PermitDecision, error) {
+	if strings.TrimSpace(request.Host) == "" || strings.TrimSpace(request.WorkerID) == "" {
+		return domain.PermitDecision{}, errors.New("host permit requires host and worker ID")
+	}
+	if request.TargetID <= 0 || request.LeaseGeneration <= 0 || request.Now.IsZero() || request.TTL <= 0 {
+		return domain.PermitDecision{}, errors.New("host permit request is invalid")
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.PermitDecision{}, fmt.Errorf("acquire host permit: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var existing domain.HostPermit
+	err = tx.QueryRow(ctx, `
+		SELECT id, host, target_id, lease_generation, expires_at
+		FROM scrape_host_permits
+		WHERE target_id=$1 AND lease_generation=$2 AND expires_at > $3`,
+		request.TargetID,
+		request.LeaseGeneration,
+		request.Now,
+	).Scan(
+		&existing.ID,
+		&existing.Host,
+		&existing.TargetID,
+		&existing.LeaseGeneration,
+		&existing.ExpiresAt,
+	)
+	if err == nil {
+		existing.ExpiresAt = existing.ExpiresAt.UTC()
+		if err := tx.Commit(ctx); err != nil {
+			return domain.PermitDecision{}, fmt.Errorf("acquire existing host permit: %w", err)
+		}
+		return domain.PermitDecision{Permit: &existing}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return domain.PermitDecision{}, fmt.Errorf("acquire host permit: existing: %w", err)
+	}
+
+	state, err := lockHostState(ctx, tx, request.Host)
+	if err != nil {
+		return domain.PermitDecision{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM scrape_host_permits
+		WHERE host=$1 AND expires_at <= $2`,
+		request.Host,
+		request.Now,
+	); err != nil {
+		return domain.PermitDecision{}, fmt.Errorf("acquire host permit: expire permits: %w", err)
+	}
+
+	var targetHost string
+	var targetGeneration int64
+	err = tx.QueryRow(ctx, `
+		SELECT host, lease_generation
+		FROM scrape_targets
+		WHERE id=$1`,
+		request.TargetID,
+	).Scan(&targetHost, &targetGeneration)
+	if errors.Is(err, pgx.ErrNoRows) || targetHost != request.Host || targetGeneration != request.LeaseGeneration {
+		return domain.PermitDecision{}, domain.ErrLeaseLost
+	}
+	if err != nil {
+		return domain.PermitDecision{}, fmt.Errorf("acquire host permit: target fence: %w", err)
+	}
+
+	if state.PausedUntil != nil && state.PausedUntil.After(request.Now) {
+		decision := domain.PermitDecision{RetryAt: state.PausedUntil.UTC(), Paused: true}
+		if err := tx.Commit(ctx); err != nil {
+			return domain.PermitDecision{}, fmt.Errorf("acquire paused host permit: %w", err)
+		}
+		return decision, nil
+	}
+
+	var active int
+	var earliest *time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*), MIN(expires_at)
+		FROM scrape_host_permits
+		WHERE host=$1 AND expires_at > $2`,
+		request.Host,
+		request.Now,
+	).Scan(&active, &earliest)
+	if err != nil {
+		return domain.PermitDecision{}, fmt.Errorf("acquire host permit: count active: %w", err)
+	}
+
+	refilled := refillTokens(state, request.Now)
+	if active >= state.CurrentConcurrency {
+		if err := persistTokens(ctx, tx, request.Host, refilled, request.Now); err != nil {
+			return domain.PermitDecision{}, err
+		}
+		retryAt := request.Now.Add(request.TTL)
+		if earliest != nil {
+			retryAt = earliest.UTC()
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return domain.PermitDecision{}, fmt.Errorf("acquire concurrency-blocked permit: %w", err)
+		}
+		return domain.PermitDecision{RetryAt: retryAt}, nil
+	}
+	if refilled < 1 {
+		if err := persistTokens(ctx, tx, request.Host, refilled, request.Now); err != nil {
+			return domain.PermitDecision{}, err
+		}
+		waitSeconds := (1 - refilled) / state.CurrentRequestsPerSecond
+		retryAt := request.Now.Add(time.Duration(waitSeconds * float64(time.Second)))
+		if err := tx.Commit(ctx); err != nil {
+			return domain.PermitDecision{}, fmt.Errorf("acquire rate-blocked permit: %w", err)
+		}
+		return domain.PermitDecision{RetryAt: retryAt}, nil
+	}
+
+	available := refilled - 1
+	if err := persistTokens(ctx, tx, request.Host, available, request.Now); err != nil {
+		return domain.PermitDecision{}, err
+	}
+	var permit domain.HostPermit
+	permit.ExpiresAt = request.Now.Add(request.TTL)
+	err = tx.QueryRow(ctx, `
+		INSERT INTO scrape_host_permits (
+			host, target_id, worker_id, lease_generation, acquired_at, expires_at
+		)
+		VALUES ($1,$2,$3,$4,$5,$6)
+		RETURNING id, host, target_id, lease_generation, expires_at`,
+		request.Host,
+		request.TargetID,
+		request.WorkerID,
+		request.LeaseGeneration,
+		request.Now,
+		permit.ExpiresAt,
+	).Scan(
+		&permit.ID,
+		&permit.Host,
+		&permit.TargetID,
+		&permit.LeaseGeneration,
+		&permit.ExpiresAt,
+	)
+	if err != nil {
+		return domain.PermitDecision{}, fmt.Errorf("acquire host permit: insert: %w", err)
+	}
+	permit.ExpiresAt = permit.ExpiresAt.UTC()
+	if err := tx.Commit(ctx); err != nil {
+		return domain.PermitDecision{}, fmt.Errorf("acquire host permit: commit: %w", err)
+	}
+	return domain.PermitDecision{Permit: &permit}, nil
+}
+
+func lockHostState(ctx context.Context, tx pgx.Tx, host string) (HostState, error) {
+	var state HostState
+	err := tx.QueryRow(ctx, `
+		SELECT host,
+			baseline_requests_per_second::float8,
+			current_requests_per_second::float8,
+			burst,
+			available_tokens::float8,
+			tokens_updated_at,
+			baseline_concurrency,
+			current_concurrency,
+			consecutive_429s,
+			last_429_at,
+			healthy_streak,
+			paused_until
+		FROM scrape_host_state
+		WHERE host=$1
+		FOR UPDATE`,
+		host,
+	).Scan(
+		&state.Host,
+		&state.BaselineRequestsPerSecond,
+		&state.CurrentRequestsPerSecond,
+		&state.Burst,
+		&state.AvailableTokens,
+		&state.TokensUpdatedAt,
+		&state.BaselineConcurrency,
+		&state.CurrentConcurrency,
+		&state.Consecutive429s,
+		&state.Last429At,
+		&state.HealthyStreak,
+		&state.PausedUntil,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return HostState{}, fmt.Errorf("host state %q not found", host)
+	}
+	if err != nil {
+		return HostState{}, fmt.Errorf("lock host state: %w", err)
+	}
+	normalizeHostStateTimes(&state)
+	return state, nil
+}
+
+func normalizeHostStateTimes(state *HostState) {
+	state.TokensUpdatedAt = state.TokensUpdatedAt.UTC()
+	if state.Last429At != nil {
+		value := state.Last429At.UTC()
+		state.Last429At = &value
+	}
+	if state.PausedUntil != nil {
+		value := state.PausedUntil.UTC()
+		state.PausedUntil = &value
+	}
+}
+
+func refillTokens(state HostState, now time.Time) float64 {
+	elapsed := now.Sub(state.TokensUpdatedAt).Seconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	refilled := state.AvailableTokens + elapsed*state.CurrentRequestsPerSecond
+	if refilled > float64(state.Burst) {
+		refilled = float64(state.Burst)
+	}
+	if refilled < 0 {
+		return 0
+	}
+	return refilled
+}
+
+func persistTokens(ctx context.Context, tx pgx.Tx, host string, available float64, now time.Time) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE scrape_host_state
+		SET available_tokens=$2, tokens_updated_at=$3, updated_at=$3
+		WHERE host=$1`,
+		host,
+		available,
+		now,
+	)
+	if err != nil {
+		return fmt.Errorf("persist host tokens: %w", err)
+	}
+	return nil
+}
+
+func (r *SnapshotRepository) ReleaseHostPermit(ctx context.Context, permitID int64) error {
+	if permitID <= 0 {
+		return nil
+	}
+	if _, err := r.pool.Exec(ctx, `DELETE FROM scrape_host_permits WHERE id=$1`, permitID); err != nil {
+		return fmt.Errorf("release host permit: %w", err)
+	}
+	return nil
+}
+
+func (r *SnapshotRepository) ObserveHost(ctx context.Context, observation domain.HostObservation) error {
+	if strings.TrimSpace(observation.Host) == "" || observation.ObservedAt.IsZero() {
+		return errors.New("host observation requires host and observed time")
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("observe host: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	state, err := lockHostState(ctx, tx, observation.Host)
+	if err != nil {
+		return err
+	}
+	available := refillTokens(state, observation.ObservedAt)
+
+	switch observation.Outcome {
+	case "rate_limited":
+		pause := 15 * time.Minute
+		if observation.RetryAfter > pause {
+			pause = observation.RetryAfter
+		}
+		if state.Last429At != nil && observation.ObservedAt.Sub(*state.Last429At) <= time.Hour {
+			if pause < time.Hour {
+				pause = time.Hour
+			}
+		}
+		currentRPS := state.CurrentRequestsPerSecond / 2
+		if currentRPS < 0.25 {
+			currentRPS = 0.25
+		}
+		pausedUntil := observation.ObservedAt.Add(pause)
+		_, err = tx.Exec(ctx, `
+			UPDATE scrape_host_state
+			SET current_requests_per_second=$2,
+				current_concurrency=1,
+				available_tokens=LEAST($3, burst),
+				tokens_updated_at=$4,
+				consecutive_429s=consecutive_429s+1,
+				last_429_at=$4,
+				healthy_streak=0,
+				paused_until=$5,
+				updated_at=$4
+			WHERE host=$1`,
+			observation.Host,
+			currentRPS,
+			available,
+			observation.ObservedAt,
+			pausedUntil,
+		)
+	case "auth_error":
+		pausedUntil := observation.ObservedAt.Add(15 * time.Minute)
+		_, err = tx.Exec(ctx, `
+			UPDATE scrape_host_state
+			SET available_tokens=LEAST($2, burst),
+				tokens_updated_at=$3,
+				healthy_streak=0,
+				paused_until=$4,
+				updated_at=$3
+			WHERE host=$1`,
+			observation.Host,
+			available,
+			observation.ObservedAt,
+			pausedUntil,
+		)
+	case "changed", "unchanged", "not_modified":
+		healthy := state.HealthyStreak + 1
+		currentRPS := state.CurrentRequestsPerSecond
+		currentConcurrency := state.CurrentConcurrency
+		if healthy >= 20 {
+			currentRPS += 0.25
+			if currentRPS > state.BaselineRequestsPerSecond {
+				currentRPS = state.BaselineRequestsPerSecond
+			}
+			currentConcurrency++
+			if currentConcurrency > state.BaselineConcurrency {
+				currentConcurrency = state.BaselineConcurrency
+			}
+			healthy = 0
+		}
+		var pausedUntil *time.Time
+		if state.PausedUntil != nil && state.PausedUntil.After(observation.ObservedAt) {
+			pausedUntil = state.PausedUntil
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE scrape_host_state
+			SET current_requests_per_second=$2,
+				current_concurrency=$3,
+				available_tokens=LEAST($4, burst),
+				tokens_updated_at=$5,
+				consecutive_429s=0,
+				healthy_streak=$6,
+				paused_until=$7,
+				updated_at=$5
+			WHERE host=$1`,
+			observation.Host,
+			currentRPS,
+			currentConcurrency,
+			available,
+			observation.ObservedAt,
+			healthy,
+			pausedUntil,
+		)
+	default:
+		_, err = tx.Exec(ctx, `
+			UPDATE scrape_host_state
+			SET available_tokens=LEAST($2, burst),
+				tokens_updated_at=$3,
+				healthy_streak=0,
+				updated_at=$3
+			WHERE host=$1`,
+			observation.Host,
+			available,
+			observation.ObservedAt,
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("observe host: update: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("observe host: commit: %w", err)
+	}
+	return nil
+}
+
+func (r *SnapshotRepository) HostState(ctx context.Context, host string) (HostState, error) {
+	var state HostState
+	err := r.pool.QueryRow(ctx, `
+		SELECT host,
+			baseline_requests_per_second::float8,
+			current_requests_per_second::float8,
+			burst,
+			available_tokens::float8,
+			tokens_updated_at,
+			baseline_concurrency,
+			current_concurrency,
+			consecutive_429s,
+			last_429_at,
+			healthy_streak,
+			paused_until
+		FROM scrape_host_state
+		WHERE host=$1`,
+		host,
+	).Scan(
+		&state.Host,
+		&state.BaselineRequestsPerSecond,
+		&state.CurrentRequestsPerSecond,
+		&state.Burst,
+		&state.AvailableTokens,
+		&state.TokensUpdatedAt,
+		&state.BaselineConcurrency,
+		&state.CurrentConcurrency,
+		&state.Consecutive429s,
+		&state.Last429At,
+		&state.HealthyStreak,
+		&state.PausedUntil,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return HostState{}, fmt.Errorf("host state %q not found", host)
+	}
+	if err != nil {
+		return HostState{}, fmt.Errorf("read host state: %w", err)
+	}
+	normalizeHostStateTimes(&state)
+	return state, nil
 }
 
 func (r *SnapshotRepository) Prune(ctx context.Context, request PruneRequest) (PruneResult, error) {

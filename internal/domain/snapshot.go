@@ -165,6 +165,29 @@ func ContentHashString(hash [32]byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
+type HostPermit struct {
+	ID              int64
+	Host            string
+	TargetID        int64
+	LeaseGeneration int64
+	ExpiresAt       time.Time
+}
+
+type PermitDecision struct {
+	Permit  *HostPermit
+	RetryAt time.Time
+	Paused  bool
+}
+
+type HostObservation struct {
+	Host       string
+	Outcome    string
+	StatusCode int
+	RetryAfter time.Duration
+	Latency    time.Duration
+	ObservedAt time.Time
+}
+
 type SessionFetcher interface {
 	FetchSessionForReport(
 		context.Context,
