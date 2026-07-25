@@ -2,14 +2,19 @@ package warwick
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"math/rand"
 	"mime"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"qr-command-center/internal/domain"
@@ -40,6 +45,14 @@ type SnapshotSource struct {
 	client            *ClassroomClient
 	responseBodyLimit int64
 	now               func() time.Time
+	traceSampleRate   float64
+}
+
+func (s *SnapshotSource) SetHTTPTraceSampleRate(rate float64) {
+	if rate < 0 || rate > 1 {
+		panic("SnapshotSource: HTTP trace sample rate must be between 0 and 1")
+	}
+	s.traceSampleRate = rate
 }
 
 func NewSnapshotSource(client *ClassroomClient, responseBodyLimit int64) *SnapshotSource {
@@ -63,6 +76,7 @@ func (s *SnapshotSource) Fetch(
 	if !target.Ref.Kind.Valid() {
 		return SnapshotFetchResult{}, fmt.Errorf("snapshot source: unknown kind %q", target.Ref.Kind)
 	}
+	ctx = s.withSampledHTTPTrace(ctx, target.Ref.Kind)
 	if s.client.pool != nil {
 		return s.fetchWithPool(ctx, target)
 	}
@@ -70,6 +84,89 @@ func (s *SnapshotSource) Fetch(
 		return SnapshotFetchResult{}, errors.New("snapshot source: classroom client has no authentication source")
 	}
 	return s.fetchWithAuth(ctx, target)
+}
+
+func (s *SnapshotSource) withSampledHTTPTrace(
+	ctx context.Context,
+	kind domain.SnapshotKind,
+) context.Context {
+	if s.traceSampleRate <= 0 || rand.Float64() >= s.traceSampleRate {
+		return ctx
+	}
+	startedAt := time.Now()
+	var dnsStarted time.Time
+	var connectStarted time.Time
+	var tlsStarted time.Time
+	var timingMu sync.Mutex
+	trace := &httptrace.ClientTrace{
+		DNSStart: func(httptrace.DNSStartInfo) {
+			timingMu.Lock()
+			dnsStarted = time.Now()
+			timingMu.Unlock()
+		},
+		DNSDone: func(httptrace.DNSDoneInfo) {
+			timingMu.Lock()
+			started := dnsStarted
+			timingMu.Unlock()
+			if !started.IsZero() {
+				slog.Debug(
+					"warwick_scrape_httptrace_dns",
+					"kind", kind,
+					"duration", time.Since(started),
+				)
+			}
+		},
+		ConnectStart: func(_, _ string) {
+			timingMu.Lock()
+			connectStarted = time.Now()
+			timingMu.Unlock()
+		},
+		ConnectDone: func(_, _ string, _ error) {
+			timingMu.Lock()
+			started := connectStarted
+			timingMu.Unlock()
+			if !started.IsZero() {
+				slog.Debug(
+					"warwick_scrape_httptrace_connect",
+					"kind", kind,
+					"duration", time.Since(started),
+				)
+			}
+		},
+		TLSHandshakeStart: func() {
+			timingMu.Lock()
+			tlsStarted = time.Now()
+			timingMu.Unlock()
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, _ error) {
+			timingMu.Lock()
+			started := tlsStarted
+			timingMu.Unlock()
+			if !started.IsZero() {
+				slog.Debug(
+					"warwick_scrape_httptrace_tls",
+					"kind", kind,
+					"duration", time.Since(started),
+				)
+			}
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			slog.Debug(
+				"warwick_scrape_httptrace_connection",
+				"kind", kind,
+				"reused", info.Reused,
+				"was_idle", info.WasIdle,
+			)
+		},
+		GotFirstResponseByte: func() {
+			slog.Debug(
+				"warwick_scrape_httptrace_first_byte",
+				"kind", kind,
+				"duration", time.Since(startedAt),
+			)
+		},
+	}
+	return httptrace.WithClientTrace(ctx, trace)
 }
 
 func (s *SnapshotSource) fetchWithPool(

@@ -101,6 +101,21 @@ type PruneResult struct {
 	PermitsDeleted   int
 }
 
+type ScraperStatus struct {
+	Due                        int                           `json:"due"`
+	DueByKind                  map[domain.SnapshotKind]int   `json:"due_by_kind"`
+	Leased                     int                           `json:"leased"`
+	Failed                     int                           `json:"failed"`
+	ExpiredCurrent             int                           `json:"expired_current"`
+	OldestValidationAgeSeconds map[domain.SnapshotKind]int64 `json:"oldest_validation_age_seconds"`
+	OldestSnapshotAgeSeconds   map[domain.SnapshotKind]int64 `json:"oldest_snapshot_age_seconds"`
+	HostPausedUntil            *time.Time                    `json:"host_paused_until"`
+	HostRequestsPerSecond      float64                       `json:"host_requests_per_second"`
+	HostConcurrency            int                           `json:"host_concurrency"`
+	ActivePermits              int                           `json:"active_permits"`
+	ExpiredPermits             int                           `json:"expired_permits"`
+}
+
 type AcquireHostPermitRequest struct {
 	Host            string
 	TargetID        int64
@@ -1223,6 +1238,153 @@ func (r *SnapshotRepository) CountDue(ctx context.Context, now time.Time) (int, 
 		return 0, fmt.Errorf("count due targets: %w", err)
 	}
 	return count, nil
+}
+
+func (r *SnapshotRepository) ScraperStatus(
+	ctx context.Context,
+	host string,
+	now time.Time,
+) (ScraperStatus, error) {
+	status := ScraperStatus{
+		OldestValidationAgeSeconds: make(map[domain.SnapshotKind]int64),
+		OldestSnapshotAgeSeconds:   make(map[domain.SnapshotKind]int64),
+		DueByKind:                  make(map[domain.SnapshotKind]int),
+	}
+	if strings.TrimSpace(host) == "" {
+		return status, errors.New("scraper status host is required")
+	}
+	err := r.pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*) FILTER (
+				WHERE enabled=TRUE
+				  AND next_run_at <= $2
+				  AND (lease_expires_at IS NULL OR lease_expires_at <= $2)
+			),
+			COUNT(*) FILTER (
+				WHERE lease_expires_at > $2
+			),
+			COUNT(*) FILTER (
+				WHERE consecutive_failures > 0
+			),
+			COUNT(*) FILTER (
+				WHERE current_snapshot_id IS NOT NULL
+				  AND (
+					last_validated_at IS NULL
+					OR last_validated_at
+						+ max_serve_age_seconds * INTERVAL '1 second' < $2
+				  )
+			)
+		FROM scrape_targets
+		WHERE host=$1`,
+		host,
+		now,
+	).Scan(
+		&status.Due,
+		&status.Leased,
+		&status.Failed,
+		&status.ExpiredCurrent,
+	)
+	if err != nil {
+		return status, fmt.Errorf("read scraper target status: %w", err)
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT kind, COUNT(*)
+		FROM scrape_targets
+		WHERE host=$1
+		  AND enabled=TRUE
+		  AND next_run_at <= $2
+		  AND (lease_expires_at IS NULL OR lease_expires_at <= $2)
+		GROUP BY kind`,
+		host,
+		now,
+	)
+	if err != nil {
+		return status, fmt.Errorf("read scraper due counts: %w", err)
+	}
+	for rows.Next() {
+		var kind string
+		var count int
+		if err := rows.Scan(&kind, &count); err != nil {
+			rows.Close()
+			return status, fmt.Errorf("read scraper due counts: scan: %w", err)
+		}
+		status.DueByKind[domain.SnapshotKind(kind)] = count
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return status, fmt.Errorf("read scraper due counts: rows: %w", err)
+	}
+	rows.Close()
+
+	rows, err = r.pool.Query(ctx, `
+		SELECT target.kind,
+			FLOOR(MAX(EXTRACT(EPOCH FROM ($2 - target.last_validated_at))))::bigint,
+			FLOOR(MAX(EXTRACT(EPOCH FROM ($2 - snapshot.content_fetched_at))))::bigint
+		FROM scrape_targets AS target
+		JOIN scrape_snapshots AS snapshot
+		  ON snapshot.id=target.current_snapshot_id
+		WHERE target.host=$1
+		  AND target.last_validated_at IS NOT NULL
+		GROUP BY target.kind`,
+		host,
+		now,
+	)
+	if err != nil {
+		return status, fmt.Errorf("read scraper validation ages: %w", err)
+	}
+	for rows.Next() {
+		var kind string
+		var validationSeconds int64
+		var snapshotSeconds int64
+		if err := rows.Scan(&kind, &validationSeconds, &snapshotSeconds); err != nil {
+			rows.Close()
+			return status, fmt.Errorf("read scraper validation ages: scan: %w", err)
+		}
+		snapshotKind := domain.SnapshotKind(kind)
+		status.OldestValidationAgeSeconds[snapshotKind] = validationSeconds
+		status.OldestSnapshotAgeSeconds[snapshotKind] = snapshotSeconds
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return status, fmt.Errorf("read scraper validation ages: rows: %w", err)
+	}
+	rows.Close()
+
+	var pausedUntil *time.Time
+	err = r.pool.QueryRow(ctx, `
+		SELECT current_requests_per_second::double precision,
+			current_concurrency,
+			paused_until
+		FROM scrape_host_state
+		WHERE host=$1`,
+		host,
+	).Scan(
+		&status.HostRequestsPerSecond,
+		&status.HostConcurrency,
+		&pausedUntil,
+	)
+	if err != nil {
+		return status, fmt.Errorf("read scraper host status: %w", err)
+	}
+	if pausedUntil != nil {
+		paused := pausedUntil.UTC()
+		status.HostPausedUntil = &paused
+	}
+
+	err = r.pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE expires_at > $2),
+			COUNT(*) FILTER (WHERE expires_at <= $2)
+		FROM scrape_host_permits
+		WHERE host=$1`,
+		host,
+		now,
+	).Scan(&status.ActivePermits, &status.ExpiredPermits)
+	if err != nil {
+		return status, fmt.Errorf("read scraper permit status: %w", err)
+	}
+	return status, nil
 }
 
 func (r *SnapshotRepository) AcquireHostPermit(

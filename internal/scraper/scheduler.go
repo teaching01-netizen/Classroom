@@ -10,6 +10,7 @@ import (
 
 	"qr-command-center/internal/db"
 	"qr-command-center/internal/domain"
+	"qr-command-center/internal/metrics"
 )
 
 type SchedulerRepository interface {
@@ -297,6 +298,9 @@ func (s *Scheduler) executeClaimed(
 		}
 		runResult, runErr := s.runner.RunClaimedWithRelease(ctx, target, release)
 		release()
+		if errors.Is(runErr, domain.ErrLeaseLost) {
+			metrics.WarwickScrapeLeaseLostTotal.Inc()
+		}
 		if runErr != nil &&
 			(errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded)) {
 			_ = s.releaseUnstarted(target)
@@ -354,6 +358,7 @@ func (s *Scheduler) RefreshNow(ctx context.Context, ref domain.TargetRef) error 
 	if !errors.Is(err, domain.ErrTargetLeased) {
 		return err
 	}
+	metrics.WarwickScrapeClaimConflictsTotal.Inc()
 
 	for {
 		if err := s.wait(ctx, s.refreshPollInterval); err != nil {

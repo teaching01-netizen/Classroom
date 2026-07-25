@@ -37,7 +37,7 @@ func main() {
 		slog.Error("Failed to wire application", "error", err)
 		os.Exit(1)
 	}
-	defer deps.DBPool.Close()
+	defer deps.Close()
 
 	srv := &http.Server{
 		Addr:         cfg.Port,

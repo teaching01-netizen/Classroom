@@ -52,3 +52,23 @@ func TestStartBackgroundRuntime_NormalModeStartsImmediately(t *testing.T) {
 	StartBackgroundRuntime(ctx, false, BackgroundRuntime{AlwaysOn: []service.ManagedWorker{worker}})
 	require.Eventually(t, worker.IsRunning, time.Second, time.Millisecond)
 }
+
+func TestStartBackgroundRuntime_ServerlessStartsPersistentListenerOnly(t *testing.T) {
+	listener := &runtimeWorker{}
+	scheduler := &runtimeWorker{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := StartBackgroundRuntime(ctx, true, BackgroundRuntime{
+		Persistent: []service.ManagedWorker{listener},
+		AlwaysOn:   []service.ManagedWorker{scheduler},
+	})
+
+	require.Eventually(t, listener.IsRunning, time.Second, time.Millisecond)
+	require.Never(t, scheduler.IsRunning, 20*time.Millisecond, time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("background runtime did not stop")
+	}
+	require.False(t, listener.IsRunning())
+}

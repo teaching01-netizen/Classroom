@@ -14,6 +14,7 @@ import (
 
 	"qr-command-center/internal/db"
 	"qr-command-center/internal/domain"
+	"qr-command-center/internal/metrics"
 	"qr-command-center/internal/warwick"
 )
 
@@ -266,6 +267,11 @@ func (c *Coordinator) RunClaimedWithRelease(
 		NextRunAt:       nextRunAt,
 		Commit:          commitResult,
 	}
+	kind := string(target.Ref.Kind)
+	metrics.WarwickScrapeRunsTotal.WithLabelValues(kind, outcome).Inc()
+	metrics.WarwickScrapeDurationSeconds.
+		WithLabelValues(kind, outcome).
+		Observe(finishedAt.Sub(startedAt).Seconds())
 	if observationErr != nil {
 		return result, observationErr
 	}

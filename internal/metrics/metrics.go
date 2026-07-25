@@ -65,4 +65,100 @@ var (
 			Help: "Total number of attendance-report sessions rejected by the retry budget.",
 		},
 	)
+
+	WarwickScrapeRunsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "warwick_scrape_runs_total",
+			Help: "Total committed scrape runs by bounded kind and outcome.",
+		},
+		[]string{"kind", "outcome"},
+	)
+	WarwickScrapeDurationSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "warwick_scrape_duration_seconds",
+			Help:    "End-to-end scrape duration by bounded kind and outcome.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"kind", "outcome"},
+	)
+	WarwickScrapeDueTargets = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "warwick_scrape_due_targets",
+			Help: "Number of due scrape targets by bounded kind.",
+		},
+		[]string{"kind"},
+	)
+	WarwickScrapeActiveLeases = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "warwick_scrape_active_leases",
+			Help: "Number of active scrape target leases.",
+		},
+	)
+	WarwickScrapeActiveHostPermits = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "warwick_scrape_active_host_permits",
+			Help: "Number of active host permits by bounded host class.",
+		},
+		[]string{"host_class"},
+	)
+	WarwickScrapeSnapshotAgeSeconds = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "warwick_scrape_snapshot_age_seconds",
+			Help: "Age of current snapshot content by bounded kind.",
+		},
+		[]string{"kind"},
+	)
+	WarwickScrapeValidationAgeSeconds = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "warwick_scrape_validation_age_seconds",
+			Help: "Age of current snapshot validation by bounded kind.",
+		},
+		[]string{"kind"},
+	)
+	WarwickScrapeHostPaused = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "warwick_scrape_host_paused",
+			Help: "Whether host admission is paused by bounded host class.",
+		},
+		[]string{"host_class"},
+	)
+	WarwickScrapeHostRequestsPerSecond = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "warwick_scrape_host_requests_per_second",
+			Help: "Current host request rate by bounded host class.",
+		},
+		[]string{"host_class"},
+	)
+	WarwickScrapeHostConcurrency = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "warwick_scrape_host_concurrency",
+			Help: "Current host concurrency by bounded host class.",
+		},
+		[]string{"host_class"},
+	)
+	WarwickScrapeClaimConflictsTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "warwick_scrape_claim_conflicts_total",
+			Help: "Total explicit refresh attempts coalesced behind an existing lease.",
+		},
+	)
+	WarwickScrapeLeaseLostTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "warwick_scrape_lease_lost_total",
+			Help: "Total scrape commits rejected by lease-generation fencing.",
+		},
+	)
+	WarwickSnapshotWebsocketEventsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "warwick_snapshot_websocket_events_total",
+			Help: "Total committed snapshot events accepted for fan-out by bounded kind.",
+		},
+		[]string{"kind"},
+	)
+	WarwickSnapshotWebsocketDropsTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "warwick_snapshot_websocket_drops_total",
+			Help: "Total committed snapshot events dropped by bounded fan-out.",
+		},
+	)
 )

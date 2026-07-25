@@ -80,6 +80,39 @@ func catalogSeed(now time.Time) domain.TargetSeed {
 	}
 }
 
+func TestSnapshotRepositoryScraperStatusReturnsAggregates(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{catalogSeed(now)}))
+
+	initial, err := repo.ScraperStatus(ctx, testSnapshotHost, now)
+	require.NoError(t, err)
+	require.Equal(t, 1, initial.Due)
+	require.Equal(t, 1, initial.DueByKind[domain.SnapshotCourseCatalog])
+	require.Equal(t, 0, initial.Leased)
+	require.Equal(t, 1.0, initial.HostRequestsPerSecond)
+	require.Equal(t, 2, initial.HostConcurrency)
+
+	target := claimOneTestTarget(t, ctx, repo, now, "status-worker")
+	decision, err := repo.AcquireHostPermit(ctx, AcquireHostPermitRequest{
+		Host:            testSnapshotHost,
+		TargetID:        target.ID,
+		WorkerID:        "status-worker",
+		LeaseGeneration: target.LeaseGeneration,
+		Now:             now,
+		TTL:             time.Minute,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, decision.Permit)
+
+	active, err := repo.ScraperStatus(ctx, testSnapshotHost, now)
+	require.NoError(t, err)
+	require.Equal(t, 0, active.Due)
+	require.Equal(t, 1, active.Leased)
+	require.Equal(t, 1, active.ActivePermits)
+	require.Empty(t, active.OldestValidationAgeSeconds)
+}
+
 func claimOneTestTarget(t *testing.T, ctx context.Context, repo *SnapshotRepository, now time.Time, worker string) domain.ScrapeTarget {
 	t.Helper()
 	targets, err := repo.ClaimDue(ctx, ClaimRequest{

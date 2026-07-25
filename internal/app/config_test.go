@@ -7,6 +7,123 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var scraperEnvironmentKeys = []string{
+	"SCRAPER_ENABLED",
+	"SNAPSHOT_READS_ENABLED",
+	"SCRAPER_REQUESTS_PER_SECOND",
+	"SCRAPER_BURST",
+	"SCRAPER_MAX_CONCURRENCY",
+	"SCRAPER_LEASE_DURATION",
+	"SCRAPER_FETCH_TIMEOUT",
+	"SCRAPER_PERMIT_GRACE",
+	"SCRAPER_COMMIT_GRACE",
+	"SCRAPER_TICK_LIMIT",
+	"SCRAPER_CLAIM_PREFETCH_FACTOR",
+	"SCRAPER_RESPONSE_BODY_LIMIT",
+	"SCRAPER_CANONICAL_PAYLOAD_LIMIT",
+	"SCRAPER_SNAPSHOT_RETENTION",
+	"SCRAPER_RUN_RETENTION",
+	"SCRAPER_TRIGGER_TOKEN",
+	"SCRAPER_HTTPTRACE_SAMPLE_RATE",
+}
+
+func clearScraperEnvironment(t *testing.T) {
+	t.Helper()
+	for _, key := range scraperEnvironmentKeys {
+		t.Setenv(key, "")
+	}
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("SERVERLESS_ENABLED", "false")
+	t.Setenv("WARWICK_CONNS_PER_HOST", "50")
+	t.Setenv("WARWICK_BASE_URL", "https://warwick.humantix.cloud")
+}
+
+func TestLoadConfigScraperDefaults(t *testing.T) {
+	clearScraperEnvironment(t)
+
+	cfg, err := LoadConfig()
+
+	require.NoError(t, err)
+	require.False(t, cfg.Scraper.Enabled)
+	require.False(t, cfg.Scraper.SnapshotReadsEnabled)
+	require.Equal(t, "warwick.humantix.cloud", cfg.Scraper.Host)
+	require.Equal(t, 1.0, cfg.Scraper.BaselineRequestsPerSecond)
+	require.Equal(t, 1, cfg.Scraper.Burst)
+	require.Equal(t, 2, cfg.Scraper.BaselineConcurrency)
+	require.Equal(t, 2*time.Minute, cfg.Scraper.LeaseDuration)
+	require.Equal(t, 30*time.Second, cfg.Scraper.FetchTimeout)
+	require.Equal(t, int64(16<<20), cfg.Scraper.ResponseBodyLimit)
+	require.Equal(t, 0.01, cfg.Scraper.HTTPTraceSampleRate)
+}
+
+func TestLoadConfigRejectsMalformedScraperValues(t *testing.T) {
+	for _, test := range []struct {
+		key   string
+		value string
+	}{
+		{key: "SCRAPER_ENABLED", value: "sometimes"},
+		{key: "SCRAPER_REQUESTS_PER_SECOND", value: "fast"},
+		{key: "SCRAPER_BURST", value: "many"},
+		{key: "SCRAPER_LEASE_DURATION", value: "later"},
+		{key: "SCRAPER_RESPONSE_BODY_LIMIT", value: "huge"},
+		{key: "SCRAPER_HTTPTRACE_SAMPLE_RATE", value: "some"},
+	} {
+		t.Run(test.key, func(t *testing.T) {
+			clearScraperEnvironment(t)
+			t.Setenv(test.key, test.value)
+			_, err := LoadConfig()
+			require.ErrorContains(t, err, test.key)
+		})
+	}
+}
+
+func TestLoadConfigRejectsScraperBoundsAndRelationships(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "rate low", key: "SCRAPER_REQUESTS_PER_SECOND", value: "0.24"},
+		{name: "rate high", key: "SCRAPER_REQUESTS_PER_SECOND", value: "5.01"},
+		{name: "burst", key: "SCRAPER_BURST", value: "6"},
+		{name: "concurrency", key: "SCRAPER_MAX_CONCURRENCY", value: "5"},
+		{name: "body cap", key: "SCRAPER_RESPONSE_BODY_LIMIT", value: "52428801"},
+		{name: "trace rate", key: "SCRAPER_HTTPTRACE_SAMPLE_RATE", value: "1.01"},
+		{name: "retention", key: "SCRAPER_SNAPSHOT_RETENTION", value: "23h"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clearScraperEnvironment(t)
+			t.Setenv(test.key, test.value)
+			_, err := LoadConfig()
+			require.ErrorContains(t, err, test.key)
+		})
+	}
+
+	t.Run("lease budget", func(t *testing.T) {
+		clearScraperEnvironment(t)
+		t.Setenv("SCRAPER_LEASE_DURATION", "30s")
+		_, err := LoadConfig()
+		require.ErrorContains(t, err, "SCRAPER_LEASE_DURATION")
+	})
+	t.Run("transport ceiling", func(t *testing.T) {
+		clearScraperEnvironment(t)
+		t.Setenv("WARWICK_CONNS_PER_HOST", "1")
+		t.Setenv("SCRAPER_MAX_CONCURRENCY", "2")
+		_, err := LoadConfig()
+		require.ErrorContains(t, err, "WARWICK_CONNS_PER_HOST")
+	})
+}
+
+func TestLoadConfigServerlessScraperRequiresTriggerToken(t *testing.T) {
+	clearScraperEnvironment(t)
+	t.Setenv("SERVERLESS_ENABLED", "true")
+	t.Setenv("SCRAPER_ENABLED", "true")
+
+	_, err := LoadConfig()
+
+	require.ErrorContains(t, err, "SCRAPER_TRIGGER_TOKEN")
+}
+
 func setServerlessConfigEnv(t *testing.T, enabled, railway, grace string) {
 	t.Helper()
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/app")

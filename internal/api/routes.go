@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
@@ -30,6 +32,11 @@ type RouterOptions struct {
 	ActivityRecorder service.ActivityRecorder
 	EventHub         *service.EventHub
 	SnapshotMetadata service.SnapshotMetadataStore
+	ScraperRunner    ScraperRunner
+	ScraperStatus    ScraperStatusReader
+	ScraperHost      string
+	ScraperTickLimit int
+	ScraperToken     string
 }
 
 // Stop shuts down all rate limiter cleanup goroutines.
@@ -95,6 +102,28 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 		r.Delete("/dashboard-views/{id}", deleteDashboardViewHandler(viewSvc))
 		r.Post("/dashboard-views/{id}/use", touchDashboardViewHandler(viewSvc))
 	})
+
+	if options.ScraperRunner != nil &&
+		options.ScraperStatus != nil &&
+		options.ScraperToken != "" {
+		r.Post(
+			"/api/internal/scraper/tick",
+			scraperTickHandler(
+				options.ScraperRunner,
+				options.ScraperTickLimit,
+				options.ScraperToken,
+			),
+		)
+		r.Get(
+			"/api/internal/scraper/status",
+			scraperStatusHandler(
+				options.ScraperStatus,
+				options.ScraperHost,
+				options.ScraperToken,
+				time.Now,
+			),
+		)
+	}
 
 	eventHub := options.EventHub
 	if eventHub == nil && rm != nil {
@@ -169,6 +198,10 @@ func admittedActivityMiddleware(recorder service.ActivityRecorder) func(http.Han
 func corsMiddleware(corsOrigin string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/internal/") {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if corsOrigin == "" {
 				next.ServeHTTP(w, r)
 				return

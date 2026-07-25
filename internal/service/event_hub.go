@@ -3,6 +3,8 @@ package service
 import (
 	"sync"
 	"sync/atomic"
+
+	"qr-command-center/internal/metrics"
 )
 
 // AppEvent is the common room and snapshot event envelope. Event names and
@@ -67,6 +69,9 @@ func (h *EventHub) run() {
 				case subscriber <- event:
 				default:
 					h.dropped.Add(1)
+					if event.Type == "SnapshotCommitted" {
+						metrics.WarwickSnapshotWebsocketDropsTotal.Inc()
+					}
 				}
 			}
 		case operation := <-h.operations:
@@ -147,6 +152,9 @@ func (h *EventHub) Publish(event AppEvent) bool {
 		return true
 	default:
 		h.dropped.Add(1)
+		if event.Type == "SnapshotCommitted" {
+			metrics.WarwickSnapshotWebsocketDropsTotal.Inc()
+		}
 		return false
 	}
 }

@@ -2,17 +2,20 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/time/rate"
 
 	"qr-command-center/internal/api"
 	"qr-command-center/internal/db"
 	"qr-command-center/internal/domain"
+	"qr-command-center/internal/scraper"
 	"qr-command-center/internal/service"
 	"qr-command-center/internal/warwick"
 )
@@ -26,6 +29,19 @@ type ServerDeps struct {
 	RateLimiters *api.RateLimiters
 	Background   BackgroundRuntime
 	DBPool       *pgxpool.Pool
+	EventHub     *service.EventHub
+}
+
+func (d *ServerDeps) Close() {
+	if d == nil {
+		return
+	}
+	if d.EventHub != nil {
+		d.EventHub.Close()
+	}
+	if d.DBPool != nil {
+		d.DBPool.Close()
+	}
 }
 
 // Wire creates all dependencies from config and returns a ready-to-use ServerDeps.
@@ -57,20 +73,26 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 	}
 
 	if err := db.RunMigrations(cfg.DatabaseURL); err != nil {
+		dbPool.Close()
 		return nil, fmt.Errorf("run migrations: %w", err)
 	}
 	slog.Info("Connected to database")
 
+	eventHub := service.NewEventHub(256, 256)
 	repository := db.NewPgRoomRepository(dbPool)
-	rm := service.NewRoomManager(qrClient, repository)
+	rm := service.NewRoomManagerWithEventHub(qrClient, repository, eventHub)
 
 	if err := rm.LoadRoomsFromDB(); err != nil {
+		eventHub.Close()
+		dbPool.Close()
 		return nil, fmt.Errorf("load rooms from database: %w", err)
 	}
 	if cfg.ServerlessEnabled {
 		recoveryCtx, recoveryCancel := context.WithTimeout(ctx, 10*time.Second)
 		if err := rm.RecoverLoadedRooms(recoveryCtx); err != nil {
 			recoveryCancel()
+			eventHub.Close()
+			dbPool.Close()
 			return nil, fmt.Errorf("recover persisted room states: %w", err)
 		}
 		recoveryCancel()
@@ -93,13 +115,118 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 		classroomClient.SetCourseDetailConcurrency(cfg.CourseDetailConcurrency)
 	}
 
-	var defaultFetcher domain.SessionFetcher
-	if classroomClient != nil {
-		defaultFetcher = classroomClient
-	}
-	teacherService := service.NewTeacherService(classroomClient, defaultFetcher, cfg.ReportConcurrency)
+	snapshotRepository := db.NewSnapshotRepository(dbPool)
+	snapshotRuntimeEnabled := cfg.Scraper.Enabled || cfg.Scraper.SnapshotReadsEnabled
+	var scheduler *scraper.Scheduler
+	var snapshotProvider *service.SnapshotProvider
+	persistentWorkers := make([]service.ManagedWorker, 0, 1)
+	alwaysOnWorkers := make([]service.ManagedWorker, 0, 1)
+	if snapshotRuntimeEnabled {
+		if classroomClient == nil {
+			eventHub.Close()
+			dbPool.Close()
+			return nil, errors.New("snapshot runtime requires an initialized Warwick classroom client")
+		}
+		now := time.Now().UTC()
+		if err := snapshotRepository.SeedHost(ctx, db.HostStateSeed{
+			Host:                      cfg.Scraper.Host,
+			BaselineRequestsPerSecond: cfg.Scraper.BaselineRequestsPerSecond,
+			Burst:                     cfg.Scraper.Burst,
+			BaselineConcurrency:       cfg.Scraper.BaselineConcurrency,
+			Now:                       now,
+		}); err != nil {
+			eventHub.Close()
+			dbPool.Close()
+			return nil, fmt.Errorf("seed scraper host: %w", err)
+		}
+		if err := snapshotRepository.Seed(ctx, rootSnapshotSeeds(cfg.Scraper.Host, now)); err != nil {
+			eventHub.Close()
+			dbPool.Close()
+			return nil, fmt.Errorf("seed scraper roots: %w", err)
+		}
 
-	workers := make([]service.ManagedWorker, 0)
+		source := warwick.NewSnapshotSource(classroomClient, cfg.Scraper.ResponseBodyLimit)
+		source.SetHTTPTraceSampleRate(cfg.Scraper.HTTPTraceSampleRate)
+		hostController := scraper.NewHostController(
+			snapshotRepository,
+			cfg.Scraper.FetchTimeout+cfg.Scraper.PermitGrace,
+		)
+		coordinator := scraper.NewCoordinator(
+			source,
+			snapshotRepository,
+			hostController,
+			scraper.CoordinatorConfig{
+				FetchTimeout:          cfg.Scraper.FetchTimeout,
+				CanonicalPayloadLimit: cfg.Scraper.CanonicalPayloadLimit,
+			},
+		)
+		scheduler = scraper.NewScheduler(
+			snapshotRepository,
+			hostController,
+			coordinator,
+			scraper.SchedulerConfig{
+				WorkerID:            uuid.NewString(),
+				MaxConcurrency:      cfg.Scraper.BaselineConcurrency,
+				PrefetchFactor:      cfg.Scraper.ClaimPrefetchFactor,
+				LeaseDuration:       cfg.Scraper.LeaseDuration,
+				CommitGrace:         cfg.Scraper.CommitGrace,
+				TickLimit:           cfg.Scraper.TickLimit,
+				PollInterval:        5 * time.Second,
+				RefreshPollInterval: 100 * time.Millisecond,
+				SnapshotRetention:   cfg.Scraper.SnapshotRetention,
+				RunRetention:        cfg.Scraper.RunRetention,
+				PruneBatchSize:      1000,
+			},
+		)
+		snapshotProvider = service.NewSnapshotProvider(
+			snapshotRepository,
+			scheduler,
+			cfg.Scraper.Host,
+			time.Now,
+		)
+		listener := service.NewSnapshotNotificationListener(
+			cfg.DatabaseURL,
+			snapshotRepository,
+			eventHub,
+		)
+		persistentWorkers = append(persistentWorkers, managedWorkerFunc(func(workerCtx context.Context) {
+			if err := listener.Run(workerCtx); err != nil && workerCtx.Err() == nil {
+				slog.Warn("snapshot_notification_listener_stopped", "error", err)
+			}
+		}))
+		if cfg.Scraper.Enabled && !cfg.ServerlessEnabled {
+			alwaysOnWorkers = append(alwaysOnWorkers, scheduler)
+		}
+	}
+
+	var teacherService *service.TeacherService
+	if cfg.Scraper.SnapshotReadsEnabled {
+		if snapshotProvider == nil || scheduler == nil {
+			eventHub.Close()
+			dbPool.Close()
+			return nil, errors.New("snapshot reads enabled without repository and refresher wiring")
+		}
+		teacherService = service.NewTeacherServiceWithDependencies(
+			snapshotProvider,
+			snapshotProvider,
+			classroomClient,
+			scheduler,
+			cfg.ReportConcurrency,
+			true,
+		)
+	} else {
+		if classroomClient == nil {
+			eventHub.Close()
+			dbPool.Close()
+			return nil, errors.New("live teacher reads require an initialized Warwick classroom client")
+		}
+		teacherService = service.NewTeacherService(
+			classroomClient,
+			classroomClient,
+			cfg.ReportConcurrency,
+		)
+	}
+
 	idleHandlers := []service.IdleHandler{
 		service.IdleHandlerFunc(func(context.Context) error {
 			idleCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -111,13 +238,7 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 			return nil
 		}),
 	}
-	managedWorkers := workers
-	if cfg.ServerlessEnabled {
-		// Serverless mode is request-driven: periodic warmers would extend Railway's
-		// outbound-traffic window and context-free upstream calls cannot be drained safely.
-		managedWorkers = nil
-	}
-	activityController := service.NewActivityController(cfg.ServerlessIdleGrace, managedWorkers, idleHandlers)
+	activityController := service.NewActivityController(cfg.ServerlessIdleGrace, nil, idleHandlers)
 	var activityRecorder service.ActivityRecorder
 	if cfg.ServerlessEnabled {
 		activityRecorder = activityController
@@ -126,6 +247,18 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 		WSMaxConns:       cfg.WSMaxConns,
 		CORSOrigin:       cfg.CORSOrigin,
 		ActivityRecorder: activityRecorder,
+		EventHub:         eventHub,
+		SnapshotMetadata: func() service.SnapshotMetadataStore {
+			if snapshotRuntimeEnabled {
+				return snapshotRepository
+			}
+			return nil
+		}(),
+		ScraperRunner:    scheduler,
+		ScraperStatus:    snapshotRepository,
+		ScraperHost:      cfg.Scraper.Host,
+		ScraperTickLimit: cfg.Scraper.TickLimit,
+		ScraperToken:     cfg.Scraper.TriggerToken,
 	})
 
 	return &ServerDeps{
@@ -133,8 +266,38 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 		RateLimiters: rateLimiters,
 		Background: BackgroundRuntime{
 			Controller: activityController,
-			AlwaysOn:   workers,
+			Persistent: persistentWorkers,
+			AlwaysOn:   alwaysOnWorkers,
 		},
-		DBPool: dbPool,
+		DBPool:   dbPool,
+		EventHub: eventHub,
 	}, nil
+}
+
+func rootSnapshotSeeds(host string, now time.Time) []domain.TargetSeed {
+	refs := []domain.TargetRef{
+		{
+			Host:        host,
+			Kind:        domain.SnapshotCourseCatalog,
+			ResourceKey: "catalog",
+		},
+		{
+			Host:        host,
+			Kind:        domain.SnapshotStudentProfiles,
+			ResourceKey: "profiles",
+		},
+	}
+	seeds := make([]domain.TargetSeed, 0, len(refs))
+	for _, ref := range refs {
+		policy := scraper.PolicyFor(ref.Kind, "")
+		seeds = append(seeds, domain.TargetSeed{
+			Ref:             ref,
+			InitialInterval: policy.Initial,
+			MinInterval:     policy.Min,
+			MaxInterval:     policy.Max,
+			MaxServeAge:     policy.MaxServeAge,
+			NextRunAt:       now,
+		})
+	}
+	return seeds
 }

@@ -2,12 +2,12 @@
 FROM node:20-alpine AS frontend-builder
 WORKDIR /app/web
 COPY web/package*.json ./
-RUN npm install
+RUN npm ci
 COPY web/ ./
 RUN npm run build
 
 # Stage 2: Build backend
-FROM golang:1.26-alpine AS go-builder
+FROM golang:1.26.3-alpine AS go-builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download

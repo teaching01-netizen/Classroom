@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"qr-command-center/internal/domain"
+	"qr-command-center/internal/metrics"
 )
 
 const snapshotNotificationPayloadLimit = 8 * 1024
@@ -193,7 +194,11 @@ func (l *SnapshotNotificationListener) observe(
 	}
 	l.versions[key] = metadata.Version
 	if publish {
-		l.hub.Publish(AppEvent{Type: "SnapshotCommitted", Data: metadata})
+		if l.hub.Publish(AppEvent{Type: "SnapshotCommitted", Data: metadata}) {
+			metrics.WarwickSnapshotWebsocketEventsTotal.
+				WithLabelValues(string(metadata.Kind)).
+				Inc()
+		}
 	}
 }
 
