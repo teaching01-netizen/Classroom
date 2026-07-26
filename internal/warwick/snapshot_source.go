@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand"
 	"mime"
 	"net/http"
@@ -340,8 +341,24 @@ func (s *SnapshotSource) fetchCatalog(
 		return result, err
 	}
 	courses := make([]domain.CourseSummary, 0, len(response.Data))
+	seenCourseIDs := make(map[string]struct{}, len(response.Data))
 	for _, row := range response.Data {
-		courseID := fmt.Sprintf("%v", row.ID)
+		courseID, err := requiredDataTableIdentifier(
+			row.ID,
+			"ClassAttendanceSearch",
+			"course",
+		)
+		if err != nil {
+			return result, err
+		}
+		if err := recordUniqueIdentifier(
+			seenCourseIDs,
+			courseID,
+			"ClassAttendanceSearch",
+			"course",
+		); err != nil {
+			return result, err
+		}
 		startDate := normalizeWarwickDate(row.StartDate)
 		endDate := normalizeWarwickDate(row.EndDate)
 		enrolled := parseIntValue(row.Enrolled)
@@ -423,15 +440,32 @@ func (s *SnapshotSource) fetchCourse(
 		_ = json.Unmarshal(target.Attributes, &attributes)
 	}
 	sessions := make([]domain.SessionSummary, 0, len(response.Data))
+	seenSessionIDs := make(map[string]struct{}, len(response.Data))
 	completed := 0
 	for index, row := range response.Data {
+		sessionID, err := requiredDataTableIdentifier(
+			row.DID,
+			"ClassAttendanceDetailSearch",
+			"session",
+		)
+		if err != nil {
+			return result, err
+		}
+		if err := recordUniqueIdentifier(
+			seenSessionIDs,
+			sessionID,
+			"ClassAttendanceDetailSearch",
+			"session",
+		); err != nil {
+			return result, err
+		}
 		status := domain.SessionStatusActive
 		if row.DStatus == "Finished" {
 			status = domain.SessionStatusDone
 			completed++
 		}
 		sessions = append(sessions, domain.SessionSummary{
-			SessionID:     fmt.Sprintf("%v", row.DID),
+			SessionID:     sessionID,
 			SessionNumber: index + 1,
 			Name:          row.DName,
 			Status:        status,
@@ -488,13 +522,23 @@ func (s *SnapshotSource) fetchSession(
 		return result, err
 	}
 	students := make([]domain.StudentCheckin, 0, len(response.Data))
+	seenStudentIDs := make(map[string]struct{}, len(response.Data))
 	checkedIn := 0
 	for _, row := range response.Data {
+		studentID := strings.TrimSpace(row.StudentID)
+		if err := recordUniqueIdentifier(
+			seenStudentIDs,
+			studentID,
+			"ClassAttendanceStudentCheckInSearch",
+			"student",
+		); err != nil {
+			return result, err
+		}
 		if row.StudentCheckIn {
 			checkedIn++
 		}
 		students = append(students, domain.StudentCheckin{
-			StudentID:           row.StudentID,
+			StudentID:           studentID,
 			Name:                row.StudentName,
 			Nickname:            row.StudentNickName,
 			School:              row.StudentSchool,
@@ -519,6 +563,8 @@ func (s *SnapshotSource) fetchProfiles(
 	cookie string,
 ) (SnapshotFetchResult, error) {
 	profiles := make([]domain.StudentProfile, 0)
+	seenStudentIDs := make(map[string]struct{})
+	seenStudentGUIDs := make(map[string]struct{})
 	var totalBytes int64
 	var firstMetadata ResponseMetadata
 	total := -1
@@ -568,9 +614,33 @@ func (s *SnapshotSource) fetchProfiles(
 				domain.NewInvalidPayloadError("UserGroupSearch returned an incomplete page")
 		}
 		for _, row := range response.Data {
+			studentID := strings.TrimSpace(row.StudentID)
+			if err := recordUniqueIdentifier(
+				seenStudentIDs,
+				studentID,
+				"UserGroupSearch",
+				"student",
+			); err != nil {
+				return SnapshotFetchResult{
+					Metadata:  firstMetadata,
+					BytesRead: totalBytes,
+				}, err
+			}
+			studentGUID := strings.TrimSpace(row.StudentGuid)
+			if err := recordUniqueIdentifier(
+				seenStudentGUIDs,
+				studentGUID,
+				"UserGroupSearch",
+				"student GUID",
+			); err != nil {
+				return SnapshotFetchResult{
+					Metadata:  firstMetadata,
+					BytesRead: totalBytes,
+				}, err
+			}
 			profiles = append(profiles, domain.StudentProfile{
-				StudentID:   row.StudentID,
-				StudentGuid: row.StudentGuid,
+				StudentID:   studentID,
+				StudentGuid: studentGUID,
 				FullName:    row.FullName,
 				School:      row.School,
 			})
@@ -579,6 +649,53 @@ func (s *SnapshotSource) fetchProfiles(
 	return SnapshotFetchResult{
 		Value: profiles, Metadata: firstMetadata, BytesRead: totalBytes,
 	}, nil
+}
+
+func requiredDataTableIdentifier(value any, endpoint string, field string) (string, error) {
+	var identifier string
+	switch typed := value.(type) {
+	case string:
+		identifier = strings.TrimSpace(typed)
+	case float64:
+		if math.IsNaN(typed) ||
+			math.IsInf(typed, 0) ||
+			typed != math.Trunc(typed) {
+			return "", domain.NewInvalidPayloadError(
+				endpoint + " returned an invalid " + field + " identifier",
+			)
+		}
+		identifier = strconv.FormatFloat(typed, 'f', -1, 64)
+	default:
+		return "", domain.NewInvalidPayloadError(
+			endpoint + " returned an invalid " + field + " identifier",
+		)
+	}
+	if identifier == "" {
+		return "", domain.NewInvalidPayloadError(
+			endpoint + " returned an empty " + field + " identifier",
+		)
+	}
+	return identifier, nil
+}
+
+func recordUniqueIdentifier(
+	seen map[string]struct{},
+	identifier string,
+	endpoint string,
+	field string,
+) error {
+	if identifier == "" {
+		return domain.NewInvalidPayloadError(
+			endpoint + " returned an empty " + field + " identifier",
+		)
+	}
+	if _, exists := seen[identifier]; exists {
+		return domain.NewInvalidPayloadError(
+			endpoint + " returned a duplicate " + field + " identifier",
+		)
+	}
+	seen[identifier] = struct{}{}
+	return nil
 }
 
 func validateCompleteDataTable(

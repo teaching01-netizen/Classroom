@@ -459,29 +459,6 @@ func findStudent(students []domain.StudentAttendance, id string) *domain.Student
 	return nil
 }
 
-// countCallCounter records per-session call counts.
-type callCounter struct {
-	mu    sync.Mutex
-	calls map[string]int
-}
-
-func newCallCounter() *callCounter {
-	return &callCounter{calls: make(map[string]int)}
-}
-
-func (c *callCounter) FetchSessionForReport(_ context.Context, _ string, sessionID string) (*domain.SessionDetail, error) {
-	c.mu.Lock()
-	c.calls[sessionID]++
-	c.mu.Unlock()
-	return nil, fmt.Errorf("callCounter: not implemented")
-}
-
-func (c *callCounter) getCallCount(sessionID string) int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.calls[sessionID]
-}
-
 // rateLimitFetcher returns different responses on successive calls for the same session.
 type rateLimitEntry struct {
 	responses []responsePair

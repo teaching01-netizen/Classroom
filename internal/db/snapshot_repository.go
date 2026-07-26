@@ -266,7 +266,13 @@ func upsertSeed(ctx context.Context, executor dbExecutor, seed domain.TargetSeed
 			$6, $7, $8, $9, $10)
 		ON CONFLICT (host, kind, parent_key, resource_key) DO UPDATE
 		SET attributes = EXCLUDED.attributes,
-			current_interval_seconds = EXCLUDED.current_interval_seconds,
+			current_interval_seconds = LEAST(
+				EXCLUDED.max_interval_seconds,
+				GREATEST(
+					scrape_targets.current_interval_seconds,
+					EXCLUDED.min_interval_seconds
+				)
+			),
 			min_interval_seconds = EXCLUDED.min_interval_seconds,
 			max_interval_seconds = EXCLUDED.max_interval_seconds,
 			max_serve_age_seconds = EXCLUDED.max_serve_age_seconds,
@@ -1039,11 +1045,12 @@ func snapshotByRun(ctx context.Context, tx pgx.Tx, runID int64) (domain.Snapshot
 	err := tx.QueryRow(ctx, `
 		SELECT snapshot.id, snapshot.target_id, target.host, target.kind,
 			target.resource_key, target.parent_key, snapshot.version,
-			target.validation_seq, snapshot.content_hash, snapshot.payload,
-			snapshot.content_fetched_at, target.last_validated_at,
-			target.next_run_at, target.max_serve_age_seconds
+			run.validation_seq_after, snapshot.content_hash, snapshot.payload,
+			snapshot.content_fetched_at, run.finished_at,
+			run.next_run_at, target.max_serve_age_seconds
 		FROM scrape_snapshots AS snapshot
 		JOIN scrape_targets AS target ON target.id=snapshot.target_id
+		JOIN scrape_runs AS run ON run.id=snapshot.run_id
 		WHERE snapshot.run_id=$1`,
 		runID,
 	).Scan(
@@ -1241,30 +1248,69 @@ func (r *SnapshotRepository) AnyOverdue(
 	refs []domain.TargetRef,
 	now time.Time,
 ) (bool, error) {
-	for _, ref := range refs {
-		var overdue bool
-		err := r.pool.QueryRow(ctx, `
-			SELECT next_run_at < $5
-			FROM scrape_targets
-			WHERE host=$1 AND kind=$2 AND parent_key=$3 AND resource_key=$4
-			  AND current_snapshot_id IS NOT NULL`,
-			ref.Host,
-			ref.Kind,
-			ref.ParentKey,
-			ref.ResourceKey,
-			now,
-		).Scan(&overdue)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, domain.ErrSnapshotNotFound
-		}
-		if err != nil {
-			return false, fmt.Errorf("check snapshot overdue: %w", err)
-		}
-		if overdue {
-			return true, nil
-		}
+	if len(refs) == 0 {
+		return false, nil
 	}
-	return false, nil
+	hosts := make([]string, len(refs))
+	kinds := make([]string, len(refs))
+	parentKeys := make([]string, len(refs))
+	resourceKeys := make([]string, len(refs))
+	for index, ref := range refs {
+		if err := ref.Validate(); err != nil {
+			return false, fmt.Errorf(
+				"check snapshots overdue: reference %d: %w",
+				index,
+				err,
+			)
+		}
+		hosts[index] = ref.Host
+		kinds[index] = string(ref.Kind)
+		parentKeys[index] = ref.ParentKey
+		resourceKeys[index] = ref.ResourceKey
+	}
+
+	var requestedCount int64
+	var matchedCount int64
+	var overdue bool
+	err := r.pool.QueryRow(ctx, `
+		WITH requested AS (
+			SELECT DISTINCT request.host, request.kind,
+				request.parent_key, request.resource_key
+			FROM unnest(
+				$1::text[],
+				$2::text[],
+				$3::text[],
+				$4::text[]
+			) AS request(host, kind, parent_key, resource_key)
+		),
+		matched AS (
+			SELECT target.next_run_at
+			FROM requested AS request
+			JOIN scrape_targets AS target
+			  ON target.host=request.host
+			 AND target.kind=request.kind
+			 AND target.parent_key=request.parent_key
+			 AND target.resource_key=request.resource_key
+			WHERE target.current_snapshot_id IS NOT NULL
+		)
+		SELECT
+			(SELECT COUNT(*) FROM requested),
+			COUNT(*),
+			COALESCE(BOOL_OR(next_run_at < $5), FALSE)
+		FROM matched`,
+		hosts,
+		kinds,
+		parentKeys,
+		resourceKeys,
+		now,
+	).Scan(&requestedCount, &matchedCount, &overdue)
+	if err != nil {
+		return false, fmt.Errorf("check snapshots overdue: %w", err)
+	}
+	if matchedCount != requestedCount {
+		return false, domain.ErrSnapshotNotFound
+	}
+	return overdue, nil
 }
 
 func (r *SnapshotRepository) CountDue(ctx context.Context, now time.Time) (int, error) {
@@ -1311,10 +1357,12 @@ func (r *SnapshotRepository) ScraperStatus(
 				WHERE lease_expires_at > $2
 			),
 			COUNT(*) FILTER (
-				WHERE consecutive_failures > 0
+				WHERE enabled=TRUE
+				  AND consecutive_failures > 0
 			),
 			COUNT(*) FILTER (
-				WHERE current_snapshot_id IS NOT NULL
+				WHERE enabled=TRUE
+				  AND current_snapshot_id IS NOT NULL
 				  AND (
 					last_validated_at IS NULL
 					OR last_validated_at
@@ -1407,6 +1455,7 @@ func (r *SnapshotRepository) ScraperStatus(
 		JOIN scrape_snapshots AS snapshot
 		  ON snapshot.id=target.current_snapshot_id
 		WHERE target.host=$1
+		  AND target.enabled=TRUE
 		  AND target.last_validated_at IS NOT NULL
 		GROUP BY target.kind`,
 		host,
@@ -1514,6 +1563,10 @@ func (r *SnapshotRepository) AcquireHostPermit(
 	state, err := lockHostState(ctx, tx, request.Host)
 	if err != nil {
 		return domain.PermitDecision{}, err
+	}
+	request.Now = request.Now.UTC()
+	if request.Now.Before(state.TokensUpdatedAt) {
+		request.Now = state.TokensUpdatedAt
 	}
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM scrape_host_permits
@@ -1728,6 +1781,13 @@ func (r *SnapshotRepository) ObserveHost(ctx context.Context, observation domain
 	state, err := lockHostState(ctx, tx, observation.Host)
 	if err != nil {
 		return err
+	}
+	observation.ObservedAt = observation.ObservedAt.UTC()
+	if observation.ObservedAt.Before(state.TokensUpdatedAt) {
+		// Concurrent workers can finish in one order and acquire the host-state
+		// lock in another. Never move the token-bucket clock backwards or a
+		// later permit could refill elapsed time that was already accounted for.
+		observation.ObservedAt = state.TokensUpdatedAt
 	}
 	available := refillTokens(state, observation.ObservedAt)
 

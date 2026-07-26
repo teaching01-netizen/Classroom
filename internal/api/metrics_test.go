@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"qr-command-center/internal/db"
+	"qr-command-center/internal/domain"
 	"qr-command-center/internal/service"
 	"qr-command-center/internal/warwick"
 )
@@ -53,4 +56,61 @@ func TestMetricsEndpoint_ExcludesRemovedCacheMetrics(t *testing.T) {
 		assert.NotContains(t, body, metric,
 			"/metrics must not expose removed cache metric: %s", metric)
 	}
+}
+
+func TestMetricsEndpointRefreshesScraperGauges(t *testing.T) {
+	statusReader := &scraperStatusFake{status: db.ScraperStatus{
+		Leased:        7,
+		ActivePermits: 2,
+		DueByKind: map[domain.SnapshotKind]int{
+			domain.SnapshotSessionDetail: 11,
+		},
+	}}
+	router, rl := NewRouter(nil, nil, nil, nil, RouterOptions{
+		WSMaxConns:    100,
+		ScraperStatus: statusReader,
+		ScraperHost:   "warwick.humantix.cloud",
+	})
+	defer rl.Stop()
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, 1, statusReader.calls)
+	require.Contains(t, w.Body.String(), "warwick_scrape_active_leases 7")
+	require.Contains(
+		t,
+		w.Body.String(),
+		`warwick_scrape_due_targets{kind="session_detail"} 11`,
+	)
+	require.Contains(t, w.Body.String(), "warwick_scrape_status_collection_success 1")
+
+	second := httptest.NewRecorder()
+	router.ServeHTTP(
+		second,
+		httptest.NewRequest(http.MethodGet, "/metrics", nil),
+	)
+	require.Equal(t, http.StatusOK, second.Code)
+	require.Equal(t, 1, statusReader.calls,
+		"closely spaced metrics requests must reuse the bounded status collection")
+}
+
+func TestMetricsEndpointExposesScraperStatusCollectionFailure(t *testing.T) {
+	statusReader := &scraperStatusFake{err: errors.New("database unavailable")}
+	router, rl := NewRouter(nil, nil, nil, nil, RouterOptions{
+		WSMaxConns:    100,
+		ScraperStatus: statusReader,
+		ScraperHost:   "warwick.humantix.cloud",
+	})
+	defer rl.Stop()
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, 1, statusReader.calls)
+	require.Contains(t, w.Body.String(), "warwick_scrape_status_collection_success 0")
 }

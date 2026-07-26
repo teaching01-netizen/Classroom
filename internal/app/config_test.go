@@ -124,6 +124,15 @@ func TestLoadConfigServerlessScraperRequiresTriggerToken(t *testing.T) {
 	require.ErrorContains(t, err, "SCRAPER_TRIGGER_TOKEN")
 }
 
+func TestLoadConfigSnapshotReadsRequireScraper(t *testing.T) {
+	clearScraperEnvironment(t)
+	t.Setenv("SNAPSHOT_READS_ENABLED", "true")
+
+	_, err := LoadConfig()
+
+	require.EqualError(t, err, "SNAPSHOT_READS_ENABLED requires SCRAPER_ENABLED")
+}
+
 func setServerlessConfigEnv(t *testing.T, enabled, railway, grace string) {
 	t.Helper()
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/app")

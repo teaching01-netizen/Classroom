@@ -53,6 +53,7 @@ type snapshotAwareReader interface {
 	CourseRef(string) domain.TargetRef
 	SessionRef(string, string) domain.TargetRef
 	ProfilesRef() domain.TargetRef
+	CurrentStudentProfiles(context.Context) ([]domain.StudentProfile, error)
 	Metadata(context.Context, domain.TargetRef) (domain.SnapshotMetadata, error)
 	AnyOverdue(context.Context, []domain.TargetRef) (bool, error)
 }
@@ -252,6 +253,9 @@ func (s *TeacherService) ToggleCheckin(
 		if err != nil || detail == nil {
 			pending = true
 		} else {
+			if profiles, profileErr := snapshots.CurrentStudentProfiles(ctx); profileErr == nil {
+				domain.EnrichCheckinStudentIDWithWCode(detail.Students, profiles)
+			}
 			response.NewCount = detail.CheckedInCount
 			reflected := false
 			for _, student := range detail.Students {

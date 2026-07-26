@@ -34,6 +34,7 @@ func (r *scraperRunnerFake) RunDue(ctx context.Context, limit int) (scraper.Tick
 
 type scraperStatusFake struct {
 	status db.ScraperStatus
+	err    error
 	calls  int
 }
 
@@ -43,7 +44,7 @@ func (s *scraperStatusFake) ScraperStatus(
 	time.Time,
 ) (db.ScraperStatus, error) {
 	s.calls++
-	return s.status, nil
+	return s.status, s.err
 }
 
 func TestScraperTickRequiresExactBearerTokenAndBoundsContext(t *testing.T) {

@@ -255,6 +255,9 @@ func loadScraperConfig(warwickBaseURL string) (ScraperConfig, error) {
 }
 
 func validateScraperConfig(config ScraperConfig) error {
+	if config.SnapshotReadsEnabled && !config.Enabled {
+		return fmt.Errorf("SNAPSHOT_READS_ENABLED requires SCRAPER_ENABLED")
+	}
 	if config.BaselineRequestsPerSecond < 0.25 || config.BaselineRequestsPerSecond > 5 {
 		return fmt.Errorf("SCRAPER_REQUESTS_PER_SECOND must be between 0.25 and 5")
 	}

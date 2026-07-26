@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -144,4 +146,79 @@ func TestSnapshotNotificationListenerRejectsOversizedPayload(t *testing.T) {
 		t.Fatalf("unexpected event: %+v", event)
 	case <-time.After(20 * time.Millisecond):
 	}
+}
+
+func TestSnapshotNotificationListenerReportsReconnectWithoutLeakingConnectorError(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(previousLogger)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	listener := newSnapshotNotificationListener(
+		&notificationMetadataStoreFake{
+			firstConn: &notificationConnectionFake{},
+		},
+		NewEventHub(2, 2),
+		func(context.Context) (notificationConnection, error) {
+			return nil, errors.New("postgres://operator:do-not-log@database.invalid/app")
+		},
+		time.Now,
+		func(_ context.Context, delay time.Duration) error {
+			require.Equal(t, time.Second, delay)
+			cancel()
+			return context.Canceled
+		},
+	)
+	t.Cleanup(listener.hub.Close)
+
+	require.ErrorIs(t, listener.Run(ctx), context.Canceled)
+	require.Contains(t, logs.String(), "snapshot_notification_listener_reconnecting")
+	require.Contains(t, logs.String(), "phase=connect")
+	require.Contains(t, logs.String(), "retry_in=1s")
+	require.NotContains(t, logs.String(), "do-not-log")
+}
+
+func TestSnapshotNotificationListenerResetsBackoffAfterStableConnection(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	stableConnection := &notificationConnectionFake{}
+	stableConnection.wait = func(context.Context) (*pgconn.Notification, error) {
+		now = now.Add(time.Minute)
+		return nil, errors.New("connection lost after stable interval")
+	}
+	connectCalls := 0
+	connector := func(context.Context) (notificationConnection, error) {
+		connectCalls++
+		if connectCalls <= 5 {
+			return nil, errors.New("database unavailable")
+		}
+		return stableConnection, nil
+	}
+	var delays []time.Duration
+	listener := newSnapshotNotificationListener(
+		&notificationMetadataStoreFake{firstConn: stableConnection},
+		NewEventHub(2, 2),
+		connector,
+		func() time.Time { return now },
+		func(_ context.Context, delay time.Duration) error {
+			delays = append(delays, delay)
+			if len(delays) == 6 {
+				return context.Canceled
+			}
+			return nil
+		},
+	)
+	t.Cleanup(listener.hub.Close)
+
+	require.ErrorIs(t, listener.Run(context.Background()), context.Canceled)
+	require.Equal(t, []time.Duration{
+		time.Second,
+		2 * time.Second,
+		4 * time.Second,
+		8 * time.Second,
+		30 * time.Second,
+		time.Second,
+	}, delays)
 }

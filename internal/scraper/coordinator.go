@@ -180,7 +180,7 @@ func (c *Coordinator) RunClaimedWithRelease(
 	consecutiveFailures := target.ConsecutiveFailures
 	var validatedAt *time.Time
 	var validationSeqAfter *int64
-	nextRunAt := target.NextRunAt
+	var nextRunAt time.Time
 	if successful {
 		policy := policyForTarget(target)
 		scheduleOutcome := OutcomeUnchanged

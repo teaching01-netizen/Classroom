@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 const snapshotNotificationPayloadLimit = 8 * 1024
 const snapshotNotificationApplicationName = "snapshot-notification-listener"
+const snapshotNotificationStableConnection = time.Minute
 
 type SnapshotMetadataStore interface {
 	ListMetadata(context.Context, time.Time) ([]domain.SnapshotMetadata, error)
@@ -120,12 +122,18 @@ func (l *SnapshotNotificationListener) Run(ctx context.Context) error {
 		if l.connect == nil {
 			return errors.New("snapshot notification connector is not configured")
 		}
+		failurePhase := "connect"
 		connection, err := l.connect(ctx)
 		if err == nil {
-			err = l.runConnection(ctx, connection)
+			failurePhase = "connection"
+			connectedAt := l.clock().UTC()
+			_ = l.runConnection(ctx, connection)
 			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_ = connection.Close(closeCtx)
 			cancel()
+			if !l.clock().UTC().Before(connectedAt.Add(snapshotNotificationStableConnection)) {
+				failures = 0
+			}
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -135,8 +143,17 @@ func (l *SnapshotNotificationListener) Run(ctx context.Context) error {
 		if delayIndex >= len(backoffs) {
 			delayIndex = len(backoffs) - 1
 		}
+		delay := backoffs[delayIndex]
 		failures++
-		if waitErr := l.wait(ctx, backoffs[delayIndex]); waitErr != nil {
+		// Do not attach the connector error: configuration parse errors can
+		// contain a database URL with credentials. The phase and bounded retry
+		// interval make reconnect loops observable without leaking secrets.
+		slog.Warn(
+			"snapshot_notification_listener_reconnecting",
+			"phase", failurePhase,
+			"retry_in", delay,
+		)
+		if waitErr := l.wait(ctx, delay); waitErr != nil {
 			return waitErr
 		}
 	}

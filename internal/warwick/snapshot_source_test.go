@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -115,6 +116,91 @@ func TestSnapshotSourceParsesTypedCatalogAndMetadata(t *testing.T) {
 	require.Equal(t, "course-1", courses[0].CourseID)
 	require.Equal(t, `"v1"`, result.Metadata.ETag)
 	require.Positive(t, result.BytesRead)
+}
+
+func TestSnapshotSourceRejectsDuplicateIdentifiers(t *testing.T) {
+	tests := []struct {
+		name   string
+		target domain.ScrapeTarget
+		body   string
+	}{
+		{
+			name:   "course catalog",
+			target: catalogTarget(),
+			body: `{
+				"recordsTotal":2,"recordsFiltered":2,
+				"data":[
+					{"ID":"course-1","CourseName":"First"},
+					{"ID":"course-1","CourseName":"Duplicate"}
+				]
+			}`,
+		},
+		{
+			name: "course sessions",
+			target: domain.ScrapeTarget{Ref: domain.TargetRef{
+				Host:        "warwick.humantix.cloud",
+				Kind:        domain.SnapshotCourseDetail,
+				ResourceKey: "course-1",
+			}},
+			body: `{
+				"recordsTotal":2,"recordsFiltered":2,
+				"data":[
+					{"dID":"session-1","dName":"First"},
+					{"dID":"session-1","dName":"Duplicate"}
+				]
+			}`,
+		},
+		{
+			name: "session students",
+			target: domain.ScrapeTarget{Ref: domain.TargetRef{
+				Host:        "warwick.humantix.cloud",
+				Kind:        domain.SnapshotSessionDetail,
+				ParentKey:   "course-1",
+				ResourceKey: "session-1",
+			}},
+			body: `{
+				"recordsTotal":2,"recordsFiltered":2,
+				"data":[
+					{"StudentID":"student-1","StudentName":"First"},
+					{"StudentID":"student-1","StudentName":"Duplicate"}
+				]
+			}`,
+		},
+		{
+			name: "student profiles",
+			target: domain.ScrapeTarget{Ref: domain.TargetRef{
+				Host:        "warwick.humantix.cloud",
+				Kind:        domain.SnapshotStudentProfiles,
+				ResourceKey: "profiles",
+			}},
+			body: `{
+				"recordsTotal":2,"recordsFiltered":2,
+				"data":[
+					{"StudentID":"W1","StudentGuid":"guid-1","FullName":"First"},
+					{"StudentID":"W2","StudentGuid":"guid-1","FullName":"Duplicate"}
+				]
+			}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(
+				w http.ResponseWriter,
+				_ *http.Request,
+			) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			source := snapshotTestClient(server, 1<<20)
+
+			_, err := source.Fetch(context.Background(), test.target)
+
+			var fetchErr *domain.FetchError
+			require.ErrorAs(t, err, &fetchErr)
+			require.Equal(t, domain.ErrKindInvalidPayload, fetchErr.Kind)
+		})
+	}
 }
 
 func TestSnapshotSourceSampledTraceRecordsPoolWaitTTFBAndReuseState(t *testing.T) {
@@ -283,8 +369,8 @@ func TestSnapshotSourceProfilesRequireCompleteConsistentPagination(t *testing.T)
 			rows := make([]UserGroupRow, count)
 			for index := range rows {
 				rows[index] = UserGroupRow{
-					StudentID:   start + "-" + string(rune('a'+index%26)),
-					StudentGuid: start + "-guid-" + string(rune('a'+index%26)),
+					StudentID:   start + "-" + strconv.Itoa(index),
+					StudentGuid: start + "-guid-" + strconv.Itoa(index),
 					FullName:    "Student",
 					School:      "School",
 				}

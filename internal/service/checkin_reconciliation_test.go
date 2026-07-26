@@ -60,6 +60,13 @@ func checkinSnapshotProvider(
 		now,
 		now.Add(time.Hour),
 	)
+	profilesRef := provider.ProfilesRef()
+	reader.snapshots[profilesRef.IdentityKey()] = providerSnapshot(
+		profilesRef,
+		[]domain.StudentProfile{},
+		now,
+		now.Add(time.Hour),
+	)
 	return provider, reader
 }
 
@@ -105,6 +112,102 @@ func TestToggleCheckinReconciledSnapshotIsNotPending(t *testing.T) {
 	require.Equal(t, 1, response.NewCount)
 	require.Len(t, refresher.due, 1)
 	require.Len(t, refresher.refreshes, 1)
+}
+
+func TestToggleCheckinReconciliationMatchesEnrichedStudentID(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	refresher := &snapshotRefresherFake{}
+	provider, reader := checkinSnapshotProvider(t, now, true, refresher)
+	sessionRef := provider.SessionRef("course-1", "session-1")
+	reader.snapshots[sessionRef.IdentityKey()] = providerSnapshot(
+		sessionRef,
+		domain.SessionDetail{
+			SessionSummary: domain.SessionSummary{
+				SessionID:      "session-1",
+				CheckedInCount: 1,
+			},
+			Students: []domain.StudentCheckin{{
+				StudentID: "guid-1",
+				CheckedIn: true,
+			}},
+		},
+		now,
+		now.Add(time.Hour),
+	)
+	profilesRef := provider.ProfilesRef()
+	reader.snapshots[profilesRef.IdentityKey()] = providerSnapshot(
+		profilesRef,
+		[]domain.StudentProfile{{
+			StudentID:   "W1",
+			StudentGuid: "guid-1",
+			FullName:    "Student",
+		}},
+		now,
+		now.Add(time.Hour),
+	)
+	service := NewTeacherServiceWithDependencies(
+		provider,
+		provider,
+		&checkinWriterFake{},
+		refresher,
+		2,
+		true,
+	)
+
+	response, err := service.ToggleCheckin(
+		context.Background(),
+		"course-1",
+		"session-1",
+		"W1",
+		true,
+	)
+
+	require.NoError(t, err)
+	require.False(t, response.SnapshotRefreshPending)
+	require.Equal(t, 1, response.NewCount)
+}
+
+func TestToggleCheckinReconciliationDoesNotColdRefreshMissingProfiles(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	refresher := &snapshotRefresherFake{}
+	provider, reader := checkinSnapshotProvider(t, now, true, refresher)
+	sessionRef := provider.SessionRef("course-1", "session-1")
+	reader.snapshots[sessionRef.IdentityKey()] = providerSnapshot(
+		sessionRef,
+		domain.SessionDetail{
+			SessionSummary: domain.SessionSummary{
+				SessionID:      "session-1",
+				CheckedInCount: 1,
+			},
+			Students: []domain.StudentCheckin{{
+				StudentID: "guid-1",
+				CheckedIn: true,
+			}},
+		},
+		now,
+		now.Add(time.Hour),
+	)
+	delete(reader.snapshots, provider.ProfilesRef().IdentityKey())
+	service := NewTeacherServiceWithDependencies(
+		provider,
+		provider,
+		&checkinWriterFake{},
+		refresher,
+		2,
+		true,
+	)
+
+	response, err := service.ToggleCheckin(
+		context.Background(),
+		"course-1",
+		"session-1",
+		"W1",
+		true,
+	)
+
+	require.NoError(t, err)
+	require.True(t, response.SnapshotRefreshPending)
+	require.Equal(t, []domain.TargetRef{sessionRef}, refresher.refreshes)
 }
 
 func TestToggleCheckinOldValidatedStateRemainsPendingAndSchedulesFollowup(t *testing.T) {

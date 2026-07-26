@@ -136,6 +136,12 @@ var (
 		},
 		[]string{"host_class"},
 	)
+	WarwickScrapeStatusCollectionSuccess = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "warwick_scrape_status_collection_success",
+			Help: "Whether the latest scraper status collection completed successfully.",
+		},
+	)
 	WarwickScrapeClaimConflictsTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "warwick_scrape_claim_conflicts_total",

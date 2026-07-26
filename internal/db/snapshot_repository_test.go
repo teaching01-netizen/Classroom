@@ -47,6 +47,7 @@ func newSnapshotRepositoryTest(t *testing.T) (*SnapshotRepository, context.Conte
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	require.NoError(t, err)
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
@@ -182,6 +183,78 @@ func TestSnapshotRepositoryScraperStatusExposesRolloutCoverageGates(t *testing.T
 	require.Equal(t, 1, status.KnownSessionCurrent)
 }
 
+func TestSnapshotRepositoryScraperStatusExcludesDisabledTargets(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+
+	target := claimOneTestTarget(t, ctx, repo, now, "disabled-status-worker")
+	_, err := repo.Commit(
+		ctx,
+		changedCommit(
+			target,
+			"disabled-status-worker",
+			now.Add(-72*time.Hour),
+			json.RawMessage(`{"courses":[]}`),
+		),
+	)
+	require.NoError(t, err)
+	_, err = repo.pool.Exec(ctx, `
+		UPDATE scrape_targets
+		SET enabled=FALSE,
+			consecutive_failures=3
+		WHERE id=$1`,
+		target.ID,
+	)
+	require.NoError(t, err)
+
+	status, err := repo.ScraperStatus(ctx, testSnapshotHost, now)
+
+	require.NoError(t, err)
+	require.Zero(t, status.Failed)
+	require.Zero(t, status.ExpiredCurrent)
+	require.NotContains(t, status.OldestValidationAgeSeconds, domain.SnapshotCourseCatalog)
+	require.NotContains(t, status.OldestSnapshotAgeSeconds, domain.SnapshotCourseCatalog)
+}
+
+func TestSnapshotRepositoryAnyOverdueChecksAllReferencesExist(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+
+	target := claimOneTestTarget(t, ctx, repo, now, "overdue-worker")
+	_, err := repo.Commit(
+		ctx,
+		changedCommit(
+			target,
+			"overdue-worker",
+			now,
+			json.RawMessage(`{"courses":[]}`),
+		),
+	)
+	require.NoError(t, err)
+	_, err = repo.pool.Exec(
+		ctx,
+		`UPDATE scrape_targets SET next_run_at=$2 WHERE id=$1`,
+		target.ID,
+		now.Add(-time.Second),
+	)
+	require.NoError(t, err)
+	missing := seed.Ref
+	missing.ResourceKey = "missing"
+
+	overdue, err := repo.AnyOverdue(
+		ctx,
+		[]domain.TargetRef{seed.Ref, missing},
+		now,
+	)
+
+	require.ErrorIs(t, err, domain.ErrSnapshotNotFound)
+	require.False(t, overdue)
+}
+
 func TestSnapshotRepositoryTargetReadsNullableLeaseOwner(t *testing.T) {
 	repo, ctx := newSnapshotRepositoryTest(t)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -197,7 +270,9 @@ func TestSnapshotRepositoryTargetReadsNullableLeaseOwner(t *testing.T) {
 
 func TestSnapshotRepositoryObserveHostPersistsFractionalTokens(t *testing.T) {
 	repo, ctx := newSnapshotRepositoryTest(t)
-	now := time.Now().UTC().Truncate(time.Second)
+	initialState, err := repo.HostState(ctx, testSnapshotHost)
+	require.NoError(t, err)
+	now := initialState.TokensUpdatedAt
 	seed := catalogSeed(now)
 	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
 	target := claimOneTestTarget(t, ctx, repo, now, "fractional-worker")
@@ -221,6 +296,74 @@ func TestSnapshotRepositoryObserveHostPersistsFractionalTokens(t *testing.T) {
 	state, err := repo.HostState(ctx, testSnapshotHost)
 	require.NoError(t, err)
 	require.InDelta(t, 0.1, state.AvailableTokens, 0.001)
+}
+
+func TestSnapshotRepositoryObserveHostDoesNotRewindTokenClock(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	newer := now.Add(10 * time.Second)
+	older := now.Add(5 * time.Second)
+
+	require.NoError(t, repo.ObserveHost(ctx, domain.HostObservation{
+		Host:       testSnapshotHost,
+		Outcome:    "unchanged",
+		ObservedAt: newer,
+	}))
+	require.NoError(t, repo.ObserveHost(ctx, domain.HostObservation{
+		Host:       testSnapshotHost,
+		Outcome:    "transient_error",
+		ObservedAt: older,
+	}))
+
+	state, err := repo.HostState(ctx, testSnapshotHost)
+	require.NoError(t, err)
+	require.Equal(t, newer, state.TokensUpdatedAt)
+}
+
+func TestSnapshotRepositoryAcquirePermitDoesNotRewindTokenClock(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	firstSeed := catalogSeed(now)
+	firstSeed.Ref.ResourceKey = "permit-clock-first"
+	secondSeed := catalogSeed(now)
+	secondSeed.Ref.ResourceKey = "permit-clock-second"
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{firstSeed, secondSeed}))
+	targets, err := repo.ClaimDue(ctx, ClaimRequest{
+		Now:           now,
+		Limit:         2,
+		WorkerID:      "permit-clock-worker",
+		LeaseDuration: 2 * time.Minute,
+	})
+	require.NoError(t, err)
+	require.Len(t, targets, 2)
+	newer := now.Add(10 * time.Second)
+	older := now.Add(5 * time.Second)
+
+	first, err := repo.AcquireHostPermit(ctx, AcquireHostPermitRequest{
+		Host:            testSnapshotHost,
+		TargetID:        targets[0].ID,
+		WorkerID:        "permit-clock-worker",
+		LeaseGeneration: targets[0].LeaseGeneration,
+		Now:             newer,
+		TTL:             time.Minute,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, first.Permit)
+	require.NoError(t, repo.ReleaseHostPermit(ctx, first.Permit.ID))
+	second, err := repo.AcquireHostPermit(ctx, AcquireHostPermitRequest{
+		Host:            testSnapshotHost,
+		TargetID:        targets[1].ID,
+		WorkerID:        "permit-clock-worker",
+		LeaseGeneration: targets[1].LeaseGeneration,
+		Now:             older,
+		TTL:             time.Minute,
+	})
+	require.NoError(t, err)
+	require.Nil(t, second.Permit)
+
+	state, err := repo.HostState(ctx, testSnapshotHost)
+	require.NoError(t, err)
+	require.Equal(t, newer, state.TokensUpdatedAt)
 }
 
 func claimOneTestTarget(t *testing.T, ctx context.Context, repo *SnapshotRepository, now time.Time, worker string) domain.ScrapeTarget {
@@ -507,6 +650,53 @@ func TestSnapshotRepositoryCommitLifecycleAndIdempotency(t *testing.T) {
 	require.Equal(t, int64(1), current.Version)
 	require.Equal(t, int64(3), current.ValidationSeq)
 	require.Equal(t, now.Add(2*time.Minute), current.ValidatedAt)
+}
+
+func TestSnapshotRepositoryIdempotentRetryReturnsOriginalRunMetadata(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	seed.Ref.ResourceKey = "original-run-metadata"
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+
+	firstTarget := claimOneTestTarget(t, ctx, repo, now, "metadata-worker")
+	firstInput := changedCommit(
+		firstTarget,
+		"metadata-worker",
+		now,
+		json.RawMessage(`{"state":"first"}`),
+	)
+	first, err := repo.Commit(ctx, firstInput)
+	require.NoError(t, err)
+	require.NotNil(t, first.Snapshot)
+
+	secondAt := now.Add(time.Minute)
+	require.NoError(t, repo.SetDueNow(ctx, seed.Ref, secondAt))
+	secondTarget, err := repo.ClaimOne(ctx, ClaimOneRequest{
+		Ref:           seed.Ref,
+		Now:           secondAt,
+		WorkerID:      "metadata-worker",
+		LeaseDuration: 2 * time.Minute,
+	})
+	require.NoError(t, err)
+	_, err = repo.Commit(ctx, changedCommit(
+		secondTarget,
+		"metadata-worker",
+		secondAt,
+		json.RawMessage(`{"state":"second"}`),
+	))
+	require.NoError(t, err)
+
+	retried, err := repo.Commit(ctx, firstInput)
+
+	require.NoError(t, err)
+	require.NotNil(t, retried.Snapshot)
+	require.Equal(t, first.RunID, retried.RunID)
+	require.Equal(t, int64(1), retried.Snapshot.Version)
+	require.Equal(t, int64(1), retried.Snapshot.ValidationSeq)
+	require.Equal(t, now, retried.Snapshot.ValidatedAt)
+	require.Equal(t, firstInput.NextRunAt, retried.Snapshot.NextRunAt)
+	require.JSONEq(t, `{"state":"first"}`, string(retried.Snapshot.Payload))
 }
 
 func TestSnapshotRepositoryAtoBtoACreatesThreeHistoricalVersions(t *testing.T) {
@@ -874,6 +1064,38 @@ func TestSnapshotRepositoryDiscoveryUsesEarliestScheduleAndTwoOmissionRetirement
 	).Scan(&enabled))
 	require.True(t, enabled)
 	require.Equal(t, child.NextRunAt, storedChild.NextRunAt)
+}
+
+func TestSnapshotRepositorySeedPreservesAdaptiveIntervalWithinNewPolicy(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	seed.Ref.ResourceKey = "adaptive-seed"
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+	_, err := repo.pool.Exec(ctx, `
+		UPDATE scrape_targets
+		SET current_interval_seconds=$2
+		WHERE host=$1 AND kind=$3 AND parent_key=$4 AND resource_key=$5`,
+		seed.Ref.Host,
+		durationSeconds(6*time.Hour),
+		seed.Ref.Kind,
+		seed.Ref.ParentKey,
+		seed.Ref.ResourceKey,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+	stored, err := repo.Target(ctx, seed.Ref)
+	require.NoError(t, err)
+	require.Equal(t, 6*time.Hour, stored.CurrentInterval)
+
+	narrowed := seed
+	narrowed.MaxInterval = 4 * time.Hour
+	narrowed.MaxServeAge = 8 * time.Hour
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{narrowed}))
+	stored, err = repo.Target(ctx, seed.Ref)
+	require.NoError(t, err)
+	require.Equal(t, 4*time.Hour, stored.CurrentInterval)
 }
 
 func TestSnapshotRepositoryCurrentNotFoundBeforeSuccess(t *testing.T) {

@@ -62,7 +62,16 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 	r.Get("/api/", healthHandler())
 
 	// Prometheus metrics endpoint.
-	r.Handle("/metrics", promhttp.Handler())
+	metricsHandler := promhttp.Handler()
+	if options.ScraperStatus != nil {
+		metricsHandler = scraperMetricsHandler(
+			options.ScraperStatus,
+			options.ScraperHost,
+			time.Now,
+			metricsHandler,
+		)
+	}
+	r.Handle("/metrics", metricsHandler)
 
 	r.Route("/api/rooms", func(r chi.Router) {
 		r.Use(rl.room.Middleware)

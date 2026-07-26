@@ -93,6 +93,7 @@ warwick_scrape_validation_age_seconds
 warwick_scrape_host_paused
 warwick_scrape_host_requests_per_second
 warwick_scrape_host_concurrency
+warwick_scrape_status_collection_success
 warwick_scrape_claim_conflicts_total
 warwick_scrape_lease_lost_total
 warwick_snapshot_websocket_events_total
@@ -103,6 +104,11 @@ warwick_session_pool_wait_seconds
 
 All labels are bounded. Do not add target, course, session, student, worker, URL,
 or error-message labels.
+
+The `/metrics` handler refreshes scraper status from PostgreSQL with a bounded
+timeout and a short coalescing window. Alert when
+`warwick_scrape_status_collection_success` is 0; the other status gauges may be
+stale until collection succeeds again.
 
 The PostgreSQL pool should provide at least
 `8 + SCRAPER_MAX_CONCURRENCY` connections for API traffic, the dedicated

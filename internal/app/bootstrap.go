@@ -261,8 +261,13 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 			}
 			return nil
 		}(),
-		ScraperRunner:    scheduler,
-		ScraperStatus:    snapshotRepository,
+		ScraperRunner: scheduler,
+		ScraperStatus: func() api.ScraperStatusReader {
+			if snapshotRuntimeEnabled {
+				return snapshotRepository
+			}
+			return nil
+		}(),
 		ScraperHost:      cfg.Scraper.Host,
 		ScraperTickLimit: cfg.Scraper.TickLimit,
 		ScraperToken:     cfg.Scraper.TriggerToken,

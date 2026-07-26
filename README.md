@@ -51,6 +51,7 @@ SNAPSHOT_READS_ENABLED=false
 ```
 
 Invalid scraper bounds or unsafe lease/fetch/grace relationships fail startup.
+Snapshot reads also fail startup unless scraper writes remain enabled.
 
 ## Build and run
 

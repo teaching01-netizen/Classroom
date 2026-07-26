@@ -186,6 +186,37 @@ func (p *SnapshotProvider) FetchStudentProfiles(
 	return profiles, nil
 }
 
+// CurrentStudentProfiles reads only the committed profile snapshot. It is used
+// by post-mutation reconciliation, where a cold synchronous profile refresh
+// would add user-visible latency and unrelated Warwick load.
+func (p *SnapshotProvider) CurrentStudentProfiles(
+	ctx context.Context,
+) ([]domain.StudentProfile, error) {
+	ref := p.ProfilesRef()
+	snapshot, err := p.reader.Current(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	if snapshot.Expired(p.clock().UTC()) {
+		return nil, fmt.Errorf(
+			"%w: %s %q",
+			domain.ErrSnapshotExpired,
+			ref.Kind,
+			ref.ResourceKey,
+		)
+	}
+	var profiles []domain.StudentProfile
+	if err := json.Unmarshal(snapshot.Payload, &profiles); err != nil {
+		return nil, fmt.Errorf(
+			"decode %s snapshot %q: %w",
+			ref.Kind,
+			ref.ResourceKey,
+			err,
+		)
+	}
+	return profiles, nil
+}
+
 func (p *SnapshotProvider) FetchSessionForReport(
 	ctx context.Context,
 	courseID string,
