@@ -118,6 +118,36 @@ func TestSnapshotSourceParsesTypedCatalogAndMetadata(t *testing.T) {
 	require.Positive(t, result.BytesRead)
 }
 
+func TestSnapshotSourceCourseDetailEmptyStatusIsNotStarted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"draw":1,
+			"recordsTotal":2,
+			"recordsFiltered":2,
+			"data":[
+				{"dID":"session-1","dName":"Pending","dStatus":""},
+				{"dID":"session-2","dName":"Current","dStatus":"Active"}
+			]
+		}`))
+	}))
+	defer server.Close()
+	source := snapshotTestClient(server, 1<<20)
+	target := domain.ScrapeTarget{Ref: domain.TargetRef{
+		Host:        "warwick.humantix.cloud",
+		Kind:        domain.SnapshotCourseDetail,
+		ResourceKey: "course-1",
+	}}
+
+	result, err := source.Fetch(context.Background(), target)
+
+	require.NoError(t, err)
+	detail, ok := result.Value.(*domain.CourseDetail)
+	require.True(t, ok)
+	require.Equal(t, domain.SessionStatusNotStarted, detail.Sessions[0].Status)
+	require.Equal(t, domain.SessionStatusActive, detail.Sessions[1].Status)
+}
+
 func TestSnapshotSourceRejectsDuplicateIdentifiers(t *testing.T) {
 	tests := []struct {
 		name   string

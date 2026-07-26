@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,136 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMigration010ForcesCourseDetailReparse(t *testing.T) {
+	sqlBytes, err := migrations.ReadFile(
+		"migrations/010_reparse_course_detail_session_status.up.sql",
+	)
+	require.NoError(t, err)
+
+	statement := strings.Join(strings.Fields(string(sqlBytes)), " ")
+	require.Contains(t, statement, "etag = NULL")
+	require.Contains(t, statement, "last_modified = NULL")
+	require.Contains(t, statement, "next_run_at = LEAST(next_run_at, NOW())")
+	require.Contains(t, statement, "WHERE kind = 'course_detail'")
+}
+
+func TestMigration010ScopesCourseDetailRepairInPostgreSQL(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL not set; migration integration test requires a disposable PostgreSQL database")
+	}
+
+	database, _, ctx := newMigrationSchema(t, databaseURL, "course_status_reparse")
+	source, err := iofs.New(migrations, "migrations")
+	require.NoError(t, err)
+	driver, err := postgres.WithInstance(database, &postgres.Config{})
+	require.NoError(t, err)
+	migrator, err := migrate.NewWithInstance("iofs", source, "postgres", driver)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = migrator.Close()
+	})
+	require.NoError(t, migrator.Steps(9))
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	future := now.Add(24 * time.Hour)
+	_, err = database.ExecContext(ctx, `
+		INSERT INTO scrape_host_state (
+			host,
+			baseline_requests_per_second,
+			current_requests_per_second,
+			burst,
+			available_tokens,
+			tokens_updated_at,
+			baseline_concurrency,
+			current_concurrency
+		)
+		VALUES ('warwick.example', 1, 1, 1, 1, $1, 1, 1)`,
+		now,
+	)
+	require.NoError(t, err)
+
+	for _, target := range []struct {
+		kind        string
+		resourceKey string
+		parentKey   string
+	}{
+		{kind: "course_catalog", resourceKey: "catalog"},
+		{kind: "course_detail", resourceKey: "course-1"},
+		{kind: "session_detail", resourceKey: "session-1", parentKey: "course-1"},
+		{kind: "student_profiles", resourceKey: "profiles"},
+	} {
+		_, err = database.ExecContext(ctx, `
+			INSERT INTO scrape_targets (
+				host,
+				kind,
+				resource_key,
+				parent_key,
+				current_interval_seconds,
+				min_interval_seconds,
+				max_interval_seconds,
+				max_serve_age_seconds,
+				next_run_at,
+				etag,
+				last_modified
+			)
+			VALUES (
+				'warwick.example',
+				$1,
+				$2,
+				$3,
+				3600,
+				900,
+				86400,
+				172800,
+				$4,
+				'"validator"',
+				'Sun, 26 Jul 2026 10:00:00 GMT'
+			)`,
+			target.kind,
+			target.resourceKey,
+			target.parentKey,
+			future,
+		)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, migrator.Steps(1))
+
+	rows, err := database.QueryContext(ctx, `
+		SELECT kind, etag, last_modified, next_run_at
+		FROM scrape_targets
+		ORDER BY kind`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	seen := 0
+	for rows.Next() {
+		var kind string
+		var etag sql.NullString
+		var lastModified sql.NullString
+		var nextRunAt time.Time
+		require.NoError(t, rows.Scan(&kind, &etag, &lastModified, &nextRunAt))
+		seen++
+		if kind == "course_detail" {
+			require.False(t, etag.Valid)
+			require.False(t, lastModified.Valid)
+			require.LessOrEqual(t, nextRunAt.Unix(), time.Now().UTC().Unix())
+			continue
+		}
+		require.Equal(t, `"validator"`, etag.String)
+		require.Equal(t, "Sun, 26 Jul 2026 10:00:00 GMT", lastModified.String)
+		require.Equal(t, future, nextRunAt.UTC())
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, 4, seen)
+
+	version, dirty, err := migrator.Version()
+	require.NoError(t, err)
+	require.Equal(t, uint(10), version)
+	require.False(t, dirty)
+}
 
 func TestRemoveUpstreamDataCacheMigration(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")

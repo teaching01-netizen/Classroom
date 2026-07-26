@@ -20,6 +20,8 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
+const requiredSchemaVersion = 10
+
 func ParsePoolConfig(databaseURL string, serverless bool) (*pgxpool.Config, error) {
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
@@ -78,15 +80,25 @@ func RunMigrations(databaseURL string) error {
 		return err
 	}
 
-	// After successful migration (or ErrNoChange), verify schema version >= 9.
-	// Migration 009 adds the fenced PostgreSQL snapshot and host-admission model.
+	// After successful migration (or ErrNoChange), verify that the
+	// course-detail status reparse migration has been applied.
 	var version int
 	if err := db.QueryRowContext(context.Background(), "SELECT version FROM schema_migrations").Scan(&version); err != nil {
 		return fmt.Errorf("check schema version: %w", err)
 	}
-	if version < 9 {
-		slog.Error("schema version below required minimum", "have", version, "need", 9)
-		return fmt.Errorf("schema version %d below required minimum 9", version)
+	if version < requiredSchemaVersion {
+		slog.Error(
+			"schema version below required minimum",
+			"have",
+			version,
+			"need",
+			requiredSchemaVersion,
+		)
+		return fmt.Errorf(
+			"schema version %d below required minimum %d",
+			version,
+			requiredSchemaVersion,
+		)
 	}
 
 	return nil

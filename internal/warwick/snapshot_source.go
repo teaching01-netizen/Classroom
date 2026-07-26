@@ -459,9 +459,8 @@ func (s *SnapshotSource) fetchCourse(
 		); err != nil {
 			return result, err
 		}
-		status := domain.SessionStatusActive
-		if row.DStatus == "Finished" {
-			status = domain.SessionStatusDone
+		status := sessionStatusFromWarwick(row.DStatus)
+		if status == domain.SessionStatusDone {
 			completed++
 		}
 		sessions = append(sessions, domain.SessionSummary{

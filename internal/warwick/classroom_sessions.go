@@ -80,6 +80,19 @@ func courseDetailSingleflightKey(courseID, courseName string) string {
 	return fmt.Sprintf("course-detail:%q:%q", courseID, courseName)
 }
 
+func sessionStatusFromWarwick(status string) domain.SessionStatus {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "":
+		return domain.SessionStatusNotStarted
+	case "finished":
+		return domain.SessionStatusDone
+	default:
+		// Preserve the existing behavior for explicit "Active" and any
+		// unrecognized non-empty upstream status.
+		return domain.SessionStatusActive
+	}
+}
+
 func (c *ClassroomClient) getCourseDetailWithPool(ctx context.Context, courseID, courseName string) (*domain.CourseDetail, error) {
 	return c.fetchCourseDetailWithPool(ctx, courseID, courseName)
 }
@@ -153,16 +166,12 @@ func (c *ClassroomClient) fetchCourseDetail(ctx context.Context, cookie, courseI
 
 	sessions := make([]domain.SessionSummary, 0, len(data.Data))
 	for i, row := range data.Data {
-		status := domain.SessionStatusActive
-		if row.DStatus == "Finished" {
-			status = domain.SessionStatusDone
-		}
 		sessionID := fmt.Sprintf("%v", row.DID)
 		sessions = append(sessions, domain.SessionSummary{
 			SessionID:     sessionID,
 			SessionNumber: i + 1,
 			Name:          row.DName,
-			Status:        status,
+			Status:        sessionStatusFromWarwick(row.DStatus),
 		})
 	}
 

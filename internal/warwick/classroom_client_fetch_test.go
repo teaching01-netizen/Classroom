@@ -261,6 +261,38 @@ func TestGetCourseDetail_AlwaysFetchesUpstream(t *testing.T) {
 	require.Equal(t, 2, detailCalls)
 }
 
+func TestGetCourseDetail_EmptyStatusIsNotStarted(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"draw":1,
+			"recordsTotal":2,
+			"recordsFiltered":2,
+			"data":[
+				{"dID":"s1","dName":"Pending","dStatus":""},
+				{"dID":"s2","dName":"Current","dStatus":"Active"}
+			]
+		}`))
+	}))
+	t.Cleanup(apiServer.Close)
+
+	loginServer := newTestLoginServer(t)
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+	client := NewClassroomClientFromPool(pool, TierTeacher)
+	client.baseURL = apiServer.URL
+
+	detail, err := client.GetCourseDetailWithName(
+		context.Background(),
+		"c1",
+		"Course",
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, domain.SessionStatusNotStarted, detail.Sessions[0].Status)
+	require.Equal(t, domain.SessionStatusActive, detail.Sessions[1].Status)
+}
+
 func TestGetSessionDetail_AlwaysFetchesUpstream(t *testing.T) {
 	apiCalls := 0
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -77,6 +77,22 @@ Wait for all of these gates:
 - no repeated `429`, auth renewal storm, DB-pool exhaustion, or notification
   reconnect loop occurs.
 
+Migration 010 is a forward-only parser repair and requires a drained rollout:
+
+1. set `SNAPSHOT_READS_ENABLED=false` and `SCRAPER_ENABLED=false` on every old
+   instance, pause external scraper ticks, and wait for active leases and host
+   permits to reach zero;
+2. deploy the new binary with the scraper still disabled so migration 010 can
+   clear course-detail validators and mark those targets due;
+3. enable scraper writes only, then run ticks until all course-detail targets
+   have validated after the deployment and the normal coverage/expiry gates
+   pass;
+4. enable snapshot reads only after that reparse backlog has drained.
+
+Expect a temporary due-target bump after migration 010. Do not roll the scraper
+back to a pre-010 binary after this migration; use the read feature flag for
+product rollback while keeping the corrected scraper parser deployed.
+
 Observe for at least one complete maximum active-session interval. Serverless
 ticks must run frequently enough that this interval can actually be met.
 
