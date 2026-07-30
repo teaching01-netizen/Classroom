@@ -18,12 +18,15 @@ type SchedulerRepository interface {
 	ClaimDue(context.Context, db.ClaimRequest) ([]domain.ScrapeTarget, error)
 	ClaimOne(context.Context, db.ClaimOneRequest) (domain.ScrapeTarget, error)
 	ReleaseLease(context.Context, db.ReleaseLeaseRequest) error
+	RenewLease(context.Context, db.RenewLeaseRequest) error
 	RescheduleLease(context.Context, int64, int64, time.Time) error
 	SetDueNow(context.Context, domain.TargetRef, time.Time) error
 	Seed(context.Context, []domain.TargetSeed) error
 	Target(context.Context, domain.TargetRef) (domain.ScrapeTarget, error)
 	CountDue(context.Context, time.Time) (int, error)
 	Prune(context.Context, db.PruneRequest) (db.PruneResult, error)
+	FindStaleTargets(context.Context, time.Time) ([]db.StaleTarget, error)
+	RepairStaleTargets(context.Context, []db.StaleTarget, time.Time) (int64, error)
 }
 
 type PermitController interface {
@@ -52,6 +55,7 @@ type SchedulerConfig struct {
 	SnapshotRetention   time.Duration
 	RunRetention        time.Duration
 	PruneBatchSize      int
+	WatchdogInterval    time.Duration
 	Clock               func() time.Time
 	Random              *rand.Rand
 	Wait                func(context.Context, time.Duration) error
@@ -73,6 +77,7 @@ type Scheduler struct {
 	snapshotRetention   time.Duration
 	runRetention        time.Duration
 	pruneBatchSize      int
+	watchdogInterval    time.Duration
 	clock               func() time.Time
 	wait                func(context.Context, time.Duration) error
 	randomMu            sync.Mutex
@@ -126,6 +131,9 @@ func NewScheduler(
 	if config.PruneBatchSize <= 0 {
 		config.PruneBatchSize = 1000
 	}
+	if config.WatchdogInterval <= 0 {
+		config.WatchdogInterval = 5 * time.Minute
+	}
 	return &Scheduler{
 		repository:          repository,
 		permits:             permits,
@@ -142,6 +150,7 @@ func NewScheduler(
 		snapshotRetention:   config.SnapshotRetention,
 		runRetention:        config.RunRetention,
 		pruneBatchSize:      config.PruneBatchSize,
+		watchdogInterval:    config.WatchdogInterval,
 		clock:               config.Clock,
 		wait:                config.Wait,
 		random:              config.Random,
@@ -321,7 +330,16 @@ func (s *Scheduler) executeClaimed(
 				releaseErr = s.permits.Release(releaseCtx, decision.Permit)
 			})
 		}
+
+		// Start lease heartbeat before the run. The heartbeat renews the lease
+		// every leaseDuration/3 (capped at 10s) to prevent expiration during
+		// long-running fetches. It exits when the done channel is closed (run
+		// completes or context cancelled) or when the lease is lost.
+		heartbeatDone := make(chan struct{})
+		go s.leaseHeartbeat(ctx, target, heartbeatDone)
+
 		runResult, runErr := s.runner.RunClaimedWithRelease(ctx, target, release)
+		close(heartbeatDone)
 		release()
 		if errors.Is(runErr, domain.ErrLeaseLost) {
 			metrics.WarwickScrapeLeaseLostTotal.Inc()
@@ -347,6 +365,48 @@ func (s *Scheduler) releaseUnstarted(target domain.ScrapeTarget) error {
 		TargetID:        target.ID,
 		LeaseGeneration: target.LeaseGeneration,
 	})
+}
+
+func (s *Scheduler) leaseHeartbeat(ctx context.Context, target domain.ScrapeTarget, done <-chan struct{}) {
+	interval := s.leaseDuration / 3
+	if interval > 10*time.Second {
+		interval = 10 * time.Second
+	}
+	for {
+		select {
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+			renewCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := s.repository.RenewLease(renewCtx, db.RenewLeaseRequest{
+				TargetID:        target.ID,
+				WorkerID:        s.workerID,
+				LeaseGeneration: target.LeaseGeneration,
+				LeaseDuration:   s.leaseDuration,
+				Now:             s.clock().UTC(),
+			})
+			cancel()
+			if errors.Is(err, domain.ErrLeaseLost) {
+				slog.Warn("scrape_heartbeat_lease_lost",
+					"target_id", target.ID,
+					"target_kind", string(target.Ref.Kind),
+					"worker_id", s.workerID,
+					"lease_generation", target.LeaseGeneration,
+				)
+				return
+			}
+			if err != nil {
+				slog.Warn("scrape_heartbeat_renewal_failed",
+					"target_id", target.ID,
+					"worker_id", s.workerID,
+					"error", err,
+				)
+				return
+			}
+		}
+	}
 }
 
 func (s *Scheduler) SetDueNow(ctx context.Context, ref domain.TargetRef) error {
@@ -489,16 +549,85 @@ func (s *Scheduler) runDailyMaintenance(ctx context.Context) {
 }
 
 func (s *Scheduler) Run(ctx context.Context) {
+	watchdogTicker := time.NewTicker(s.watchdogInterval)
+	defer watchdogTicker.Stop()
+
 	for {
 		if ctx.Err() != nil {
 			return
 		}
+
+		select {
+		case <-watchdogTicker.C:
+			s.RunWatchdog(ctx)
+		default:
+		}
+
 		if _, err := s.RunDue(ctx, s.tickLimit); err != nil && ctx.Err() == nil {
 			slog.Warn("snapshot_scheduler_tick_failed", "error", err)
 		}
 		if err := s.wait(ctx, s.pollInterval); err != nil {
 			return
 		}
+	}
+}
+
+// RunWatchdog queries for stale targets and repairs impossible scheduling
+// state: next_run_at too far in the future, expired leases still held, etc.
+// It emits structured repair events via slog for operational visibility.
+func (s *Scheduler) RunWatchdog(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	now := s.clock().UTC()
+
+	staleTargets, err := s.repository.FindStaleTargets(ctx, now)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("watchdog_query_failed", "error", err)
+		}
+		return
+	}
+	if len(staleTargets) == 0 {
+		return
+	}
+
+	repaired, err := s.repository.RepairStaleTargets(ctx, staleTargets, now)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("watchdog_repair_failed", "error", err, "candidates", len(staleTargets))
+		}
+		return
+	}
+
+	slog.Info("watchdog_repair_complete",
+		"candidates", len(staleTargets),
+		"repaired", repaired,
+		"now", now,
+	)
+
+	for _, t := range staleTargets {
+		reason := "unknown"
+		var maxIntervalSeconds int64
+		if t.CurrentIntervalSeconds > 0 {
+			maxIntervalSeconds = t.CurrentIntervalSeconds * 3
+		}
+		if t.NextRunAt.After(now.Add(time.Duration(maxIntervalSeconds) * time.Second)) {
+			reason = "next_run_at_impossibly_far"
+		} else if t.LeaseExpiresAt != nil && t.LeaseExpiresAt.Before(now.Add(-time.Hour)) {
+			reason = "lease_expired_orphaned"
+		} else if t.LifecycleState != "active" {
+			reason = "lifecycle_mismatch"
+		}
+		slog.Info("watchdog_repair_event",
+			"target_id", t.ID,
+			"host", t.Host,
+			"kind", t.Kind,
+			"resource_key", t.ResourceKey,
+			"reason", reason,
+			"old_next_run_at", t.NextRunAt,
+			"old_lease_owner", t.LeaseOwner,
+		)
 	}
 }
 

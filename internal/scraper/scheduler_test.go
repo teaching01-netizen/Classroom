@@ -32,6 +32,9 @@ type schedulerRepository struct {
 	seeds           [][]domain.TargetSeed
 	prunes          int
 	pruneErrors     []error
+	staleTargets    []db.StaleTarget
+	repairCalled    int64
+	repairErr       error
 }
 
 func (r *schedulerRepository) ClaimDue(_ context.Context, request db.ClaimRequest) ([]domain.ScrapeTarget, error) {
@@ -74,6 +77,10 @@ func (r *schedulerRepository) ReleaseLease(_ context.Context, request db.Release
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.releases = append(r.releases, request)
+	return nil
+}
+
+func (r *schedulerRepository) RenewLease(_ context.Context, _ db.RenewLeaseRequest) error {
 	return nil
 }
 
@@ -123,6 +130,28 @@ func (r *schedulerRepository) Prune(context.Context, db.PruneRequest) (db.PruneR
 		return db.PruneResult{}, err
 	}
 	return db.PruneResult{}, nil
+}
+
+func (r *schedulerRepository) FindStaleTargets(ctx context.Context, _ time.Time) ([]db.StaleTarget, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]db.StaleTarget(nil), r.staleTargets...), nil
+}
+
+func (r *schedulerRepository) RepairStaleTargets(ctx context.Context, _ []db.StaleTarget, _ time.Time) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.repairErr != nil {
+		return 0, r.repairErr
+	}
+	r.repairCalled++
+	return r.repairCalled, nil
 }
 
 type schedulerPermitController struct {

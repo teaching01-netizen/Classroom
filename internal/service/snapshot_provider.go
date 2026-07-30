@@ -241,3 +241,13 @@ func (p *SnapshotProvider) AnyOverdue(
 ) (bool, error) {
 	return p.reader.AnyOverdue(ctx, refs, p.clock().UTC())
 }
+
+// CurrentSnapshot returns the raw committed snapshot for the given reference.
+// It is used by the idempotent check-in endpoint to read the snapshot version
+// and student state without deserializing through the typed read path.
+func (p *SnapshotProvider) CurrentSnapshot(
+	ctx context.Context,
+	ref domain.TargetRef,
+) (domain.Snapshot, error) {
+	return p.reader.Current(ctx, ref)
+}

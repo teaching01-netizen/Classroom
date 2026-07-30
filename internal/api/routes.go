@@ -94,6 +94,7 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 		r.Get("/courses/{courseId}", getCourseDetailHandler(ts))
 		r.Get("/courses/{courseId}/sessions/{sessionId}", getSessionDetailHandler(ts))
 		r.With(rl.toggle.Middleware).Post("/courses/{courseId}/sessions/{sessionId}/toggle-checkin", toggleCheckinHandler(ts))
+		r.Put("/courses/{courseId}/sessions/{sessionId}/students/{studentId}/checkin", idempotentCheckinHandler(ts))
 		r.Get("/courses/{courseId}/attendance-report", getCourseAttendanceReportHandler(ts))
 		r.Post("/courses/attendance-batch", getBatchAttendanceHandler(ts))
 
@@ -242,7 +243,7 @@ func corsMiddleware(corsOrigin string) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			if r.Method == "OPTIONS" {

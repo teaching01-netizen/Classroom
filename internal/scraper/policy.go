@@ -162,3 +162,21 @@ func FullJitter(cap time.Duration, rng *rand.Rand) time.Duration {
 	}
 	return time.Duration(rng.Int63n(int64(cap) + 1))
 }
+
+// LateCorrectionPolicy returns a Policy suitable for sessions that completed
+// long ago and whose scraping interval may have expanded beyond their
+// correction window. Newer sessions get tighter intervals; older sessions
+// get progressively coarser corrections.
+func LateCorrectionPolicy(sessionCompletedAt time.Time, now time.Time) Policy {
+	age := now.Sub(sessionCompletedAt)
+	switch {
+	case age < 24*time.Hour:
+		return Policy{Initial: 5 * time.Minute, Min: 5 * time.Minute, Max: 30 * time.Minute}
+	case age < 7*24*time.Hour:
+		return Policy{Initial: 1 * time.Hour, Min: 1 * time.Hour, Max: 6 * time.Hour}
+	case age < 30*24*time.Hour:
+		return Policy{Initial: 24 * time.Hour, Min: 24 * time.Hour, Max: 24 * time.Hour}
+	default:
+		return Policy{Initial: 7 * 24 * time.Hour, Min: 7 * 24 * time.Hour, Max: 7 * 24 * time.Hour}
+	}
+}

@@ -389,6 +389,7 @@ func TestPostgreSQLSnapshotPipelineAndLiveRollbackContracts(t *testing.T) {
 	listener := service.NewSnapshotNotificationListener(
 		scopedDatabaseURL,
 		repository,
+		repository,
 		hub,
 	)
 	listenerCtx, stopListener := context.WithCancel(context.Background())

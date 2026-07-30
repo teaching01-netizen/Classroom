@@ -49,7 +49,15 @@ func setSnapshotFreshnessHeaders(w http.ResponseWriter, metadata domain.Snapshot
 	w.Header().Set("X-Snapshot-Validation-Seq", strconv.FormatInt(metadata.ValidationSeq, 10))
 	w.Header().Set("X-Snapshot-Validated-At", metadata.ValidatedAt.UTC().Format(time.RFC3339))
 	w.Header().Set("X-Snapshot-Stale", strconv.FormatBool(metadata.Stale))
+	w.Header().Set("X-Snapshot-Generated-At", metadata.ValidatedAt.UTC().Format(time.RFC3339))
 	w.Header().Set("Cache-Control", "private, no-store")
+	if metadata.ParentKey != "" {
+		w.Header().Set("ETag", `W/"target:`+metadata.ResourceKey+`:parent:`+metadata.ParentKey+`:version:`+strconv.FormatInt(metadata.Version, 10)+`"`)
+		w.Header().Set("X-Snapshot-Target", metadata.ParentKey+`:`+metadata.ResourceKey)
+	} else {
+		w.Header().Set("ETag", `W/"target:`+metadata.ResourceKey+`:version:`+strconv.FormatInt(metadata.Version, 10)+`"`)
+		w.Header().Set("X-Snapshot-Target", metadata.ResourceKey)
+	}
 }
 
 func getCoursesHandler(ts *service.TeacherService) http.HandlerFunc {
@@ -64,6 +72,8 @@ func getCoursesHandler(ts *service.TeacherService) http.HandlerFunc {
 		}
 		if metadata, active, metadataErr := ts.CourseCatalogMetadata(r.Context()); active && metadataErr == nil {
 			setSnapshotFreshnessHeaders(w, metadata)
+			writeJSON(w, http.StatusOK, versionedResponse(domain.TeacherCoursesResponse{Courses: courses}, metadata))
+			return
 		}
 		writeJSON(w, http.StatusOK, successResponse(domain.TeacherCoursesResponse{Courses: courses}))
 	}
@@ -87,6 +97,8 @@ func getCourseDetailHandler(ts *service.TeacherService) http.HandlerFunc {
 		}
 		if metadata, active, metadataErr := ts.CourseMetadata(r.Context(), courseID); active && metadataErr == nil {
 			setSnapshotFreshnessHeaders(w, metadata)
+			writeJSON(w, http.StatusOK, versionedResponse(detail, metadata))
+			return
 		}
 		writeJSON(w, http.StatusOK, successResponse(detail))
 	}
@@ -113,6 +125,8 @@ func getSessionDetailHandler(ts *service.TeacherService) http.HandlerFunc {
 
 		if metadata, active, metadataErr := ts.SessionMetadata(r.Context(), courseID, sessionID); active && metadataErr == nil {
 			setSnapshotFreshnessHeaders(w, metadata)
+			writeJSON(w, http.StatusOK, versionedResponse(result.Detail, metadata))
+			return
 		}
 		writeJSON(w, http.StatusOK, successResponse(result.Detail))
 	}
@@ -145,6 +159,74 @@ func toggleCheckinHandler(ts *service.TeacherService) http.HandlerFunc {
 
 		writeJSON(w, http.StatusOK, successResponse(response))
 
+	}
+}
+
+// idempotentCheckinHandler handles PUT /api/teacher/courses/{courseId}/sessions/{sessionId}/students/{studentId}/checkin
+func idempotentCheckinHandler(ts *service.TeacherService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		courseID := chi.URLParam(r, "courseId")
+		sessionID := chi.URLParam(r, "sessionId")
+		studentID := chi.URLParam(r, "studentId")
+
+		if courseID == "" || sessionID == "" || studentID == "" {
+			writeJSON(w, http.StatusBadRequest, errorResponse("courseId, sessionId, and studentId are required"))
+			return
+		}
+
+		var req domain.IdempotentCheckinRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))
+			return
+		}
+		if req.IdempotencyKey == "" {
+			writeJSON(w, http.StatusBadRequest, errorResponse("idempotencyKey is required"))
+			return
+		}
+
+		checkinReq := service.CheckinRequest{
+			CourseID:                courseID,
+			SessionID:               sessionID,
+			StudentID:               studentID,
+			DesiredCheckedIn:        req.CheckedIn,
+			ExpectedSnapshotVersion: req.ExpectedSnapshotVersion,
+			IdempotencyKey:          req.IdempotencyKey,
+		}
+
+		result, err := ts.Checkin(r.Context(), checkinReq)
+		if err != nil {
+			var conflict *service.ErrConflict
+			if errors.As(err, &conflict) {
+				writeJSON(w, http.StatusConflict, errorResponse(err.Error()))
+				return
+			}
+			if mapServiceError(w, err) {
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
+			return
+		}
+
+		switch result.Status {
+		case "confirmed", "already_satisfied":
+			writeJSON(w, http.StatusOK, successResponse(domain.IdempotentCheckinResponse{
+				Status:          result.Status,
+				CheckedIn:       result.CheckedIn,
+				SnapshotVersion: result.SnapshotVersion,
+				RefreshPending:  result.RefreshPending,
+			}))
+		case "pending_verification":
+			writeJSON(w, http.StatusAccepted, successResponse(domain.IdempotentCheckinResponse{
+				Status:          result.Status,
+				CheckedIn:       result.CheckedIn,
+				SnapshotVersion: result.SnapshotVersion,
+				RefreshPending:  result.RefreshPending,
+			}))
+		case "failed":
+			writeJSON(w, http.StatusBadGateway, errorResponse("upstream rejected request"))
+		default:
+			writeJSON(w, http.StatusInternalServerError, errorResponse("unexpected status: "+result.Status))
+		}
 	}
 }
 

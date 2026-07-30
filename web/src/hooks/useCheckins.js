@@ -4,15 +4,20 @@ import { usePolling } from './usePolling';
 import { useFocusRefetch } from './useFocusRefetch';
 import { useWsReconnect } from './useWebSocket';
 import { fetchFresh } from '../api/fetchFresh';
+import { fetchVersioned } from '../api/versionedFetch';
 import { isSessionSnapshot, useSnapshotEvents } from './useSnapshotEvents';
 
 const POLL_INTERVAL_MS = 10000;
+const DEBOUNCE_MS = 150;
 
 export const useCheckins = (courseId, sessionId) => {
   const { students, currentSession, isInitialLoading, isRefreshing, error, setStudents, setCourseName, setCurrentSession, updateStudentCheckin, setInitialLoading, setRefreshing, setError, reset } = useSessionStore();
 
   const abortRef = useRef(null);
   const hasLoadedRef = useRef(false);
+  const displayedVersionRef = useRef(0);
+  const requestedMinimumRef = useRef(0);
+  const debounceTimerRef = useRef(null);
 
   const fetchStudents = useCallback(async (signal) => {
     if (!courseId || !sessionId) return;
@@ -22,16 +27,24 @@ export const useCheckins = (courseId, sessionId) => {
       setInitialLoading();
     }
     try {
-      const response = await fetchFresh(`/api/teacher/courses/${courseId}/sessions/${sessionId}`, { signal });
-      const result = await response.json();
-      if (result.success) {
-        setCurrentSession(result.data);
-        setStudents(result.data.students || []);
+      const result = await fetchVersioned(
+        `/api/teacher/courses/${courseId}/sessions/${sessionId}`,
+        { signal },
+        { displayedVersion: displayedVersionRef.current, requestedMinimumVersion: requestedMinimumRef.current }
+      );
+      if (!result) return;
+      const json = await result.response.json();
+      if (json.success) {
+        setCurrentSession(json.data);
+        setStudents(json.data.students || []);
         if (!hasLoadedRef.current) {
           hasLoadedRef.current = true;
         }
+        if (json.snapshot?.version) {
+          displayedVersionRef.current = json.snapshot.version;
+        }
       } else {
-        setError(result.error || 'Failed to fetch students');
+        setError(json.error || 'Failed to fetch students');
       }
     } catch (err) {
       if (err.name !== 'AbortError') {
@@ -45,8 +58,6 @@ export const useCheckins = (courseId, sessionId) => {
   }, [fetchStudents]);
 
   const toggleCheckin = async (studentId, checked) => {
-    // Optimistic update: reflect toggle immediately in the UI before the
-    // server round-trip completes. Roll back by reverting on error.
     updateStudentCheckin(studentId, checked);
     try {
       const response = await fetchFresh(`/api/teacher/courses/${courseId}/sessions/${sessionId}/toggle-checkin`, {
@@ -58,9 +69,6 @@ export const useCheckins = (courseId, sessionId) => {
       if (!result.success) {
         updateStudentCheckin(studentId, !checked);
       } else if (result.data?.snapshot_refresh_pending) {
-        // The Warwick write succeeded but the committed snapshot has not
-        // converged yet. Reconcile immediately, while the existing 10-second
-        // polling and WebSocket-reconnect repair paths remain active.
         fetchStudentsNoAbort();
       }
     } catch (err) {
@@ -73,9 +81,9 @@ export const useCheckins = (courseId, sessionId) => {
   useEffect(() => {
     const key = `${courseId}-${sessionId}`;
     if (prevKeyRef.current !== null && prevKeyRef.current !== key) {
-      // Preserve the current render state while the new request is in flight;
-      // the next successful response replaces it with the live result.
       hasLoadedRef.current = false;
+      displayedVersionRef.current = 0;
+      requestedMinimumRef.current = 0;
     }
     prevKeyRef.current = key;
 
@@ -99,6 +107,27 @@ export const useCheckins = (courseId, sessionId) => {
     return () => controller.abort();
   }, [courseId, setCourseName]);
 
+  const debouncedFetch = useCallback(() => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    debounceTimerRef.current = setTimeout(() => {
+      debounceTimerRef.current = null;
+      fetchStudents(undefined);
+    }, DEBOUNCE_MS);
+  }, [fetchStudents]);
+
+  useEffect(() => () => {
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+  }, []);
+
+  const handleSnapshotEvent = useCallback((metadata) => {
+    if (metadata?.version) {
+      requestedMinimumRef.current = Math.max(requestedMinimumRef.current, metadata.version);
+    }
+    debouncedFetch();
+  }, [debouncedFetch]);
+
   const isActive = !!(courseId && sessionId);
 
   usePolling(fetchStudentsNoAbort, POLL_INTERVAL_MS, isActive);
@@ -108,7 +137,7 @@ export const useCheckins = (courseId, sessionId) => {
   useWsReconnect(isActive ? fetchStudentsNoAbort : undefined);
   useSnapshotEvents(
     (metadata) => isSessionSnapshot(metadata, courseId, sessionId),
-    isActive ? fetchStudentsNoAbort : undefined
+    isActive ? handleSnapshotEvent : undefined
   );
 
   return { students, currentSession, isLoading: isInitialLoading, isRefreshing, error, toggleCheckin, refetch: fetchStudents };

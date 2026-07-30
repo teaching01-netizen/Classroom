@@ -194,6 +194,7 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 		listener := service.NewSnapshotNotificationListener(
 			cfg.DatabaseURL,
 			snapshotRepository,
+			snapshotRepository,
 			eventHub,
 		)
 		persistentWorkers = append(persistentWorkers, managedWorkerFunc(func(workerCtx context.Context) {

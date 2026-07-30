@@ -42,8 +42,8 @@ CREATE TABLE checkin_mutation_requests (
 -- Durable snapshot event outbox
 CREATE TABLE snapshot_commit_events (
     sequence BIGSERIAL PRIMARY KEY,
-    snapshot_id UUID NOT NULL,
-    target_id UUID NOT NULL,
+    snapshot_id BIGINT NOT NULL,
+    target_id BIGINT NOT NULL,
     snapshot_version BIGINT NOT NULL,
     target_kind TEXT NOT NULL,
     committed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

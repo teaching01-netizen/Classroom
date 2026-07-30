@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"qr-command-center/internal/db"
 	"qr-command-center/internal/domain"
 	"qr-command-center/internal/metrics"
 )
@@ -19,9 +20,18 @@ import (
 const snapshotNotificationPayloadLimit = 8 * 1024
 const snapshotNotificationApplicationName = "snapshot-notification-listener"
 const snapshotNotificationStableConnection = time.Minute
+const snapshotNotificationCatchUpBatchSize = 500
+const snapshotNotificationConsumerName = "snapshot-websocket"
 
 type SnapshotMetadataStore interface {
 	ListMetadata(context.Context, time.Time) ([]domain.SnapshotMetadata, error)
+}
+
+type CommitEventStore interface {
+	GetListenerCheckpoint(ctx context.Context, consumerName string) (int64, error)
+	UpdateListenerCheckpoint(ctx context.Context, consumerName string, sequence int64) error
+	MissedEvents(ctx context.Context, afterSequence int64, limit int) ([]db.CommitEvent, error)
+	CompactedMissedEvents(ctx context.Context, afterSequence int64, limit int) ([]db.CommitEvent, error)
 }
 
 type notificationConnection interface {
@@ -34,23 +44,28 @@ type notificationConnector func(context.Context) (notificationConnection, error)
 type notificationWaiter func(context.Context, time.Duration) error
 
 // SnapshotNotificationListener bridges PostgreSQL commit notifications into
-// the shared in-process event hub. Notifications are hints: every connection
-// performs a durable metadata reconciliation after LISTEN succeeds.
+// the shared in-process event hub. On startup and reconnect it reads the
+// durable checkpoint, catches up on missed events from the outbox table,
+// then switches to real-time LISTEN. Each NOTIFY also triggers a catch-up
+// check to handle lost notifications.
 type SnapshotNotificationListener struct {
-	store       SnapshotMetadataStore
-	hub         *EventHub
-	connect     notificationConnector
-	clock       func() time.Time
-	wait        notificationWaiter
-	versions    map[string]int64
-	initialized bool
-	ready       chan struct{}
-	readyOnce   sync.Once
+	store        SnapshotMetadataStore
+	eventStore   CommitEventStore
+	hub          *EventHub
+	connect      notificationConnector
+	clock        func() time.Time
+	wait         notificationWaiter
+	versions     map[string]int64
+	initialized  bool
+	ready        chan struct{}
+	readyOnce    sync.Once
+	eventSeq     int64
 }
 
 func NewSnapshotNotificationListener(
 	databaseURL string,
 	store SnapshotMetadataStore,
+	eventStore CommitEventStore,
 	hub *EventHub,
 ) *SnapshotNotificationListener {
 	if databaseURL == "" {
@@ -58,6 +73,7 @@ func NewSnapshotNotificationListener(
 	}
 	return newSnapshotNotificationListener(
 		store,
+		eventStore,
 		hub,
 		func(ctx context.Context) (notificationConnection, error) {
 			config, err := pgx.ParseConfig(databaseURL)
@@ -74,6 +90,7 @@ func NewSnapshotNotificationListener(
 
 func newSnapshotNotificationListener(
 	store SnapshotMetadataStore,
+	eventStore CommitEventStore,
 	hub *EventHub,
 	connect notificationConnector,
 	clock func() time.Time,
@@ -92,13 +109,14 @@ func newSnapshotNotificationListener(
 		wait = waitForNotificationBackoff
 	}
 	return &SnapshotNotificationListener{
-		store:    store,
-		hub:      hub,
-		connect:  connect,
-		clock:    clock,
-		wait:     wait,
-		versions: make(map[string]int64),
-		ready:    make(chan struct{}),
+		store:      store,
+		eventStore: eventStore,
+		hub:        hub,
+		connect:    connect,
+		clock:      clock,
+		wait:       wait,
+		versions:   make(map[string]int64),
+		ready:      make(chan struct{}),
 	}
 }
 
@@ -166,7 +184,7 @@ func (l *SnapshotNotificationListener) runConnection(
 	if _, err := connection.Exec(ctx, "LISTEN snapshot_committed"); err != nil {
 		return fmt.Errorf("listen snapshot_committed: %w", err)
 	}
-	if err := l.reconcile(ctx); err != nil {
+	if err := l.catchUp(ctx); err != nil {
 		return err
 	}
 	for {
@@ -182,7 +200,89 @@ func (l *SnapshotNotificationListener) runConnection(
 			// waiting; the next reconnect reconciliation repairs any gap.
 			continue
 		}
+		// After processing a NOTIFY, check for any missed events from the
+		// outbox in case notifications were lost.
+		if err := l.catchUpFromCheckpoint(ctx); err != nil {
+			slog.Warn("snapshot_notification_catchup_failed", "error", err)
+		}
 	}
+}
+
+func (l *SnapshotNotificationListener) catchUp(ctx context.Context) error {
+	if l.eventStore != nil {
+		// Read the durable checkpoint.
+		checkpoint, err := l.eventStore.GetListenerCheckpoint(ctx, snapshotNotificationConsumerName)
+		if err != nil {
+			return fmt.Errorf("read listener checkpoint: %w", err)
+		}
+		if checkpoint > 0 {
+			slog.Info("snapshot_notification_catchup_starting", "checkpoint", checkpoint)
+			if err := l.processMissedEvents(ctx, checkpoint); err != nil {
+				return fmt.Errorf("catch up missed events: %w", err)
+			}
+			l.initialized = true
+			l.readyOnce.Do(func() { close(l.ready) })
+			return nil
+		}
+	}
+	// First start or no event store: do a full reconciliation from metadata.
+	if err := l.reconcile(ctx); err != nil {
+		return err
+	}
+	l.initialized = true
+	l.readyOnce.Do(func() { close(l.ready) })
+	return nil
+}
+
+func (l *SnapshotNotificationListener) catchUpFromCheckpoint(ctx context.Context) error {
+	if l.eventStore == nil {
+		return nil
+	}
+	checkpoint, err := l.eventStore.GetListenerCheckpoint(ctx, snapshotNotificationConsumerName)
+	if err != nil {
+		return fmt.Errorf("read listener checkpoint for catch-up: %w", err)
+	}
+	if checkpoint == 0 {
+		return nil
+	}
+	return l.processMissedEvents(ctx, checkpoint)
+}
+
+func (l *SnapshotNotificationListener) processMissedEvents(ctx context.Context, afterSequence int64) error {
+	if l.eventStore == nil {
+		return nil
+	}
+	var maxSequence int64
+	// Use compaction when catching up a large gap to avoid re-processing
+	// redundant intermediate versions for the same target.
+	events, err := l.eventStore.CompactedMissedEvents(ctx, afterSequence, snapshotNotificationCatchUpBatchSize)
+	if err != nil {
+		// Fall back to non-compacted query if DISTINCT ON is not supported.
+		events, err = l.eventStore.MissedEvents(ctx, afterSequence, snapshotNotificationCatchUpBatchSize)
+		if err != nil {
+			return fmt.Errorf("query missed events: %w", err)
+		}
+	}
+	for _, event := range events {
+		kind := domain.SnapshotKind(event.TargetKind)
+		if !kind.Valid() {
+			continue
+		}
+		metadata := domain.SnapshotMetadata{
+			Kind:    kind,
+			Version: event.SnapshotVersion,
+		}
+		l.observe(metadata, true)
+		if event.Sequence > maxSequence {
+			maxSequence = event.Sequence
+		}
+	}
+	if maxSequence > 0 {
+		if err := l.eventStore.UpdateListenerCheckpoint(ctx, snapshotNotificationConsumerName, maxSequence); err != nil {
+			return fmt.Errorf("update listener checkpoint: %w", err)
+		}
+	}
+	return nil
 }
 
 func (l *SnapshotNotificationListener) reconcile(ctx context.Context) error {
@@ -193,8 +293,6 @@ func (l *SnapshotNotificationListener) reconcile(ctx context.Context) error {
 	for _, item := range metadata {
 		l.observe(item, l.initialized)
 	}
-	l.initialized = true
-	l.readyOnce.Do(func() { close(l.ready) })
 	return nil
 }
 
@@ -228,6 +326,8 @@ func (l *SnapshotNotificationListener) observe(
 	}
 	l.versions[key] = metadata.Version
 	if publish {
+		l.eventSeq++
+		metadata.EventSequence = l.eventSeq
 		if l.hub.Publish(AppEvent{Type: "SnapshotCommitted", Data: metadata}) {
 			metrics.WarwickSnapshotWebsocketEventsTotal.
 				WithLabelValues(string(metadata.Kind)).

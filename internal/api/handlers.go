@@ -3,12 +3,21 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
+
+	"qr-command-center/internal/domain"
 )
 
+type SnapshotVersionInfo struct {
+	Version     int64  `json:"version"`
+	GeneratedAt string `json:"generatedAt"`
+}
+
 type ApiResponse struct {
-	Success bool        `json:"success"`
-	Data    interface{} `json:"data"`
-	Error   string      `json:"error"`
+	Success  bool                `json:"success"`
+	Data     interface{}         `json:"data"`
+	Error    string              `json:"error"`
+	Snapshot *SnapshotVersionInfo `json:"snapshot,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, resp ApiResponse) {
@@ -24,6 +33,17 @@ func writeJSON(w http.ResponseWriter, status int, resp ApiResponse) {
 
 func successResponse(data interface{}) ApiResponse {
 	return ApiResponse{Success: true, Data: data}
+}
+
+func versionedResponse(data interface{}, metadata domain.SnapshotMetadata) ApiResponse {
+	return ApiResponse{
+		Success: true,
+		Data:    data,
+		Snapshot: &SnapshotVersionInfo{
+			Version:     metadata.Version,
+			GeneratedAt: metadata.ValidatedAt.UTC().Format(time.RFC3339),
+		},
+	}
 }
 
 func errorResponse(msg string) ApiResponse {

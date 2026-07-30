@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"qr-command-center/internal/db"
 	"qr-command-center/internal/domain"
 )
 
@@ -25,8 +27,52 @@ type TeacherDataProvider interface {
 	FetchStudentProfiles(ctx context.Context) ([]domain.StudentProfile, error)
 }
 
+// SnapshotVersionReader is optionally implemented by the reader to expose
+// raw snapshot data with version information for idempotent mutations.
+type SnapshotVersionReader interface {
+	CurrentSnapshot(ctx context.Context, ref domain.TargetRef) (domain.Snapshot, error)
+}
+
 type CheckinWriter interface {
 	ToggleCheckin(ctx context.Context, courseID, sessionID, studentID string, checked bool) error
+}
+
+// CheckinMutator provides the database operations needed by the idempotent
+// check-in endpoint: idempotency key management and advisory locking.
+type CheckinMutator interface {
+	ReserveIdempotencyKey(ctx context.Context, key, courseID, sessionID, studentID string, desiredCheckedIn bool, expectedSnapshotVersion *int64) (db.IdempotencyKeyResult, error)
+	ConfirmIdempotencyKey(ctx context.Context, key string, response json.RawMessage) error
+	MarkIdempotencyKeyPending(ctx context.Context, key string, response json.RawMessage) error
+	MarkIdempotencyKeyFailed(ctx context.Context, key, errorCode string, response json.RawMessage) error
+	AdvisoryLockCheckin(ctx context.Context, sessionID, studentID string) error
+}
+
+// CheckinRequest describes an idempotent check-in mutation.
+type CheckinRequest struct {
+	CourseID                string
+	SessionID               string
+	StudentID               string
+	DesiredCheckedIn        bool
+	ExpectedSnapshotVersion *int64
+	IdempotencyKey          string
+}
+
+// CheckinResult is the outcome of an idempotent check-in mutation.
+type CheckinResult struct {
+	Status          string // confirmed, already_satisfied, pending_verification, conflict, failed
+	CheckedIn       bool
+	SnapshotVersion int64
+	RefreshPending  bool
+}
+
+// ErrConflict is returned when optimistic concurrency detects a stale version.
+type ErrConflict struct {
+	CurrentVersion int64
+	CurrentChecked bool
+}
+
+func (e *ErrConflict) Error() string {
+	return fmt.Sprintf("conflict: current version %d, checked_in=%v", e.CurrentVersion, e.CurrentChecked)
 }
 
 // TeacherService owns the business logic for teacher-facing operations.
@@ -36,6 +82,7 @@ type TeacherService struct {
 	reader            TeacherDataProvider
 	sessions          domain.SessionFetcher
 	checkins          CheckinWriter
+	mutator           CheckinMutator
 	refresher         SnapshotRefresher
 	reportConcurrency int
 	snapshotMode      bool
@@ -125,6 +172,20 @@ func NewTeacherServiceWithDependencies(
 	reportConcurrency int,
 	snapshotMode bool,
 ) *TeacherService {
+	return NewTeacherServiceWithDependenciesAndMutator(
+		reader, sessions, checkins, nil, refresher, reportConcurrency, snapshotMode,
+	)
+}
+
+func NewTeacherServiceWithDependenciesAndMutator(
+	reader TeacherDataProvider,
+	sessions domain.SessionFetcher,
+	checkins CheckinWriter,
+	mutator CheckinMutator,
+	refresher SnapshotRefresher,
+	reportConcurrency int,
+	snapshotMode bool,
+) *TeacherService {
 	if reader == nil {
 		panic("TeacherService: reader must not be nil")
 	}
@@ -144,6 +205,7 @@ func NewTeacherServiceWithDependencies(
 		reader:            reader,
 		sessions:          sessions,
 		checkins:          checkins,
+		mutator:           mutator,
 		refresher:         refresher,
 		reportConcurrency: reportConcurrency,
 		snapshotMode:      snapshotMode,
@@ -278,6 +340,228 @@ func (s *TeacherService) ToggleCheckin(
 	}
 	response.SnapshotRefreshPending = pending
 	return response, nil
+}
+
+// Checkin executes an idempotent check-in mutation. Unlike ToggleCheckin, it:
+//   - Deduplicates via idempotency key
+//   - Serializes concurrent mutations for the same student via advisory lock
+//   - Only calls Warwick when the desired state differs from the current snapshot
+//   - Handles ambiguous outcomes without blindly retrying
+func (s *TeacherService) Checkin(ctx context.Context, req CheckinRequest) (*CheckinResult, error) {
+	if s.mutator == nil {
+		return nil, errors.New("checkin mutator not configured")
+	}
+	if !s.snapshotMode {
+		return nil, errors.New("checkin requires snapshot mode")
+	}
+
+	snapshots, ok := s.reader.(snapshotAwareReader)
+	if !ok {
+		return nil, errors.New("checkin requires snapshot reader")
+	}
+
+	// 1. Acquire advisory lock to serialize concurrent mutations.
+	if err := s.mutator.AdvisoryLockCheckin(ctx, req.SessionID, req.StudentID); err != nil {
+		return nil, fmt.Errorf("checkin lock: %w", err)
+	}
+
+	// 2. Reserve the idempotency key.
+	reserveResult, err := s.mutator.ReserveIdempotencyKey(
+		ctx, req.IdempotencyKey, req.CourseID, req.SessionID, req.StudentID,
+		req.DesiredCheckedIn, req.ExpectedSnapshotVersion,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("checkin reserve key: %w", err)
+	}
+
+	// 3. If key exists with same args, return stored result.
+	if reserveResult.Found && reserveResult.Match {
+		if reserveResult.Status == "confirmed" {
+			var resp domain.IdempotentCheckinResponse
+			if err := json.Unmarshal(reserveResult.Response, &resp); err == nil {
+				return &CheckinResult{
+					Status:          "confirmed",
+					CheckedIn:       resp.CheckedIn,
+					SnapshotVersion: resp.SnapshotVersion,
+					RefreshPending:  resp.RefreshPending,
+				}, nil
+			}
+		}
+		// For other statuses (pending_verification, reserved), re-process.
+	}
+
+	// 4. If key exists with different args, return conflict.
+	if reserveResult.Found && !reserveResult.Match {
+		return nil, &ErrConflict{CurrentVersion: 0, CurrentChecked: false}
+	}
+
+	// 5. Read the latest trusted session snapshot.
+	versionReader, ok := s.reader.(SnapshotVersionReader)
+	if !ok {
+		return nil, errors.New("checkin requires SnapshotVersionReader")
+	}
+	ref := snapshots.SessionRef(req.CourseID, req.SessionID)
+	snapshot, err := versionReader.CurrentSnapshot(ctx, ref)
+	if err != nil {
+		return nil, fmt.Errorf("checkin read snapshot: %w", err)
+	}
+
+	var detail domain.SessionDetail
+	if err := json.Unmarshal(snapshot.Payload, &detail); err != nil {
+		return nil, fmt.Errorf("checkin decode snapshot: %w", err)
+	}
+	currentVersion := snapshot.Version
+
+	// 6. Find the student and check current state.
+	currentChecked := false
+	studentFound := false
+	for _, student := range detail.Students {
+		if student.StudentID == req.StudentID {
+			currentChecked = student.CheckedIn
+			studentFound = true
+			break
+		}
+	}
+	if !studentFound {
+		return nil, fmt.Errorf("student %s not found in session %s", req.StudentID, req.SessionID)
+	}
+
+	// 7. Optimistic concurrency check.
+	if req.ExpectedSnapshotVersion != nil {
+		if *req.ExpectedSnapshotVersion != currentVersion {
+			if currentChecked == req.DesiredCheckedIn {
+				// Desired state already satisfied — return success despite stale version.
+				result := &CheckinResult{
+					Status:          "confirmed",
+					CheckedIn:       currentChecked,
+					SnapshotVersion: currentVersion,
+					RefreshPending:  false,
+				}
+				respBytes, _ := json.Marshal(domain.IdempotentCheckinResponse{
+					Status:          "confirmed",
+					CheckedIn:       currentChecked,
+					SnapshotVersion: currentVersion,
+					RefreshPending:  false,
+				})
+				_ = s.mutator.ConfirmIdempotencyKey(ctx, req.IdempotencyKey, respBytes)
+				return result, nil
+			}
+			return nil, &ErrConflict{CurrentVersion: currentVersion, CurrentChecked: currentChecked}
+		}
+	}
+
+	// 8. If student is already in the desired state, return already_satisfied.
+	if currentChecked == req.DesiredCheckedIn {
+		result := &CheckinResult{
+			Status:          "already_satisfied",
+			CheckedIn:       currentChecked,
+			SnapshotVersion: currentVersion,
+			RefreshPending:  false,
+		}
+		respBytes, _ := json.Marshal(domain.IdempotentCheckinResponse{
+			Status:          "already_satisfied",
+			CheckedIn:       currentChecked,
+			SnapshotVersion: currentVersion,
+			RefreshPending:  false,
+		})
+		_ = s.mutator.ConfirmIdempotencyKey(ctx, req.IdempotencyKey, respBytes)
+		return result, nil
+	}
+
+	// 9. Call Warwick with the desired state (not a toggle).
+	if err := s.checkins.ToggleCheckin(ctx, req.CourseID, req.SessionID, req.StudentID, req.DesiredCheckedIn); err != nil {
+		_ = s.mutator.MarkIdempotencyKeyFailed(ctx, req.IdempotencyKey, "upstream_error", nil)
+		return nil, fmt.Errorf("checkin warwick write: %w", err)
+	}
+
+	// 10. Force an immediate snapshot refresh.
+	pending := false
+	refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	refreshErr := s.refresher.RefreshNow(refreshCtx, ref)
+	cancel()
+	if refreshErr != nil {
+		pending = true
+	}
+
+	// 11. Read the refreshed snapshot and verify.
+	if !pending {
+		detail, err := s.reader.GetSessionDetail(ctx, req.CourseID, req.SessionID)
+		if err != nil || detail == nil {
+			pending = true
+		} else {
+			reflected := false
+			for _, student := range detail.Students {
+				if student.StudentID == req.StudentID {
+					reflected = student.CheckedIn == req.DesiredCheckedIn
+					break
+				}
+			}
+			if reflected {
+				result := &CheckinResult{
+					Status:          "confirmed",
+					CheckedIn:       req.DesiredCheckedIn,
+					SnapshotVersion: currentVersion + 1,
+					RefreshPending:  false,
+				}
+				respBytes, _ := json.Marshal(domain.IdempotentCheckinResponse{
+					Status:          "confirmed",
+					CheckedIn:       req.DesiredCheckedIn,
+					SnapshotVersion: currentVersion + 1,
+					RefreshPending:  false,
+				})
+				_ = s.mutator.ConfirmIdempotencyKey(ctx, req.IdempotencyKey, respBytes)
+				return result, nil
+			}
+			// State not yet reflected — this is the ambiguous outcome.
+			// One controlled retry: if still not reflected after a second refresh,
+			// remain pending.
+			retryCtx, retryCancel := context.WithTimeout(ctx, 10*time.Second)
+			_ = s.refresher.RefreshNow(retryCtx, ref)
+			retryCancel()
+			detail, err = s.reader.GetSessionDetail(ctx, req.CourseID, req.SessionID)
+			if err == nil && detail != nil {
+				for _, student := range detail.Students {
+					if student.StudentID == req.StudentID {
+						if student.CheckedIn == req.DesiredCheckedIn {
+							result := &CheckinResult{
+								Status:          "confirmed",
+								CheckedIn:       req.DesiredCheckedIn,
+								SnapshotVersion: currentVersion + 1,
+								RefreshPending:  false,
+							}
+							respBytes, _ := json.Marshal(domain.IdempotentCheckinResponse{
+								Status:          "confirmed",
+								CheckedIn:       req.DesiredCheckedIn,
+								SnapshotVersion: currentVersion + 1,
+								RefreshPending:  false,
+							})
+							_ = s.mutator.ConfirmIdempotencyKey(ctx, req.IdempotencyKey, respBytes)
+							return result, nil
+						}
+					}
+				}
+			}
+			pending = true
+		}
+	}
+
+	// 12. Ambiguous outcome — mark pending and schedule follow-up.
+	pendingResp := domain.IdempotentCheckinResponse{
+		Status:          "pending_verification",
+		CheckedIn:       req.DesiredCheckedIn,
+		SnapshotVersion: currentVersion,
+		RefreshPending:  true,
+	}
+	respBytes, _ := json.Marshal(pendingResp)
+	_ = s.mutator.MarkIdempotencyKeyPending(ctx, req.IdempotencyKey, respBytes)
+	_ = s.refresher.SetDueNow(ctx, ref)
+
+	return &CheckinResult{
+		Status:          "pending_verification",
+		CheckedIn:       req.DesiredCheckedIn,
+		SnapshotVersion: currentVersion,
+		RefreshPending:  true,
+	}, nil
 }
 
 // GetAttendanceReport computes an attendance report from live session data.

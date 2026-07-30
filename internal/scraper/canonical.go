@@ -10,6 +10,28 @@ import (
 	"qr-command-center/internal/domain"
 )
 
+// Canonicalizer produces a deterministic JSON representation of a scrape value,
+// its SHA-256 hash, and a record count. Implementations are versioned so that
+// schema changes or normalization-rule updates can be migrated incrementally.
+type Canonicalizer interface {
+	Version() int
+	Canonicalize(kind domain.SnapshotKind, value any) (json.RawMessage, [32]byte, int, error)
+}
+
+// V1Canonicalizer is the initial canonicalization version. It delegates to the
+// package-level Canonicalize function with a configurable payload size limit.
+type V1Canonicalizer struct {
+	MaxPayloadBytes int64
+}
+
+// Version returns 1, identifying this as the first canonicalization scheme.
+func (c *V1Canonicalizer) Version() int { return 1 }
+
+// Canonicalize normalizes value according to V1 rules.
+func (c *V1Canonicalizer) Canonicalize(kind domain.SnapshotKind, value any) (json.RawMessage, [32]byte, int, error) {
+	return Canonicalize(kind, value, c.MaxPayloadBytes)
+}
+
 func Canonicalize(
 	kind domain.SnapshotKind,
 	value any,
@@ -138,6 +160,9 @@ func canonicalValue(kind domain.SnapshotKind, value any) (any, error) {
 		}
 		sort.SliceStable(copied, func(i, j int) bool {
 			if copied[i].StudentGuid == copied[j].StudentGuid {
+				if copied[i].StudentID == copied[j].StudentID {
+					return copied[i].FullName < copied[j].FullName
+				}
 				return copied[i].StudentID < copied[j].StudentID
 			}
 			return copied[i].StudentGuid < copied[j].StudentGuid

@@ -154,6 +154,23 @@ type CourseAttendanceReport struct {
 	DurationMs int64               `json:"durationMs"`
 }
 
+// IdempotentCheckinRequest is the HTTP request body for the idempotent
+// PUT /api/teacher/courses/{courseId}/sessions/{sessionId}/students/{studentId}/checkin
+type IdempotentCheckinRequest struct {
+	CheckedIn                bool   `json:"checkedIn"`
+	ExpectedSnapshotVersion *int64 `json:"expectedSnapshotVersion,omitempty"`
+	IdempotencyKey          string `json:"idempotencyKey"`
+}
+
+// IdempotentCheckinResponse is the HTTP response body for the idempotent
+// check-in endpoint.
+type IdempotentCheckinResponse struct {
+	Status         string `json:"status"`
+	CheckedIn      bool   `json:"checkedIn"`
+	SnapshotVersion int64  `json:"snapshotVersion"`
+	RefreshPending bool   `json:"refreshPending"`
+}
+
 func GetCourseStatus(startDate, endDate string) (CourseStatus, error) {
 	now := time.Now()
 	const layout = "2006-01-02"

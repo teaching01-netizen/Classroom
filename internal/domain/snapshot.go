@@ -69,26 +69,33 @@ type ConditionalHeaders struct {
 }
 
 type ScrapeTarget struct {
-	ID                  int64
-	Ref                 TargetRef
-	Attributes          json.RawMessage
-	MissingCount        int
-	CurrentContentHash  [32]byte
-	HasCurrentSnapshot  bool
-	CurrentVersion      int64
-	ValidationSeq       int64
-	CurrentInterval     time.Duration
-	MinInterval         time.Duration
-	MaxInterval         time.Duration
-	MaxServeAge         time.Duration
-	NextRunAt           time.Time
-	LastValidatedAt     *time.Time
-	ConsecutiveFailures int
-	RecentChanges       []bool
-	Conditional         ConditionalHeaders
-	LeaseOwner          string
-	LeaseGeneration     int64
-	LeaseExpiresAt      *time.Time
+	ID                     int64
+	Ref                    TargetRef
+	Attributes             json.RawMessage
+	Priority               int
+	MissingCount           int
+	CurrentContentHash     [32]byte
+	HasCurrentSnapshot     bool
+	CurrentVersion         int64
+	ValidationSeq          int64
+	CurrentInterval        time.Duration
+	MinInterval            time.Duration
+	MaxInterval            time.Duration
+	MaxServeAge            time.Duration
+	NextRunAt              time.Time
+	LastValidatedAt        *time.Time
+	ConsecutiveFailures    int
+	RecentChanges          []bool
+	Conditional            ConditionalHeaders
+	LeaseOwner             string
+	LeaseGeneration        int64
+	LeaseExpiresAt         *time.Time
+	PreviousRecordCount    int
+	LifecycleState         string
+	LastSeenParentVersion  *int64
+	ConsecutiveMissingCount int
+	TombstonedAt           *time.Time
+	ReactivatedAt          *time.Time
 }
 
 func (t ScrapeTarget) HasContentHash() bool {
@@ -98,11 +105,48 @@ func (t ScrapeTarget) HasContentHash() bool {
 type TargetSeed struct {
 	Ref             TargetRef
 	Attributes      json.RawMessage
+	Priority        int
 	InitialInterval time.Duration
 	MinInterval     time.Duration
 	MaxInterval     time.Duration
 	MaxServeAge     time.Duration
 	NextRunAt       time.Time
+}
+
+// Priority levels for scrape targets. Lower numbers are claimed first.
+const (
+	PriorityMutationVerification = 10 // P0: mutation verification
+	PriorityActiveSession        = 20 // P1: active session details
+	PriorityActiveCourse         = 30 // P2: active course details
+	PriorityCatalog              = 40 // P3: catalog
+	PriorityRecentlyCompleted    = 50 // P4: recently completed sessions
+	PriorityProfilesHistorical   = 60 // P5: profiles and historical sessions
+)
+
+// DefaultPriority returns the default priority for a seed based on the target kind
+// and session status.
+func DefaultPriority(kind SnapshotKind, status SessionStatus) int {
+	switch kind {
+	case SnapshotSessionDetail:
+		switch status {
+		case SessionStatusActive:
+			return PriorityActiveSession
+		case SessionStatusDone:
+			return PriorityRecentlyCompleted
+		case SessionStatusNotStarted:
+			return PriorityActiveSession
+		default:
+			return PriorityRecentlyCompleted
+		}
+	case SnapshotCourseDetail:
+		return PriorityActiveCourse
+	case SnapshotCourseCatalog:
+		return PriorityCatalog
+	case SnapshotStudentProfiles:
+		return PriorityProfilesHistorical
+	default:
+		return PriorityRecentlyCompleted
+	}
 }
 
 type Snapshot struct {
@@ -138,6 +182,7 @@ type SnapshotMetadata struct {
 	ValidationSeq int64        `json:"validation_seq"`
 	ValidatedAt   time.Time    `json:"validated_at"`
 	Stale         bool         `json:"stale"`
+	EventSequence int64        `json:"eventSequence,omitempty"`
 }
 
 func (m SnapshotMetadata) Ref(host string) TargetRef {

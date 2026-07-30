@@ -98,6 +98,7 @@ func TestSnapshotNotificationListenerReconnectRepairsMissedVersion(t *testing.T)
 	defer unsubscribe()
 	listener := newSnapshotNotificationListener(
 		store,
+		nil,
 		hub,
 		connector,
 		time.Now,
@@ -134,6 +135,7 @@ func TestSnapshotNotificationListenerRejectsOversizedPayload(t *testing.T) {
 		&notificationMetadataStoreFake{
 			firstConn: &notificationConnectionFake{},
 		},
+		nil,
 		hub,
 		nil,
 		time.Now,
@@ -161,6 +163,7 @@ func TestSnapshotNotificationListenerReportsReconnectWithoutLeakingConnectorErro
 		&notificationMetadataStoreFake{
 			firstConn: &notificationConnectionFake{},
 		},
+		nil,
 		NewEventHub(2, 2),
 		func(context.Context) (notificationConnection, error) {
 			return nil, errors.New("postgres://operator:do-not-log@database.invalid/app")
@@ -199,6 +202,7 @@ func TestSnapshotNotificationListenerResetsBackoffAfterStableConnection(t *testi
 	var delays []time.Duration
 	listener := newSnapshotNotificationListener(
 		&notificationMetadataStoreFake{firstConn: stableConnection},
+		nil,
 		NewEventHub(2, 2),
 		connector,
 		func() time.Time { return now },

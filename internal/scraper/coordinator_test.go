@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand"
 	"testing"
 	"time"
@@ -35,11 +36,13 @@ func (s *coordinatorSource) Fetch(
 }
 
 type coordinatorStore struct {
-	inputs      []db.CommitInput
-	releases    []db.ReleaseLeaseRequest
-	commitErr   error
-	nextRunID   int64
-	nextVersion int64
+	inputs             []db.CommitInput
+	releases           []db.ReleaseLeaseRequest
+	lifecycleInputs    []db.LifecycleReconcileInput
+	commitErr          error
+	reconcileLifecycleErr error
+	nextRunID          int64
+	nextVersion        int64
 }
 
 func (s *coordinatorStore) Commit(_ context.Context, input db.CommitInput) (db.CommitResult, error) {
@@ -60,6 +63,15 @@ func (s *coordinatorStore) Commit(_ context.Context, input db.CommitInput) (db.C
 func (s *coordinatorStore) ReleaseLease(_ context.Context, request db.ReleaseLeaseRequest) error {
 	s.releases = append(s.releases, request)
 	return nil
+}
+
+func (s *coordinatorStore) RenewLease(_ context.Context, _ db.RenewLeaseRequest) error {
+	return nil
+}
+
+func (s *coordinatorStore) ReconcileLifecycle(_ context.Context, input db.LifecycleReconcileInput) error {
+	s.lifecycleInputs = append(s.lifecycleInputs, input)
+	return s.reconcileLifecycleErr
 }
 
 type coordinatorObserver struct {
@@ -430,4 +442,152 @@ func TestCoordinatorCanonicalHashMatchesCommittedBytes(t *testing.T) {
 	_, err := coordinator.RunClaimed(context.Background(), coordinatorTarget(domain.SnapshotCourseCatalog))
 	require.NoError(t, err)
 	require.Equal(t, sha256.Sum256(store.inputs[0].Payload), store.inputs[0].ContentHash)
+}
+
+func TestCoordinatorSuspiciousOutcomeOnLargeDrop(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	// First fetch returns a large catalog
+	largeCatalog := make([]domain.CourseSummary, 50)
+	for i := range largeCatalog {
+		largeCatalog[i] = domain.CourseSummary{
+			CourseID: fmt.Sprintf("course-%d", i),
+			Name:     fmt.Sprintf("Course %d", i),
+			Status:   domain.CourseStatusActive,
+		}
+	}
+	source := &coordinatorSource{result: warwick.SnapshotFetchResult{
+		Value: largeCatalog,
+		Metadata: warwick.ResponseMetadata{
+			StatusCode: 200,
+			ETag:       `"v1"`,
+		},
+		BytesRead: 1000,
+	}}
+	store := &coordinatorStore{}
+	observer := &coordinatorObserver{}
+	coordinator := newCoordinatorForTest(source, store, observer, now)
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+
+	// First run should succeed
+	result, err := coordinator.RunClaimed(context.Background(), target)
+	require.NoError(t, err)
+	require.Equal(t, "changed", result.Outcome)
+	require.Len(t, store.inputs, 1)
+
+	// Now simulate a second fetch that returns only 2 courses (large drop)
+	smallCatalog := []domain.CourseSummary{
+		{CourseID: "course-a", Name: "Course A"},
+		{CourseID: "course-b", Name: "Course B"},
+	}
+	source2 := &coordinatorSource{result: warwick.SnapshotFetchResult{
+		Value: smallCatalog,
+		Metadata: warwick.ResponseMetadata{
+			StatusCode: 200,
+			ETag:       `"v2"`,
+		},
+		BytesRead: 100,
+	}}
+	store2 := &coordinatorStore{}
+	observer2 := &coordinatorObserver{}
+	coordinator2 := newCoordinatorForTest(source2, store2, observer2, now)
+
+	// Set up target with existing snapshot
+	target2 := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target2.HasCurrentSnapshot = true
+	target2.CurrentVersion = 1
+	target2.ValidationSeq = 1
+	target2.PreviousRecordCount = 50
+
+	result2, err := coordinator2.RunClaimed(context.Background(), target2)
+	require.NoError(t, err)
+	require.Equal(t, "suspicious", result2.Outcome)
+	require.False(t, result2.Changed)
+	require.Len(t, store2.inputs, 1)
+	require.False(t, store2.inputs[0].Changed)
+	require.Nil(t, store2.inputs[0].Payload)
+}
+
+func TestCoordinatorReconcileLifecycleCalledAfterSuccessfulCommit(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	source := &coordinatorSource{result: warwick.SnapshotFetchResult{
+		Value: []domain.CourseSummary{
+			{CourseID: "a", Name: "Alpha", Status: domain.CourseStatusActive},
+		},
+		Metadata:  warwick.ResponseMetadata{StatusCode: 200},
+		BytesRead: 100,
+	}}
+	store := &coordinatorStore{}
+	observer := &coordinatorObserver{}
+	coordinator := newCoordinatorForTest(source, store, observer, now)
+
+	result, err := coordinator.RunClaimed(
+		context.Background(),
+		coordinatorTarget(domain.SnapshotCourseCatalog),
+	)
+	require.NoError(t, err)
+	require.Equal(t, "changed", result.Outcome)
+	require.Len(t, store.lifecycleInputs, 1)
+	input := store.lifecycleInputs[0]
+	require.Equal(t, domain.SnapshotCourseCatalog, input.ParentRef.Kind)
+	require.Len(t, input.DiscoveredSeeds, 1)
+	require.Equal(t, "a", input.DiscoveredSeeds[0].Ref.ResourceKey)
+	require.Len(t, input.SeenChildRefs, 1)
+}
+
+func TestCoordinatorReconcileLifecycleCalledOnUnchanged(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	value := []domain.CourseSummary{{CourseID: "a", Name: "Alpha"}}
+	_, hash, _, err := Canonicalize(domain.SnapshotCourseCatalog, value, 1<<20)
+	require.NoError(t, err)
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target.HasCurrentSnapshot = true
+	target.CurrentContentHash = hash
+	target.CurrentVersion = 1
+	target.ValidationSeq = 1
+
+	source := &coordinatorSource{result: warwick.SnapshotFetchResult{Value: value, BytesRead: 100}}
+	store := &coordinatorStore{}
+	coordinator := newCoordinatorForTest(source, store, &coordinatorObserver{}, now)
+
+	_, err = coordinator.RunClaimed(context.Background(), target)
+	require.NoError(t, err)
+	// Even on unchanged, ReconcileLifecycle should be called so missing
+	// children are detected and tombstoned after threshold.
+	require.Len(t, store.lifecycleInputs, 1)
+	require.Equal(t, domain.SnapshotCourseCatalog, store.lifecycleInputs[0].ParentRef.Kind)
+}
+
+func TestCoordinatorReconcileLifecycleNotCalledOnFailure(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	source := &coordinatorSource{err: errors.New("upstream down")}
+	store := &coordinatorStore{}
+	coordinator := newCoordinatorForTest(source, store, &coordinatorObserver{}, now)
+
+	_, err := coordinator.RunClaimed(
+		context.Background(),
+		coordinatorTarget(domain.SnapshotCourseCatalog),
+	)
+	require.NoError(t, err)
+	require.Empty(t, store.lifecycleInputs)
+}
+
+func TestCoordinatorReconcileLifecycleErrorDoesNotFailRun(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	source := &coordinatorSource{result: warwick.SnapshotFetchResult{
+		Value: []domain.CourseSummary{
+			{CourseID: "a", Name: "Alpha", Status: domain.CourseStatusActive},
+		},
+		Metadata:  warwick.ResponseMetadata{StatusCode: 200},
+		BytesRead: 100,
+	}}
+	store := &coordinatorStore{reconcileLifecycleErr: errors.New("db down")}
+	coordinator := newCoordinatorForTest(source, store, &coordinatorObserver{}, now)
+
+	result, err := coordinator.RunClaimed(
+		context.Background(),
+		coordinatorTarget(domain.SnapshotCourseCatalog),
+	)
+	require.NoError(t, err)
+	require.Equal(t, "changed", result.Outcome)
+	require.Len(t, store.lifecycleInputs, 1)
 }

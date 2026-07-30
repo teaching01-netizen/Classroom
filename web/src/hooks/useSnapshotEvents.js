@@ -33,7 +33,7 @@ export function publishSnapshotCommitted(metadata) {
   snapshotVersions.set(key, metadata.version);
   window.dispatchEvent(new CustomEvent(
     SNAPSHOT_COMMITTED_EVENT,
-    { detail: metadata }
+    { detail: { ...metadata, eventSequence: metadata.eventSequence } }
   ));
   return true;
 }
