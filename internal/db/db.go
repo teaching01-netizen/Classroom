@@ -20,7 +20,7 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-const requiredSchemaVersion = 10
+const requiredSchemaVersion = 11
 
 func ParsePoolConfig(databaseURL string, serverless bool) (*pgxpool.Config, error) {
 	config, err := pgxpool.ParseConfig(databaseURL)
