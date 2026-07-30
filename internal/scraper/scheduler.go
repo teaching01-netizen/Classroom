@@ -190,6 +190,14 @@ func (s *Scheduler) RunDue(ctx context.Context, limit int) (TickResult, error) {
 		}
 		result.Claimed += len(targets)
 
+		// Log claim batch with structured fields
+		slog.Info("scrape_claim_batch",
+			"worker_id", s.workerID,
+			"claimed", len(targets),
+			"remaining_limit", remaining,
+			"concurrency", s.maxConcurrency,
+		)
+
 		slots := make(chan struct{}, s.maxConcurrency)
 		var workers sync.WaitGroup
 		for _, target := range targets {
@@ -317,6 +325,12 @@ func (s *Scheduler) executeClaimed(
 		release()
 		if errors.Is(runErr, domain.ErrLeaseLost) {
 			metrics.WarwickScrapeLeaseLostTotal.Inc()
+			slog.Warn("scrape_lease_lost",
+				"target_id", target.ID,
+				"target_kind", string(target.Ref.Kind),
+				"worker_id", s.workerID,
+				"lease_generation", target.LeaseGeneration,
+			)
 		}
 		if runErr != nil &&
 			(errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded)) {

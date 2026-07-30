@@ -2,8 +2,10 @@ package scraper
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"regexp"
@@ -264,6 +266,85 @@ func (c *Coordinator) RunClaimedWithRelease(
 	if commitErr != nil {
 		return RunResult{}, errors.Join(commitErr, observationErr)
 	}
+
+	// Structured logging for scrape execution observability
+	durationMs := finishedAt.Sub(startedAt).Milliseconds()
+	contentHashStr := ""
+	if changed {
+		contentHashStr = hex.EncodeToString(contentHash[:])
+	}
+	previousContentHashStr := ""
+	if target.HasContentHash() {
+		previousContentHashStr = hex.EncodeToString(target.CurrentContentHash[:])
+	}
+
+	// Determine validation and commit statuses
+	validationStatus := "ok"
+	if outcome == "invalid_payload" {
+		validationStatus = "failed"
+	}
+	commitStatus := "ok"
+	if commitErr != nil {
+		commitStatus = "rejected"
+	}
+
+	// Build structured log fields
+	logFields := []any{
+		"target_id", target.ID,
+		"target_kind", string(target.Ref.Kind),
+		"course_id", target.Ref.ParentKey,
+		"session_id", target.Ref.ResourceKey,
+		"worker_id", target.LeaseOwner,
+		"lease_generation", target.LeaseGeneration,
+		"run_id", commitResult.RunID,
+		"previous_snapshot_version", target.CurrentVersion,
+		"new_snapshot_version", func() int64 {
+			if commitResult.Snapshot != nil {
+				return commitResult.Snapshot.Version
+			}
+			return 0
+		}(),
+		"previous_content_hash", previousContentHashStr,
+		"new_content_hash", contentHashStr,
+		"canonicalization_version", 1,
+		"fetch_status", outcome,
+		"validation_status", validationStatus,
+		"commit_status", commitStatus,
+		"duration_ms", durationMs,
+		"response_bytes", fetchResult.BytesRead,
+		"records_count", func() int {
+			if payload != nil {
+				var records []json.RawMessage
+				if err := json.Unmarshal(payload, &records); err == nil {
+					return len(records)
+				}
+			}
+			return 0
+		}(),
+		"records_delta", func() int {
+			if changed && commitResult.Snapshot != nil {
+				// Approximate delta based on content hash change
+				return 1
+			}
+			return 0
+		}(),
+	}
+
+	// Log based on outcome
+	switch {
+	case !successful:
+		slog.Error("scrape_execution_failed", append(logFields,
+			"error_kind", errorKind,
+			"error_message", safeUpstreamError(fetchErr),
+		)...)
+	case outcome == "rate_limited":
+		slog.Warn("scrape_execution_rate_limited", append(logFields,
+			"retry_after", retryAfter.Seconds(),
+		)...)
+	default:
+		slog.Info("scrape_execution_completed", logFields...)
+	}
+
 	result := RunResult{
 		TargetID:        target.ID,
 		LeaseGeneration: target.LeaseGeneration,

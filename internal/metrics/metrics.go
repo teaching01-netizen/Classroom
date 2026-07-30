@@ -167,4 +167,220 @@ var (
 			Help: "Total committed snapshot events dropped by bounded fan-out.",
 		},
 	)
+
+	// ============================================================================
+	// PR 1: Observability and invariant definitions
+	// ============================================================================
+
+	// ScrapeClaimTotal counts every lease claim attempt (successful or not).
+	// Alert: rate increases without corresponding fetches suggest claim contention.
+	ScrapeClaimTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scrape_claim_total",
+			Help: "Total scrape lease claims by bounded kind and outcome.",
+		},
+		[]string{"kind", "outcome"},
+	)
+
+	// ScrapeFetchTotal counts every upstream fetch attempt.
+	// Alert: rate of fetch errors > 5% suggests upstream or network issues.
+	ScrapeFetchTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scrape_fetch_total",
+			Help: "Total upstream fetch attempts by bounded kind and fetch status.",
+		},
+		[]string{"kind", "fetch_status"},
+	)
+
+	// ScrapeValidationFailedTotal counts validation failures after canonicalization.
+	// Alert: any increase suggests upstream payload format changes or schema drift.
+	ScrapeValidationFailedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "scrape_validation_failed_total",
+			Help: "Total scrape validations that failed canonicalization or schema checks.",
+		},
+	)
+
+	// ScrapeSuspiciousResponseTotal counts responses that look anomalous (e.g., empty
+	// body on 200, unexpected content type, size outlier).
+	// Alert: any increase warrants manual investigation of upstream behavior.
+	ScrapeSuspiciousResponseTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scrape_suspicious_response_total",
+			Help: "Total suspicious upstream responses by bounded kind and reason.",
+		},
+		[]string{"kind", "reason"},
+	)
+
+	// ScrapeCommitTotal counts every database commit attempt for scrape results.
+	// Alert: commit rate should roughly match fetch success rate; divergence
+	// indicates processing bottlenecks.
+	ScrapeCommitTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scrape_commit_total",
+			Help: "Total scrape commit attempts by bounded kind and outcome.",
+		},
+		[]string{"kind", "outcome"},
+	)
+
+	// ScrapeCommitRejectedTotal counts commits rejected by the store (e.g., lease
+	// generation mismatch, constraint violation).
+	// Alert: any increase suggests concurrency issues or schema problems.
+	// Label 'reason' is bounded: lease_lost, constraint_violation, version_conflict.
+	ScrapeCommitRejectedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scrape_commit_rejected_total",
+			Help: "Total scrape commits rejected by bounded reason.",
+		},
+		[]string{"reason"},
+	)
+
+	// ScrapeLeaseLostTotal counts lease losses detected during commit.
+	// Alert: sustained rate > 0 suggests clock skew or excessive lease duration.
+	// Note: this is an alias; WarwickScrapeLeaseLostTotal also exists for backwards
+	// compatibility. Both counters are incremented together during the transition.
+	ScrapeLeaseLostTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "scrape_lease_lost_total",
+			Help: "Total scrape lease losses detected during commit.",
+		},
+	)
+
+	// SnapshotNotificationTotal counts every snapshot fan-out notification sent.
+	// Alert: rate should match scrape commit rate for changed snapshots.
+	SnapshotNotificationTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "snapshot_notification_total",
+			Help: "Total snapshot notifications sent by bounded kind.",
+		},
+		[]string{"kind"},
+	)
+
+	// SnapshotNotificationRecoveryTotal counts notifications sent after a prior
+	// drop (recovery path).
+	// Alert: high rate suggests upstream delivery instability.
+	SnapshotNotificationRecoveryTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "snapshot_notification_recovery_total",
+			Help: "Total snapshot notification recoveries after prior drops.",
+		},
+	)
+
+	// MutationTotal counts every snapshot mutation (create or update).
+	// Alert: rate should roughly match scrape commit rate for changed snapshots.
+	MutationTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mutation_total",
+			Help: "Total snapshot mutations by bounded kind and operation.",
+		},
+		[]string{"kind", "operation"},
+	)
+
+	// MutationUnknownOutcomeTotal counts mutations where the outcome could not be
+	// classified (neither create nor update).
+	// Alert: any increase suggests logic bugs in the mutation path.
+	MutationUnknownOutcomeTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "mutation_unknown_outcome_total",
+			Help: "Total mutations with unclassifiable outcome.",
+		},
+	)
+
+	// MutationVerificationFailedTotal counts mutations where post-commit verification
+	// detected a mismatch.
+	// Alert: any increase indicates data integrity issues requiring immediate attention.
+	MutationVerificationFailedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "mutation_verification_failed_total",
+			Help: "Total mutations that failed post-commit verification.",
+		},
+	)
+
+	// TargetTombstonedTotal counts targets that have been soft-deleted (tombstoned).
+	// Alert: sudden spike may indicate upstream data cleanup or misconfiguration.
+	TargetTombstonedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "target_tombstoned_total",
+			Help: "Total targets tombstoned by bounded kind.",
+		},
+		[]string{"kind"},
+	)
+
+	// TargetReactivatedTotal counts tombstoned targets that were reactivated.
+	// Alert: rate should be low; high rate suggests tombstone logic issues.
+	TargetReactivatedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "target_reactivated_total",
+			Help: "Total targets reactivated by bounded kind.",
+		},
+		[]string{"kind"},
+	)
+
+	// ============================================================================
+	// Gauges and histograms
+	// ============================================================================
+
+	// ScrapeRecordsCount tracks the number of records in scrape payloads.
+	// Alert: unexpected drops to 0 or sudden spikes may indicate upstream issues.
+	ScrapeRecordsCount = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "scrape_records_count",
+			Help:    "Number of records in scrape payloads by bounded kind.",
+			Buckets: []float64{0, 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000},
+		},
+		[]string{"kind"},
+	)
+
+	// ScrapeRecordsDeltaRatio tracks the relative change in record count between
+	// consecutive scrapes. A value of 0 means no change; >0 means growth; <0 means
+	// shrinkage. Buckets cover typical ratios.
+	// Alert: large negative deltas (>50% drop) may indicate upstream data loss.
+	ScrapeRecordsDeltaRatio = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "scrape_records_delta_ratio",
+			Help:    "Relative change in record count between consecutive scrapes by bounded kind.",
+			Buckets: []float64{-0.5, -0.25, -0.1, -0.05, -0.01, 0, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0},
+		},
+		[]string{"kind"},
+	)
+
+	// ScrapeQueueDepth tracks the number of targets waiting to be scraped.
+	// Alert: sustained growth indicates workers cannot keep up with scrape schedule.
+	ScrapeQueueDepth = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "scrape_queue_depth",
+			Help: "Number of targets waiting to be scraped.",
+		},
+	)
+
+	// TargetsOverdueTotal counts targets whose next_run_at is in the past.
+	// Alert: any non-zero value for >5 minutes suggests scheduler stall.
+	TargetsOverdueTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "targets_overdue_total",
+			Help: "Number of targets with next_run_at in the past.",
+		},
+	)
+
+	// ListenerSequenceLag tracks the difference between the latest committed sequence
+	// and the last sequence processed by a listener.
+	// Alert: sustained lag > 0 indicates listener processing falling behind.
+	ListenerSequenceLag = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "listener_sequence_lag",
+			Help: "Difference between latest committed and last processed sequence by listener.",
+		},
+		[]string{"listener_id"},
+	)
+
+	// FrontendSnapshotVersionLag tracks the difference between the latest snapshot
+	// version in the database and the version last delivered to the frontend.
+	// Alert: sustained lag > 0 indicates frontend delivery falling behind.
+	FrontendSnapshotVersionLag = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "frontend_snapshot_version_lag",
+			Help: "Difference between latest DB snapshot version and last delivered frontend version.",
+		},
+		[]string{"kind"},
+	)
 )
