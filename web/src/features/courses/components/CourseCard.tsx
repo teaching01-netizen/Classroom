@@ -41,10 +41,10 @@ export function CourseCard({
           {pinned ? 'Unpin' : 'Pin'}
         </Button>
       </div>
-      <div>
+      <Link className="course-card__course-link" to={`/courses/${course.course_id}/sessions`}>
         <h3>{course.name}</h3>
         <p>{course.start_date} – {course.end_date}</p>
-      </div>
+      </Link>
       <dl className="course-card__facts">
         <div><dt>Students</dt><dd>{course.enrolled_count}</dd></div>
         <div><dt>Sessions</dt><dd>{course.completed_sessions}/{course.total_sessions}</dd></div>
@@ -67,7 +67,7 @@ export function CourseCard({
         </p>
       )}
       <div className="course-card__actions">
-        <Link to={`/courses/${course.course_id}/sessions`}>Open sessions</Link>
+        <span className="course-card__open-sessions" aria-hidden="true">Open sessions</span>
         <Link to={`/courses/${course.course_id}/attendance`}>Attendance report</Link>
       </div>
     </article>

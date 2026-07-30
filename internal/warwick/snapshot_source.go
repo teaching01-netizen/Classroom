@@ -317,7 +317,7 @@ func (s *SnapshotSource) fetchCatalog(
 ) (SnapshotFetchResult, error) {
 	body := EncodeDataTablesBody(
 		DefaultDataTablesRequest([]string{"CourseName", "Cycle", "Enrolled"}),
-		map[string]string{"keyword": "", "UserID": s.client.effectiveUserID()},
+		map[string]string{"keyword": "", "UserID": s.client.resolveUserID(ctx, cookie)},
 	)
 	var response ClassAttendanceSearchResponse
 	metadata, bytesRead, err := s.requestJSON(
