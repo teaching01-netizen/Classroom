@@ -27,6 +27,8 @@ type Source interface {
 type Store interface {
 	Commit(context.Context, db.CommitInput) (db.CommitResult, error)
 	ReleaseLease(context.Context, db.ReleaseLeaseRequest) error
+	RenewLease(context.Context, db.RenewLeaseRequest) error
+	ReconcileLifecycle(context.Context, db.LifecycleReconcileInput) error
 }
 
 type HostObserver interface {
@@ -145,6 +147,7 @@ func (c *Coordinator) RunClaimedWithRelease(
 	var contentHash [32]byte
 	changed := false
 	var recordsCount int
+	var validationWarnings []ValidationWarning
 	if fetchErr == nil {
 		var canonicalErr error
 		payload, contentHash, recordsCount, canonicalErr = Canonicalize(
@@ -156,14 +159,41 @@ func (c *Coordinator) RunClaimedWithRelease(
 			fetchErr = canonicalErr
 			outcome = "invalid_payload"
 			errorKind = "canonicalization"
+			metrics.ScrapeValidationFailedTotal.Inc()
 		} else {
-			changed = !target.HasContentHash() || contentHash != target.CurrentContentHash
-			if changed {
-				outcome = "changed"
-			} else {
-				outcome = "unchanged"
+			validated, validationErr := ValidatePayload(target.Ref.Kind, fetchResult.Value)
+			if validationErr != nil {
+				fetchErr = validationErr
+				outcome = "invalid_payload"
+				errorKind = "validation"
 				payload = nil
 				contentHash = [32]byte{}
+				recordsCount = 0
+				metrics.ScrapeValidationFailedTotal.Inc()
+			} else {
+				validationWarnings = validated.Warnings
+				previousCount := 0
+				if target.HasCurrentSnapshot {
+					previousCount = target.PreviousRecordCount
+				}
+				classification := ClassifyChange(DefaultChangeSafetyPolicy(), validated, previousCount)
+				if classification.Status == "suspicious" {
+					outcome = "suspicious"
+					changed = false
+					payload = nil
+					contentHash = [32]byte{}
+					metrics.ScrapeSuspiciousResponseTotal.
+						WithLabelValues(string(target.Ref.Kind), "large_drop").Inc()
+				} else {
+					changed = !target.HasContentHash() || contentHash != target.CurrentContentHash
+					if changed {
+						outcome = "changed"
+					} else {
+						outcome = "unchanged"
+						payload = nil
+						contentHash = [32]byte{}
+					}
+				}
 			}
 		}
 	} else if errors.Is(fetchErr, domain.ErrNotModified) {
@@ -234,8 +264,16 @@ func (c *Coordinator) RunClaimedWithRelease(
 
 	var discovered []domain.TargetSeed
 	var seen []domain.TargetRef
-	if outcome == "changed" {
+	if outcome == "changed" || outcome == "unchanged" {
 		discovered, seen = discoverTargets(target, fetchResult.Value, finishedAt)
+		// Add jitter to next_run_at for newly discovered children to avoid a
+		// scrape storm when a parent reveals many children at once.
+		c.randomMu.Lock()
+		for i := range discovered {
+			jitter := time.Duration(c.random.Int63n(int64(time.Minute * 5)))
+			discovered[i].NextRunAt = discovered[i].NextRunAt.Add(jitter)
+		}
+		c.randomMu.Unlock()
 	}
 	input := db.CommitInput{
 		TargetID:            target.ID,
@@ -262,6 +300,7 @@ func (c *Coordinator) RunClaimedWithRelease(
 		Payload:             payload,
 		Discovered:          discovered,
 		SeenChildRefs:       seen,
+		RecordsCount:        recordsCount,
 	}
 	commitResult, commitErr := c.store.Commit(ctx, input)
 
@@ -304,6 +343,7 @@ func (c *Coordinator) RunClaimedWithRelease(
 		"duration_ms", durationMs,
 		"response_bytes", fetchResult.BytesRead,
 		"records_count", recordsCount,
+		"validation_warnings", len(validationWarnings),
 	}
 	if commitErr == nil {
 		logFields = append(logFields,
@@ -334,6 +374,29 @@ func (c *Coordinator) RunClaimedWithRelease(
 
 	if commitErr != nil {
 		return RunResult{}, errors.Join(commitErr, observationErr)
+	}
+
+	// Reconcile child target lifecycle states after every successful parent
+	// fetch. This marks absent children as missing, tombstones them after
+	// the configured threshold, and reactivates any previously tombstoned
+	// children that reappear.
+	if successful {
+		parentVersion := target.CurrentVersion
+		if commitResult.Snapshot != nil {
+			parentVersion = commitResult.Snapshot.Version
+		}
+		if reconcileErr := c.store.ReconcileLifecycle(ctx, db.LifecycleReconcileInput{
+			ParentRef:       target.Ref,
+			ParentVersion:   parentVersion,
+			DiscoveredSeeds: discovered,
+			SeenChildRefs:   seen,
+		}); reconcileErr != nil {
+			slog.Error("lifecycle_reconciliation_failed",
+				"target_id", target.ID,
+				"target_kind", string(target.Ref.Kind),
+				"error", reconcileErr,
+			)
+		}
 	}
 
 	result := RunResult{
@@ -507,6 +570,7 @@ func discoverTargets(
 					ResourceKey: course.CourseID,
 				},
 				Attributes:      attributes,
+				Priority:        domain.PriorityActiveCourse,
 				InitialInterval: policy.Initial,
 				MinInterval:     policy.Min,
 				MaxInterval:     policy.Max,
@@ -534,6 +598,7 @@ func discoverTargets(
 					ParentKey: parent.Ref.ResourceKey, ResourceKey: session.SessionID,
 				},
 				Attributes:      attributes,
+				Priority:        domain.DefaultPriority(domain.SnapshotSessionDetail, session.Status),
 				InitialInterval: policy.Initial,
 				MinInterval:     policy.Min,
 				MaxInterval:     policy.Max,
@@ -545,6 +610,7 @@ func discoverTargets(
 	sort.Slice(seeds, func(i, j int) bool {
 		return seeds[i].Ref.IdentityKey() < seeds[j].Ref.IdentityKey()
 	})
+
 	seen := make([]domain.TargetRef, len(seeds))
 	for index := range seeds {
 		seen[index] = seeds[index].Ref
