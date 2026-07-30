@@ -40,3 +40,9 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# generated findings
+findings.json
+
+# omo build output
+web/.omo/

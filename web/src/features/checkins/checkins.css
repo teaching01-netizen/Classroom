@@ -1,0 +1,32 @@
+.qr-dialog {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-5);
+}
+
+.qr-dialog__pending {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-3);
+  inline-size: min(100%, 20rem);
+  aspect-ratio: 1;
+  place-content: center;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  color: var(--color-text-subtle);
+}
+
+.qr-dialog__image {
+  inline-size: min(100%, 20rem);
+  aspect-ratio: 1;
+  border-radius: var(--radius-md);
+}
+
+.qr-dialog__count {
+  color: var(--color-text-subtle);
+}
+
+.qr-dialog__count strong {
+  color: var(--color-text-default);
+  font-size: var(--text-lg);
+}

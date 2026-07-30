@@ -1,0 +1,15 @@
+@media (prefers-contrast: more) {
+  :root {
+    --color-border-default: #85848a;
+    --color-text-subtle: #303136;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

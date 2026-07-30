@@ -1,0 +1,75 @@
+:root {
+  --blue-50: #f3f7ff;
+  --blue-100: #e5eeff;
+  --blue-600: #276bf0;
+  --blue-700: #1f57c9;
+  --gray-0: #ffffff;
+  --gray-25: #fbfbfc;
+  --gray-50: #f6f6f7;
+  --gray-100: #eeeff1;
+  --gray-200: #dcdbdd;
+  --gray-400: #8b8c91;
+  --gray-600: #4f5056;
+  --gray-950: #111113;
+  --green-50: #eaf7ef;
+  --green-700: #257348;
+  --amber-50: #faf0c4;
+  --amber-800: #7a631c;
+  --red-50: #f9e0e3;
+  --red-700: #9a3d4a;
+
+  --color-surface-canvas: var(--gray-25);
+  --color-surface-default: var(--gray-0);
+  --color-surface-subtle: var(--gray-50);
+  --color-surface-hover: var(--gray-100);
+  --color-border-default: var(--gray-200);
+  --color-border-strong: #c7c6ca;
+  --color-text-default: var(--gray-950);
+  --color-text-subtle: var(--gray-600);
+  --color-text-muted: #696a6c;
+  --color-text-on-action: var(--gray-0);
+  --color-action-primary: var(--blue-600);
+  --color-action-primary-hover: var(--blue-700);
+  --color-action-soft: var(--blue-50);
+  --color-focus: #155eef;
+  --color-positive: var(--green-700);
+  --color-positive-soft: var(--green-50);
+  --color-warning: var(--amber-800);
+  --color-warning-soft: var(--amber-50);
+  --color-danger: var(--red-700);
+  --color-danger-soft: var(--red-50);
+
+  --button-primary-background: var(--color-action-primary);
+  --button-primary-background-hover: var(--color-action-primary-hover);
+  --table-row-hover-background: var(--color-surface-hover);
+  --input-border: var(--color-border-default);
+  --dialog-backdrop: rgb(17 17 19 / 42%);
+
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+  --text-2xl: clamp(1.75rem, 3vw, 2.25rem);
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.875rem;
+  --radius-full: 999px;
+  --shadow-sm: 0 1px 3px rgb(16 24 40 / 8%), 0 1px 2px rgb(16 24 40 / 4%);
+  --shadow-md: 0 12px 32px rgb(16 24 40 / 14%);
+  --motion-fast: 140ms ease;
+  --motion-medium: 220ms ease;
+}
