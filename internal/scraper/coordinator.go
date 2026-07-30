@@ -144,9 +144,10 @@ func (c *Coordinator) RunClaimedWithRelease(
 	var payload json.RawMessage
 	var contentHash [32]byte
 	changed := false
+	var recordsCount int
 	if fetchErr == nil {
 		var canonicalErr error
-		payload, contentHash, canonicalErr = Canonicalize(
+		payload, contentHash, recordsCount, canonicalErr = Canonicalize(
 			target.Ref.Kind,
 			fetchResult.Value,
 			c.canonicalPayloadLimit,
@@ -293,14 +294,7 @@ func (c *Coordinator) RunClaimedWithRelease(
 		"session_id", target.Ref.ResourceKey,
 		"worker_id", target.LeaseOwner,
 		"lease_generation", target.LeaseGeneration,
-		"run_id", commitResult.RunID,
 		"previous_snapshot_version", target.CurrentVersion,
-		"new_snapshot_version", func() int64 {
-			if commitResult.Snapshot != nil {
-				return commitResult.Snapshot.Version
-			}
-			return 0
-		}(),
 		"previous_content_hash", previousContentHashStr,
 		"new_content_hash", contentHashStr,
 		"canonicalization_version", 1,
@@ -309,22 +303,18 @@ func (c *Coordinator) RunClaimedWithRelease(
 		"commit_status", commitStatus,
 		"duration_ms", durationMs,
 		"response_bytes", fetchResult.BytesRead,
-		"records_count", func() int {
-			if payload != nil {
-				var records []json.RawMessage
-				if err := json.Unmarshal(payload, &records); err == nil {
-					return len(records)
+		"records_count", recordsCount,
+	}
+	if commitErr == nil {
+		logFields = append(logFields,
+			"run_id", commitResult.RunID,
+			"new_snapshot_version", func() int64 {
+				if commitResult.Snapshot != nil {
+					return commitResult.Snapshot.Version
 				}
-			}
-			return 0
-		}(),
-		"records_delta", func() int {
-			if changed && commitResult.Snapshot != nil {
-				// Approximate delta based on content hash change
-				return 1
-			}
-			return 0
-		}(),
+				return 0
+			}(),
+		)
 	}
 
 	// Log based on outcome

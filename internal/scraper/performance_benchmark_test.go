@@ -75,7 +75,7 @@ func BenchmarkCanonicalizeByKind(b *testing.B) {
 		b.Run(fixture.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for range b.N {
-				payload, hash, err := Canonicalize(fixture.kind, fixture.value, 8<<20)
+				payload, hash, _, err := Canonicalize(fixture.kind, fixture.value, 8<<20)
 				if err != nil {
 					b.Fatal(err)
 				}

@@ -16,12 +16,12 @@ func TestCanonicalizeStableOrderingWithoutMutatingCaller(t *testing.T) {
 		{CourseID: "a", Name: "Alpha"},
 	}
 	original := append([]domain.CourseSummary(nil), catalog...)
-	firstJSON, firstHash, err := Canonicalize(domain.SnapshotCourseCatalog, catalog, 1<<20)
+	firstJSON, firstHash, _, err := Canonicalize(domain.SnapshotCourseCatalog, catalog, 1<<20)
 	require.NoError(t, err)
 	require.Equal(t, original, catalog)
 
 	reordered := []domain.CourseSummary{catalog[2], catalog[0], catalog[1]}
-	secondJSON, secondHash, err := Canonicalize(domain.SnapshotCourseCatalog, reordered, 1<<20)
+	secondJSON, secondHash, _, err := Canonicalize(domain.SnapshotCourseCatalog, reordered, 1<<20)
 	require.NoError(t, err)
 	require.Equal(t, firstJSON, secondJSON)
 	require.Equal(t, firstHash, secondHash)
@@ -37,9 +37,9 @@ func TestCanonicalizeNestedListsAndNilNormalization(t *testing.T) {
 	}
 	courseB := courseA
 	courseB.Sessions = []domain.SessionSummary{courseA.Sessions[1], courseA.Sessions[0]}
-	aJSON, aHash, err := Canonicalize(domain.SnapshotCourseDetail, &courseA, 1<<20)
+	aJSON, aHash, _, err := Canonicalize(domain.SnapshotCourseDetail, &courseA, 1<<20)
 	require.NoError(t, err)
-	bJSON, bHash, err := Canonicalize(domain.SnapshotCourseDetail, &courseB, 1<<20)
+	bJSON, bHash, _, err := Canonicalize(domain.SnapshotCourseDetail, &courseB, 1<<20)
 	require.NoError(t, err)
 	require.Equal(t, aJSON, bJSON)
 	require.Equal(t, aHash, bHash)
@@ -47,9 +47,9 @@ func TestCanonicalizeNestedListsAndNilNormalization(t *testing.T) {
 	nilCourse := domain.CourseDetail{CourseSummary: domain.CourseSummary{CourseID: "empty"}}
 	emptyCourse := nilCourse
 	emptyCourse.Sessions = []domain.SessionSummary{}
-	nilJSON, nilHash, err := Canonicalize(domain.SnapshotCourseDetail, nilCourse, 1<<20)
+	nilJSON, nilHash, _, err := Canonicalize(domain.SnapshotCourseDetail, nilCourse, 1<<20)
 	require.NoError(t, err)
-	emptyJSON, emptyHash, err := Canonicalize(domain.SnapshotCourseDetail, emptyCourse, 1<<20)
+	emptyJSON, emptyHash, _, err := Canonicalize(domain.SnapshotCourseDetail, emptyCourse, 1<<20)
 	require.NoError(t, err)
 	require.Equal(t, nilJSON, emptyJSON)
 	require.Equal(t, nilHash, emptyHash)
@@ -71,9 +71,9 @@ func TestCanonicalizeSessionNormalizesOrderAndTimestampOffsets(t *testing.T) {
 	second.Students[0].CheckedInAt = &offset
 	second.QRExpiresAt = &offset
 
-	firstJSON, firstHash, err := Canonicalize(domain.SnapshotSessionDetail, first, 1<<20)
+	firstJSON, firstHash, _, err := Canonicalize(domain.SnapshotSessionDetail, first, 1<<20)
 	require.NoError(t, err)
-	secondJSON, secondHash, err := Canonicalize(domain.SnapshotSessionDetail, second, 1<<20)
+	secondJSON, secondHash, _, err := Canonicalize(domain.SnapshotSessionDetail, second, 1<<20)
 	require.NoError(t, err)
 	require.Equal(t, firstJSON, secondJSON)
 	require.Equal(t, firstHash, secondHash)
@@ -85,24 +85,24 @@ func TestCanonicalizeProfilesAndTypeSafety(t *testing.T) {
 		{StudentGuid: "a", StudentID: "9"},
 		{StudentGuid: "a", StudentID: "1"},
 	}
-	firstJSON, firstHash, err := Canonicalize(domain.SnapshotStudentProfiles, profiles, 1<<20)
+	firstJSON, firstHash, _, err := Canonicalize(domain.SnapshotStudentProfiles, profiles, 1<<20)
 	require.NoError(t, err)
-	secondJSON, secondHash, err := Canonicalize(domain.SnapshotStudentProfiles,
+	secondJSON, secondHash, _, err := Canonicalize(domain.SnapshotStudentProfiles,
 		[]domain.StudentProfile{profiles[2], profiles[0], profiles[1]}, 1<<20)
 	require.NoError(t, err)
 	require.Equal(t, firstJSON, secondJSON)
 	require.Equal(t, firstHash, secondHash)
 
-	_, _, err = Canonicalize(domain.SnapshotStudentProfiles, domain.CourseDetail{}, 1<<20)
+	_, _, _, err = Canonicalize(domain.SnapshotStudentProfiles, domain.CourseDetail{}, 1<<20)
 	require.Error(t, err)
 	var typedNil *domain.CourseDetail
-	_, _, err = Canonicalize(domain.SnapshotCourseDetail, typedNil, 1<<20)
+	_, _, _, err = Canonicalize(domain.SnapshotCourseDetail, typedNil, 1<<20)
 	require.Error(t, err)
 }
 
 func TestCanonicalizeEnforcesPayloadCeilingWithoutTruncation(t *testing.T) {
 	value := []domain.CourseSummary{{CourseID: "course", Name: "A long course name"}}
-	payload, _, err := Canonicalize(domain.SnapshotCourseCatalog, value, 8)
+	payload, _, _, err := Canonicalize(domain.SnapshotCourseCatalog, value, 8)
 	require.Error(t, err)
 	require.Nil(t, payload)
 }
@@ -110,11 +110,11 @@ func TestCanonicalizeEnforcesPayloadCeilingWithoutTruncation(t *testing.T) {
 func TestCanonicalizeAtoBtoAHash(t *testing.T) {
 	a := []domain.CourseSummary{{CourseID: "a"}}
 	b := []domain.CourseSummary{{CourseID: "b"}}
-	_, hashA1, err := Canonicalize(domain.SnapshotCourseCatalog, a, 1<<20)
+	_, hashA1, _, err := Canonicalize(domain.SnapshotCourseCatalog, a, 1<<20)
 	require.NoError(t, err)
-	_, hashB, err := Canonicalize(domain.SnapshotCourseCatalog, b, 1<<20)
+	_, hashB, _, err := Canonicalize(domain.SnapshotCourseCatalog, b, 1<<20)
 	require.NoError(t, err)
-	_, hashA2, err := Canonicalize(domain.SnapshotCourseCatalog, a, 1<<20)
+	_, hashA2, _, err := Canonicalize(domain.SnapshotCourseCatalog, a, 1<<20)
 	require.NoError(t, err)
 	require.Equal(t, hashA1, hashA2)
 	require.NotEqual(t, hashA1, hashB)

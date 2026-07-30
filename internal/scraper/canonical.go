@@ -14,22 +14,22 @@ func Canonicalize(
 	kind domain.SnapshotKind,
 	value any,
 	maxBytes int64,
-) (json.RawMessage, [32]byte, error) {
+) (json.RawMessage, [32]byte, int, error) {
 	var zero [32]byte
 	if maxBytes <= 0 {
-		return nil, zero, fmt.Errorf("canonical payload limit must be positive")
+		return nil, zero, 0, fmt.Errorf("canonical payload limit must be positive")
 	}
 
 	normalized, err := canonicalValue(kind, value)
 	if err != nil {
-		return nil, zero, err
+		return nil, zero, 0, err
 	}
 	payload, err := json.Marshal(normalized)
 	if err != nil {
-		return nil, zero, fmt.Errorf("marshal canonical %s: %w", kind, err)
+		return nil, zero, 0, fmt.Errorf("marshal canonical %s: %w", kind, err)
 	}
 	if int64(len(payload)) > maxBytes {
-		return nil, zero, fmt.Errorf(
+		return nil, zero, 0, fmt.Errorf(
 			"canonical %s payload exceeds limit: %d > %d bytes",
 			kind,
 			len(payload),
@@ -37,7 +37,18 @@ func Canonicalize(
 		)
 	}
 	hash := sha256.Sum256(payload)
-	return json.RawMessage(payload), hash, nil
+	return json.RawMessage(payload), hash, countRecords(normalized), nil
+}
+
+func countRecords(normalized any) int {
+	switch v := normalized.(type) {
+	case []domain.CourseSummary:
+		return len(v)
+	case []domain.StudentProfile:
+		return len(v)
+	default:
+		return 0
+	}
 }
 
 func canonicalValue(kind domain.SnapshotKind, value any) (any, error) {

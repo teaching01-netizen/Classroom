@@ -235,17 +235,6 @@ var (
 		[]string{"reason"},
 	)
 
-	// ScrapeLeaseLostTotal counts lease losses detected during commit.
-	// Alert: sustained rate > 0 suggests clock skew or excessive lease duration.
-	// Note: this is an alias; WarwickScrapeLeaseLostTotal also exists for backwards
-	// compatibility. Both counters are incremented together during the transition.
-	ScrapeLeaseLostTotal = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "scrape_lease_lost_total",
-			Help: "Total scrape lease losses detected during commit.",
-		},
-	)
-
 	// SnapshotNotificationTotal counts every snapshot fan-out notification sent.
 	// Alert: rate should match scrape commit rate for changed snapshots.
 	SnapshotNotificationTotal = promauto.NewCounterVec(

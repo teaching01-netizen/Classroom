@@ -139,7 +139,7 @@ func TestCoordinatorChangedCatalogDiscoversCourses(t *testing.T) {
 func TestCoordinatorIdenticalContentIsUnchanged(t *testing.T) {
 	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
 	value := []domain.CourseSummary{{CourseID: "a", Name: "Alpha"}}
-	payload, hash, err := Canonicalize(domain.SnapshotCourseCatalog, value, 1<<20)
+	payload, hash, _, err := Canonicalize(domain.SnapshotCourseCatalog, value, 1<<20)
 	require.NoError(t, err)
 	target := coordinatorTarget(domain.SnapshotCourseCatalog)
 	target.HasCurrentSnapshot = true
