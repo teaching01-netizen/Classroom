@@ -1,3 +1,40 @@
-.ui-table td > strong {
+.session-row {
+  position: relative;
+}
+
+.session-card-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.session-card-link::after {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  content: '';
+  cursor: pointer;
+}
+
+.session-card-link > strong {
   font-weight: 650;
+}
+
+.session-checkin-summary {
+  display: none;
+}
+
+.session-open-affordance {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 2.75rem;
+  min-block-size: 2.75rem;
+  color: var(--color-action-primary);
+  font-weight: 650;
+}
+
+@media (max-width: 40rem) {
+  .session-checkin-summary {
+    display: inline;
+  }
 }

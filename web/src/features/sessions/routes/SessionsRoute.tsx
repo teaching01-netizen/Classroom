@@ -69,15 +69,27 @@ export function Component() {
             </thead>
             <tbody>
               {sessions.map((session) => (
-                <tr key={session.session_id}>
+                <tr className="session-row" key={session.session_id}>
                   <td>
-                    <strong>{session.name}</strong>
-                    <span className="table-subtitle">Session {session.session_number}</span>
+                    <Link
+                      className="session-card-link"
+                      to={`/courses/${courseId}/sessions/${session.session_id}`}
+                    >
+                      <strong>{session.name}</strong>
+                      <span className="table-subtitle">
+                        Session {session.session_number}
+                        <span className="session-checkin-summary">
+                          {' '}· {session.checked_in_count}/{session.total_students} checked in
+                        </span>
+                      </span>
+                    </Link>
                   </td>
                   <td className="is-secondary">{session.date}</td>
                   <td><Badge tone={statusTone[session.status]}>{session.status.replace('_', ' ')}</Badge></td>
                   <td className="is-secondary">{session.checked_in_count}/{session.total_students}</td>
-                  <td><Link to={`/courses/${courseId}/sessions/${session.session_id}`}>Open</Link></td>
+                  <td>
+                    <span className="session-open-affordance" aria-hidden="true">Open</span>
+                  </td>
                 </tr>
               ))}
             </tbody>

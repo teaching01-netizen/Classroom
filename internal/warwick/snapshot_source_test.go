@@ -144,6 +144,7 @@ func TestSnapshotSourceCourseDetailEmptyStatusIsNotStarted(t *testing.T) {
 	require.NoError(t, err)
 	detail, ok := result.Value.(*domain.CourseDetail)
 	require.True(t, ok)
+	require.Equal(t, domain.CourseStatusActive, detail.Status)
 	require.Equal(t, domain.SessionStatusNotStarted, detail.Sessions[0].Status)
 	require.Equal(t, domain.SessionStatusActive, detail.Sessions[1].Status)
 }

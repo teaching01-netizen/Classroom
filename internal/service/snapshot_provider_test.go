@@ -128,6 +128,27 @@ func TestSnapshotProviderDecodesTypedResourcesWithFullIdentity(t *testing.T) {
 	require.Equal(t, "course-1", sessionRef.ParentKey)
 }
 
+func TestSnapshotProviderDefaultsLegacyEmptyCourseStatus(t *testing.T) {
+	// Given
+	now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
+	reader := &snapshotReaderFake{snapshots: map[string]domain.Snapshot{}, errors: map[string]error{}}
+	provider := NewSnapshotProvider(reader, &snapshotRefresherFake{}, "warwick.humantix.cloud", func() time.Time { return now })
+	ref := provider.CourseRef("course-1")
+	reader.snapshots[ref.IdentityKey()] = providerSnapshot(
+		ref,
+		domain.CourseDetail{CourseSummary: domain.CourseSummary{CourseID: "course-1"}},
+		now,
+		now.Add(time.Hour),
+	)
+
+	// When
+	detail, err := provider.GetCourseDetail(context.Background(), "course-1")
+
+	// Then
+	require.NoError(t, err)
+	require.Equal(t, domain.CourseStatusActive, detail.Status)
+}
+
 func TestSnapshotProviderColdMissRefreshesOnceAndReadsAgain(t *testing.T) {
 	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
 	reader := &snapshotReaderFake{snapshots: map[string]domain.Snapshot{}, errors: map[string]error{}}

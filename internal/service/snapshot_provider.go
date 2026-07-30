@@ -161,6 +161,9 @@ func (p *SnapshotProvider) GetCourseDetailWithName(
 	if err := p.read(ctx, p.CourseRef(courseID), &detail); err != nil {
 		return nil, err
 	}
+	if detail.Status == "" {
+		detail.Status = domain.CourseStatusActive
+	}
 	return &detail, nil
 }
 

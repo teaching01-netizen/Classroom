@@ -476,6 +476,7 @@ func (s *SnapshotSource) fetchCourse(
 			Name:              attributes.CourseName,
 			TotalSessions:     len(sessions),
 			CompletedSessions: completed,
+			Status:            domain.CourseStatusActive,
 		},
 		Sessions: sessions,
 	}
