@@ -204,6 +204,9 @@ func (s *TeacherService) GetSessionDetail(ctx context.Context, courseID, session
 		<-profileCh
 		return nil, errors.New("teacher: session detail provider returned nil detail")
 	}
+	if res.detail.Status == "" {
+		res.detail.Status = domain.SessionStatusNotStarted
+	}
 
 	profRes := <-profileCh
 	if len(profRes.profiles) > 0 {

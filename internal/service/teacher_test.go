@@ -63,9 +63,11 @@ type mockProvider struct {
 	getCourseDetailCalls  int
 	detailNameArgs        []string // courseName argument captured from GetCourseDetailWithName
 
-	courses      []domain.CourseSummary
-	detailReturn *domain.CourseDetail
-	detailErr    error
+	courses             []domain.CourseSummary
+	detailReturn        *domain.CourseDetail
+	detailErr           error
+	sessionDetailReturn *domain.SessionDetail
+	sessionDetailErr    error
 }
 
 func newMockProvider() *mockProvider {
@@ -118,7 +120,7 @@ func (m *mockProvider) GetCourseDetailWithName(ctx context.Context, courseID, co
 }
 
 func (m *mockProvider) GetSessionDetail(ctx context.Context, courseID, sessionID string) (*domain.SessionDetail, error) {
-	return nil, nil
+	return m.sessionDetailReturn, m.sessionDetailErr
 }
 
 func (m *mockProvider) FetchStudentProfiles(ctx context.Context) ([]domain.StudentProfile, error) {
@@ -141,8 +143,6 @@ func (m *mockProvider) GetCourseAttendanceReport(ctx context.Context, courseID, 
 func (m *mockProvider) FetchSessionForReport(ctx context.Context, courseID, sessionID string) (*domain.SessionDetail, error) {
 	return nil, nil
 }
-
-// --- Tests ---
 
 // TestGetAbsenceDashboard_OneCatalogRequest verifies the dashboard performs
 // exactly one catalog request for N courses (VAL-REDUN-007).
