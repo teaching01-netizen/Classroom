@@ -263,9 +263,6 @@ func (c *Coordinator) RunClaimedWithRelease(
 		SeenChildRefs:       seen,
 	}
 	commitResult, commitErr := c.store.Commit(ctx, input)
-	if commitErr != nil {
-		return RunResult{}, errors.Join(commitErr, observationErr)
-	}
 
 	// Structured logging for scrape execution observability
 	durationMs := finishedAt.Sub(startedAt).Milliseconds()
@@ -285,7 +282,7 @@ func (c *Coordinator) RunClaimedWithRelease(
 	}
 	commitStatus := "ok"
 	if commitErr != nil {
-		commitStatus = "rejected"
+		commitStatus = "failed"
 	}
 
 	// Build structured log fields
@@ -343,6 +340,10 @@ func (c *Coordinator) RunClaimedWithRelease(
 		)...)
 	default:
 		slog.Info("scrape_execution_completed", logFields...)
+	}
+
+	if commitErr != nil {
+		return RunResult{}, errors.Join(commitErr, observationErr)
 	}
 
 	result := RunResult{
