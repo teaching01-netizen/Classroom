@@ -26,6 +26,7 @@ type ValidatedPayload struct {
 type ChangeSafetyPolicy struct {
 	MinimumPreviousCount int
 	MaximumDropRatio     float64
+	MaxMissingIDRatio    float64
 	ConfirmationAttempts int
 }
 
@@ -33,6 +34,7 @@ func DefaultChangeSafetyPolicy() ChangeSafetyPolicy {
 	return ChangeSafetyPolicy{
 		MinimumPreviousCount: 2,
 		MaximumDropRatio:     0.20,
+		MaxMissingIDRatio:    0.10,
 		ConfirmationAttempts: 2,
 	}
 }
@@ -280,6 +282,20 @@ func ClassifyChange(
 	validated *ValidatedPayload,
 	previousCount int,
 ) ClassifiedChange {
+	return ClassifyChangeAgainst(policy, validated, previousCount, nil)
+}
+
+// ClassifyChangeAgainst extends ClassifyChange with an ID-based suspicion
+// rule: when the previous snapshot's stable IDs are known and most of them
+// are absent from the candidate, the change is treated as suspicious even if
+// the drop ratio stays within tolerance. previousIDs == nil disables the
+// rule, so ClassifyChange is exactly ClassifyChangeAgainst(..., nil).
+func ClassifyChangeAgainst(
+	policy ChangeSafetyPolicy,
+	validated *ValidatedPayload,
+	previousCount int,
+	previousIDs map[string]struct{},
+) ClassifiedChange {
 	result := ClassifiedChange{
 		Status:        "changed",
 		PreviousCount: previousCount,
@@ -312,5 +328,93 @@ func ClassifyChange(
 		return result
 	}
 
+	if previousCount >= policy.MinimumPreviousCount && len(previousIDs) > 0 {
+		currentIDs := validatedIDs(validated)
+		missing := 0
+		for id := range previousIDs {
+			if _, present := currentIDs[id]; !present {
+				missing++
+			}
+		}
+		missingRatio := float64(missing) / float64(len(previousIDs))
+		if missingRatio > policy.MaxMissingIDRatio {
+			result.Status = "suspicious"
+			metrics.ScrapeSuspiciousResponseTotal.
+				WithLabelValues(string(validated.Kind), "many_missing_ids").Inc()
+			return result
+		}
+	}
+
 	return result
+}
+
+// validatedIDs extracts the stable ID set from a validated payload's Raw
+// value, mirroring the per-kind identities used by the validators. It returns
+// nil when the kind or value shape is not recognized.
+func validatedIDs(validated *ValidatedPayload) map[string]struct{} {
+	if validated == nil || validated.Raw == nil {
+		return nil
+	}
+	ids := make(map[string]struct{})
+	switch validated.Kind {
+	case domain.SnapshotCourseCatalog:
+		courses, ok := validated.Raw.([]domain.CourseSummary)
+		if !ok {
+			return nil
+		}
+		for _, course := range courses {
+			if course.CourseID != "" {
+				ids[course.CourseID] = struct{}{}
+			}
+		}
+	case domain.SnapshotCourseDetail:
+		var detail domain.CourseDetail
+		switch typed := validated.Raw.(type) {
+		case domain.CourseDetail:
+			detail = typed
+		case *domain.CourseDetail:
+			if typed == nil {
+				return nil
+			}
+			detail = *typed
+		default:
+			return nil
+		}
+		for _, session := range detail.Sessions {
+			if session.SessionID != "" {
+				ids[session.SessionID] = struct{}{}
+			}
+		}
+	case domain.SnapshotSessionDetail:
+		var detail domain.SessionDetail
+		switch typed := validated.Raw.(type) {
+		case domain.SessionDetail:
+			detail = typed
+		case *domain.SessionDetail:
+			if typed == nil {
+				return nil
+			}
+			detail = *typed
+		default:
+			return nil
+		}
+		for _, student := range detail.Students {
+			if student.StudentID != "" {
+				ids[student.StudentID] = struct{}{}
+			}
+		}
+	case domain.SnapshotStudentProfiles:
+		profiles, ok := validated.Raw.([]domain.StudentProfile)
+		if !ok {
+			return nil
+		}
+		for _, profile := range profiles {
+			if profile.StudentID != "" {
+				ids[profile.StudentID] = struct{}{}
+			}
+		}
+	default:
+		return nil
+	}
+	return ids
 }

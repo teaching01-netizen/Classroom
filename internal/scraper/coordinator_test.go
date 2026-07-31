@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/rand"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,13 +53,15 @@ func (s *coordinatorConfirmingSource) FetchConfirmation(
 }
 
 type coordinatorStore struct {
-	inputs             []db.CommitInput
-	releases           []db.ReleaseLeaseRequest
-	lifecycleInputs    []db.LifecycleReconcileInput
-	commitErr          error
+	inputs                []db.CommitInput
+	releases              []db.ReleaseLeaseRequest
+	lifecycleInputs       []db.LifecycleReconcileInput
+	commitErr             error
 	reconcileLifecycleErr error
-	nextRunID          int64
-	nextVersion        int64
+	nextRunID             int64
+	nextVersion           int64
+	current               domain.Snapshot
+	currentErr            error
 }
 
 func (s *coordinatorStore) Commit(_ context.Context, input db.CommitInput) (db.CommitResult, error) {
@@ -74,6 +77,18 @@ func (s *coordinatorStore) Commit(_ context.Context, input db.CommitInput) (db.C
 		result.Metadata = &domain.SnapshotMetadata{Version: s.nextVersion}
 	}
 	return result, nil
+}
+
+// Current returns the configured previous snapshot, or ErrSnapshotNotFound
+// when none was set so runs behave as if no snapshot exists.
+func (s *coordinatorStore) Current(_ context.Context, _ domain.TargetRef) (domain.Snapshot, error) {
+	if s.currentErr != nil {
+		return domain.Snapshot{}, s.currentErr
+	}
+	if s.current.Version == 0 {
+		return domain.Snapshot{}, domain.ErrSnapshotNotFound
+	}
+	return s.current, nil
 }
 
 func (s *coordinatorStore) ReleaseLease(_ context.Context, request db.ReleaseLeaseRequest) error {
@@ -512,13 +527,19 @@ func TestCoordinatorConfirmationConsistentPublishesChange(t *testing.T) {
 	}
 	source := &coordinatorConfirmingSource{
 		coordinatorSource: coordinatorSource{result: warwick.SnapshotFetchResult{
-			Value:     smallCatalog,
-			Metadata:  warwick.ResponseMetadata{StatusCode: 200},
+			Value: smallCatalog,
+			Metadata: warwick.ResponseMetadata{
+				StatusCode:  200,
+				RawBodyHash: strings.Repeat("A", 64),
+			},
 			BytesRead: 100,
 		}},
 		confirmation: warwick.SnapshotFetchResult{
-			Value:     smallCatalog,
-			Metadata:  warwick.ResponseMetadata{StatusCode: 200},
+			Value: smallCatalog,
+			Metadata: warwick.ResponseMetadata{
+				StatusCode:  200,
+				RawBodyHash: strings.Repeat("A", 64),
+			},
 			BytesRead: 100,
 		},
 	}
@@ -531,7 +552,8 @@ func TestCoordinatorConfirmationConsistentPublishesChange(t *testing.T) {
 	target.ValidationSeq = 1
 	target.PreviousRecordCount = 50
 
-	// The independent confirmation fetch matches, so the change is published.
+	// The independent confirmation fetch matches (same raw hash, same
+	// canonical hash), so the change is published.
 	result, err := coordinator.RunClaimed(context.Background(), target)
 	require.NoError(t, err)
 	require.Equal(t, "changed", result.Outcome)
@@ -558,13 +580,19 @@ func TestCoordinatorConfirmationMismatchQuarantinesBothCandidates(t *testing.T) 
 	}
 	source := &coordinatorConfirmingSource{
 		coordinatorSource: coordinatorSource{result: warwick.SnapshotFetchResult{
-			Value:     smallCatalog,
-			Metadata:  warwick.ResponseMetadata{StatusCode: 200},
+			Value: smallCatalog,
+			Metadata: warwick.ResponseMetadata{
+				StatusCode:  200,
+				RawBodyHash: strings.Repeat("A", 64),
+			},
 			BytesRead: 100,
 		}},
 		confirmation: warwick.SnapshotFetchResult{
-			Value:     differentCatalog,
-			Metadata:  warwick.ResponseMetadata{StatusCode: 200},
+			Value: differentCatalog,
+			Metadata: warwick.ResponseMetadata{
+				StatusCode:  200,
+				RawBodyHash: strings.Repeat("B", 64),
+			},
 			BytesRead: 100,
 		},
 	}
@@ -577,8 +605,9 @@ func TestCoordinatorConfirmationMismatchQuarantinesBothCandidates(t *testing.T) 
 	target.ValidationSeq = 1
 	target.PreviousRecordCount = 50
 
-	// The confirmation fetch disagrees with the original fetch, so both
-	// candidates are quarantined under one confirmation group.
+	// The confirmation fetch disagrees with the original fetch on both the
+	// raw body and the canonical payload, so both candidates are
+	// quarantined under one confirmation group.
 	result, err := coordinator.RunClaimed(context.Background(), target)
 	require.NoError(t, err)
 	require.Equal(t, "quarantined", result.Outcome)
@@ -606,6 +635,179 @@ func TestCoordinatorConfirmationMismatchQuarantinesBothCandidates(t *testing.T) 
 	}
 	require.NotEqual(t, first.CanonicalHash, second.CanonicalHash)
 	require.Equal(t, "confirmation_mismatch", store.inputs[0].LastRejectionCode)
+}
+
+func TestCoordinatorRawHashFastPathSkipsParseAndCommitsUnchanged(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	rawHash := strings.Repeat("ab", 32)
+	source := &coordinatorSource{result: warwick.SnapshotFetchResult{
+		// This value would fail validation if the fast path parsed it.
+		Value: "wrong type for catalog",
+		Metadata: warwick.ResponseMetadata{
+			StatusCode:  200,
+			RawBodyHash: rawHash,
+		},
+		BytesRead: 100,
+	}}
+	store := &coordinatorStore{current: domain.Snapshot{
+		Version:       1,
+		ParserVersion: ParserVersion,
+		RawBodyHash:   rawHash,
+		Payload:       json.RawMessage(`[{"course_id":"a"}]`),
+	}}
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target.HasCurrentSnapshot = true
+	target.CurrentVersion = 1
+	target.ValidationSeq = 1
+	coordinator := newCoordinatorForTest(source, store, &coordinatorObserver{}, now)
+
+	result, err := coordinator.RunClaimed(context.Background(), target)
+	require.NoError(t, err)
+	require.Equal(t, "unchanged", result.Outcome)
+	require.False(t, result.Changed)
+	require.Len(t, store.inputs, 1)
+	require.False(t, store.inputs[0].Changed)
+	require.Equal(t, 0, store.inputs[0].RecordsCount)
+	require.Nil(t, store.inputs[0].Payload)
+	require.Zero(t, store.inputs[0].ContentHash)
+	require.Equal(t, int64(2), *store.inputs[0].ValidationSeqAfter)
+	require.Len(t, store.inputs[0].Candidates, 1)
+	candidate := store.inputs[0].Candidates[0]
+	require.Equal(t, domain.CandidateUnchanged, candidate.Disposition)
+	require.Nil(t, candidate.Payload)
+	require.Zero(t, candidate.Manifest.Complete)
+	require.Equal(t, rawHash, candidate.RawBodyHash)
+}
+
+func TestCoordinatorRawHashDiffersTakesNormalParsePath(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	value := []domain.CourseSummary{{
+		CourseID: "a", Name: "Alpha", Status: domain.CourseStatusActive,
+	}}
+	source := &coordinatorSource{result: warwick.SnapshotFetchResult{
+		Value: value,
+		Metadata: warwick.ResponseMetadata{
+			StatusCode:  200,
+			RawBodyHash: strings.Repeat("cd", 32),
+		},
+		BytesRead: 100,
+	}}
+	store := &coordinatorStore{current: domain.Snapshot{
+		Version:       1,
+		ParserVersion: ParserVersion,
+		RawBodyHash:   strings.Repeat("ab", 32),
+		Payload:       json.RawMessage(`[{"course_id":"a"}]`),
+	}}
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target.HasCurrentSnapshot = true
+	target.CurrentVersion = 1
+	target.ValidationSeq = 1
+	coordinator := newCoordinatorForTest(source, store, &coordinatorObserver{}, now)
+
+	result, err := coordinator.RunClaimed(context.Background(), target)
+	require.NoError(t, err)
+	require.Equal(t, "changed", result.Outcome)
+	require.True(t, result.Changed)
+	require.Len(t, store.inputs, 1)
+	require.True(t, store.inputs[0].Changed)
+	require.NotNil(t, store.inputs[0].Payload)
+	require.Equal(t, 1, store.inputs[0].RecordsCount)
+}
+
+func TestCoordinatorPreviousSnapshotIDsTriggerSuspicion(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	previous := make([]domain.CourseSummary, 0, 10)
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"} {
+		previous = append(previous, domain.CourseSummary{CourseID: id})
+	}
+	prevPayload, _, prevCount, err := Canonicalize(domain.SnapshotCourseCatalog, previous, 1<<20)
+	require.NoError(t, err)
+	// 8 records (drop 0.2, within tolerance) but only 3 of the previous IDs
+	// survive (missing ratio 0.7): only the ID-based rule can flag this.
+	source := &coordinatorSource{result: warwick.SnapshotFetchResult{
+		Value: []domain.CourseSummary{
+			{CourseID: "a"}, {CourseID: "b"}, {CourseID: "c"},
+			{CourseID: "k"}, {CourseID: "l"}, {CourseID: "m"},
+			{CourseID: "n"}, {CourseID: "o"},
+		},
+		Metadata:  warwick.ResponseMetadata{StatusCode: 200},
+		BytesRead: 100,
+	}}
+	store := &coordinatorStore{current: domain.Snapshot{
+		Version:       1,
+		ParserVersion: ParserVersion,
+		Payload:       prevPayload,
+	}}
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target.HasCurrentSnapshot = true
+	target.CurrentVersion = 1
+	target.ValidationSeq = 1
+	target.PreviousRecordCount = prevCount
+	coordinator := newCoordinatorForTest(source, store, &coordinatorObserver{}, now)
+
+	// No ConfirmationSource, so the suspicious candidate is quarantined.
+	result, err := coordinator.RunClaimed(context.Background(), target)
+	require.NoError(t, err)
+	require.Equal(t, "quarantined", result.Outcome)
+	require.False(t, result.Changed)
+	require.Len(t, store.inputs, 1)
+	require.Len(t, store.inputs[0].Candidates, 1)
+	require.Equal(t, domain.CandidateQuarantinedAnomaly, store.inputs[0].Candidates[0].Disposition)
+	require.Equal(t, "confirmation_unavailable", store.inputs[0].Candidates[0].RejectionCode)
+}
+
+func TestCoordinatorConfirmationSameRawDifferentCanonicalQuarantinesNondeterminism(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	smallCatalog := []domain.CourseSummary{
+		{CourseID: "course-a", Name: "Course A", Status: domain.CourseStatusActive},
+		{CourseID: "course-b", Name: "Course B", Status: domain.CourseStatusActive},
+	}
+	differentCatalog := []domain.CourseSummary{
+		{CourseID: "course-x", Name: "Course X", Status: domain.CourseStatusActive},
+		{CourseID: "course-y", Name: "Course Y", Status: domain.CourseStatusActive},
+	}
+	rawHash := strings.Repeat("A", 64)
+	source := &coordinatorConfirmingSource{
+		coordinatorSource: coordinatorSource{result: warwick.SnapshotFetchResult{
+			Value: smallCatalog,
+			Metadata: warwick.ResponseMetadata{
+				StatusCode:  200,
+				RawBodyHash: rawHash,
+			},
+			BytesRead: 100,
+		}},
+		confirmation: warwick.SnapshotFetchResult{
+			Value: differentCatalog,
+			Metadata: warwick.ResponseMetadata{
+				StatusCode:  200,
+				RawBodyHash: rawHash,
+			},
+			BytesRead: 100,
+		},
+	}
+	store := &coordinatorStore{}
+	coordinator := newCoordinatorForTestAny(source, store, &coordinatorObserver{}, now)
+
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target.HasCurrentSnapshot = true
+	target.CurrentVersion = 1
+	target.ValidationSeq = 1
+	target.PreviousRecordCount = 50
+
+	// Same raw bytes, different canonical hash: the parser is nondeterministic.
+	result, err := coordinator.RunClaimed(context.Background(), target)
+	require.NoError(t, err)
+	require.Equal(t, "quarantined", result.Outcome)
+	require.False(t, result.Changed)
+	require.Equal(t, 1, source.confirmCalls)
+	require.Len(t, store.inputs, 1)
+	require.Len(t, store.inputs[0].Candidates, 2)
+	for _, candidate := range store.inputs[0].Candidates {
+		require.Equal(t, domain.CandidateQuarantinedAnomaly, candidate.Disposition)
+		require.Equal(t, "confirmation_parser_nondeterminism", candidate.RejectionCode)
+		require.Len(t, candidate.CanonicalHash, 64)
+	}
+	require.Equal(t, "confirmation_parser_nondeterminism", store.inputs[0].LastRejectionCode)
 }
 
 func TestCoordinatorReconcileLifecycleCalledAfterSuccessfulCommit(t *testing.T) {

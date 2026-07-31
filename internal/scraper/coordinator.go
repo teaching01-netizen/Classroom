@@ -35,13 +35,14 @@ type ConfirmationSource interface {
 
 // Version identity recorded on every published snapshot and candidate.
 const (
-	ParserVersion       = "warwick-v1"
-	SchemaVersion       = "schema-v1"
+	ParserVersion        = "warwick-v1"
+	SchemaVersion        = "schema-v1"
 	CanonicalizerVersion = "canonical-v1"
 )
 
 type Store interface {
 	Commit(context.Context, db.CommitInput) (db.CommitResult, error)
+	Current(context.Context, domain.TargetRef) (domain.Snapshot, error)
 	ReleaseLease(context.Context, db.ReleaseLeaseRequest) error
 	RenewLease(context.Context, db.RenewLeaseRequest) error
 	ReconcileLifecycle(context.Context, db.LifecycleReconcileInput) error
@@ -170,77 +171,110 @@ func (c *Coordinator) RunClaimedWithRelease(
 	confirmationRejectionCode := ""
 	var candidates []domain.ScrapeCandidate
 	if fetchErr == nil {
-		var canonicalErr error
-		payload, contentHash, recordsCount, canonicalErr = Canonicalize(
-			target.Ref.Kind,
-			fetchResult.Value,
-			c.canonicalPayloadLimit,
-		)
-		if canonicalErr != nil {
-			fetchErr = canonicalErr
-			outcome = "invalid_payload"
-			errorKind = "canonicalization"
-			metrics.ScrapeValidationFailedTotal.Inc()
+		// Load the previous verified snapshot once per run. It powers the
+		// raw-hash fast path and the ID-based suspicion rule; a missing or
+		// unreadable previous snapshot degrades to the pre-existing path.
+		prev, prevErr := c.store.Current(ctx, target.Ref)
+		if prevErr != nil && !errors.Is(prevErr, domain.ErrSnapshotNotFound) {
+			slog.Warn("previous_snapshot_read_failed",
+				"target_id", target.ID,
+				"error", prevErr,
+			)
+			prev = domain.Snapshot{}
+			prevErr = domain.ErrSnapshotNotFound
+		}
+		rawHashUnchanged := prevErr == nil &&
+			prev.RawBodyHash != "" &&
+			fetchResult.Metadata.RawBodyHash == prev.RawBodyHash &&
+			prev.ParserVersion == ParserVersion
+		if rawHashUnchanged {
+			// Byte-identical body with an unchanged parser: the canonical
+			// payload cannot have changed, so skip parse/validate/classify
+			// entirely and commit the unchanged outcome.
+			outcome = "unchanged"
 		} else {
-			validated, validationErr := ValidatePayload(
+			var canonicalErr error
+			payload, contentHash, recordsCount, canonicalErr = Canonicalize(
 				target.Ref.Kind,
 				fetchResult.Value,
-				target.Ref.ResourceKey,
+				c.canonicalPayloadLimit,
 			)
-			if validationErr != nil {
-				fetchErr = validationErr
+			if canonicalErr != nil {
+				fetchErr = canonicalErr
 				outcome = "invalid_payload"
-				errorKind = "validation"
-				payload = nil
-				contentHash = [32]byte{}
-				recordsCount = 0
+				errorKind = "canonicalization"
 				metrics.ScrapeValidationFailedTotal.Inc()
 			} else {
-				validationWarnings = validated.Warnings
-				previousCount := 0
-				if target.HasCurrentSnapshot {
-					previousCount = target.PreviousRecordCount
-				}
-				classification := ClassifyChange(DefaultChangeSafetyPolicy(), validated, previousCount)
-				manifest = buildSnapshotManifest(fetchResult, validated)
-				validationReport = buildValidationReport(
-					manifest,
-					validated.Warnings,
-					classification.Status == "suspicious",
+				validated, validationErr := ValidatePayload(
+					target.Ref.Kind,
+					fetchResult.Value,
+					target.Ref.ResourceKey,
 				)
-
-				if classification.Status == "suspicious" {
-					confirmationGroup = newConfirmationGroup()
-					confirmed, confirmationCode, confirmationEvidence := c.confirmChange(
-						ctx,
-						target,
-						contentHash,
-						recordsCount,
+				if validationErr != nil {
+					fetchErr = validationErr
+					outcome = "invalid_payload"
+					errorKind = "validation"
+					payload = nil
+					contentHash = [32]byte{}
+					recordsCount = 0
+					metrics.ScrapeValidationFailedTotal.Inc()
+				} else {
+					validationWarnings = validated.Warnings
+					previousCount := 0
+					if target.HasCurrentSnapshot {
+						previousCount = target.PreviousRecordCount
+					}
+					var previousIDs map[string]struct{}
+					if prevErr == nil {
+						previousIDs = snapshotIDs(target.Ref.Kind, prev.Payload)
+					}
+					classification := ClassifyChangeAgainst(
+						DefaultChangeSafetyPolicy(),
+						validated,
+						previousCount,
+						previousIDs,
 					)
-					if !confirmed {
-						outcome = "quarantined"
-						errorKind = "confirmation"
-						fetchErr = fmt.Errorf(
-							"suspicious change was not independently confirmed: %s",
-							confirmationCode,
+					manifest = buildSnapshotManifest(fetchResult, validated)
+					validationReport = buildValidationReport(
+						manifest,
+						validated.Warnings,
+						classification.Status == "suspicious",
+					)
+
+					if classification.Status == "suspicious" {
+						confirmationGroup = newConfirmationGroup()
+						confirmed, confirmationCode, confirmationEvidence := c.confirmChange(
+							ctx,
+							target,
+							contentHash,
+							recordsCount,
+							fetchResult.Metadata.RawBodyHash,
 						)
-						changed = false
-						confirmationRejectionCode = confirmationCode
-						if confirmationEvidence != nil {
-							confirmationEvidence.ConfirmationGroupUUID = confirmationGroup
-							candidates = append(candidates, *confirmationEvidence)
+						if !confirmed {
+							outcome = "quarantined"
+							errorKind = "confirmation"
+							fetchErr = fmt.Errorf(
+								"suspicious change was not independently confirmed: %s",
+								confirmationCode,
+							)
+							changed = false
+							confirmationRejectionCode = confirmationCode
+							if confirmationEvidence != nil {
+								confirmationEvidence.ConfirmationGroupUUID = confirmationGroup
+								candidates = append(candidates, *confirmationEvidence)
+							}
 						}
 					}
-				}
 
-				if outcome != "quarantined" {
-					changed = !target.HasContentHash() || contentHash != target.CurrentContentHash
-					if changed {
-						outcome = "changed"
-					} else {
-						outcome = "unchanged"
-						payload = nil
-						contentHash = [32]byte{}
+					if outcome != "quarantined" {
+						changed = !target.HasContentHash() || contentHash != target.CurrentContentHash
+						if changed {
+							outcome = "changed"
+						} else {
+							outcome = "unchanged"
+							payload = nil
+							contentHash = [32]byte{}
+						}
 					}
 				}
 			}
@@ -750,12 +784,16 @@ func safeUpstreamError(err error) string {
 // confirmChange re-fetches a suspicious candidate without conditional headers
 // and accepts it only when the independent fetch canonicalizes to the same
 // hash and record count. On a mismatch it returns the confirmation-fetch
-// evidence so the caller can persist both candidates under one group.
+// evidence so the caller can persist both candidates under one group. When
+// the second fetch has the same raw body hash but canonicalizes differently,
+// the parser itself is nondeterministic and the mismatch is attributed to
+// that instead of a genuine upstream change.
 func (c *Coordinator) confirmChange(
 	ctx context.Context,
 	target domain.ScrapeTarget,
 	firstHash [32]byte,
 	firstCount int,
+	firstRawHash string,
 ) (bool, string, *domain.ScrapeCandidate) {
 	source, ok := c.source.(ConfirmationSource)
 	if !ok {
@@ -777,6 +815,14 @@ func (c *Coordinator) confirmChange(
 	}
 	if secondHash == firstHash && secondCount == firstCount {
 		return true, "", nil
+	}
+	rejectionCode := "confirmation_mismatch"
+	message := "independent confirmation fetch did not match the original candidate"
+	if second.Metadata.RawBodyHash != "" &&
+		second.Metadata.RawBodyHash == firstRawHash &&
+		secondHash != firstHash {
+		rejectionCode = "confirmation_parser_nondeterminism"
+		message = "confirmation fetch had identical raw bytes but canonicalized to a different hash"
 	}
 	evidence := &domain.ScrapeCandidate{
 		TargetID:             target.ID,
@@ -800,16 +846,70 @@ func (c *Coordinator) confirmChange(
 			Complete: secondCount == second.ReportedCount ||
 				second.ReportedCount <= 0,
 			Violations: []domain.ValidationViolation{{
-				Code:     "confirmation_mismatch",
+				Code:     rejectionCode,
 				Severity: domain.SeverityFatal,
-				Message: "independent confirmation fetch did not match " +
-					"the original candidate",
+				Message:  message,
 			}},
 		},
 		Disposition:   domain.CandidateQuarantinedAnomaly,
-		RejectionCode: "confirmation_mismatch",
+		RejectionCode: rejectionCode,
 	}
-	return false, "confirmation_mismatch", evidence
+	return false, rejectionCode, evidence
+}
+
+// snapshotIDs decodes a previous snapshot's canonical payload into the
+// kind's stable ID set. It returns nil when the payload cannot be decoded or
+// the kind is unknown, which disables the ID-based suspicion rule for the run.
+func snapshotIDs(kind domain.SnapshotKind, payload json.RawMessage) map[string]struct{} {
+	if len(payload) == 0 {
+		return nil
+	}
+	ids := make(map[string]struct{})
+	switch kind {
+	case domain.SnapshotCourseCatalog:
+		var courses []domain.CourseSummary
+		if err := json.Unmarshal(payload, &courses); err != nil {
+			return nil
+		}
+		for _, course := range courses {
+			if course.CourseID != "" {
+				ids[course.CourseID] = struct{}{}
+			}
+		}
+	case domain.SnapshotCourseDetail:
+		var detail domain.CourseDetail
+		if err := json.Unmarshal(payload, &detail); err != nil {
+			return nil
+		}
+		for _, session := range detail.Sessions {
+			if session.SessionID != "" {
+				ids[session.SessionID] = struct{}{}
+			}
+		}
+	case domain.SnapshotSessionDetail:
+		var detail domain.SessionDetail
+		if err := json.Unmarshal(payload, &detail); err != nil {
+			return nil
+		}
+		for _, student := range detail.Students {
+			if student.StudentID != "" {
+				ids[student.StudentID] = struct{}{}
+			}
+		}
+	case domain.SnapshotStudentProfiles:
+		var profiles []domain.StudentProfile
+		if err := json.Unmarshal(payload, &profiles); err != nil {
+			return nil
+		}
+		for _, profile := range profiles {
+			if profile.StudentID != "" {
+				ids[profile.StudentID] = struct{}{}
+			}
+		}
+	default:
+		return nil
+	}
+	return ids
 }
 
 // buildSnapshotManifest records pagination and count evidence so a snapshot

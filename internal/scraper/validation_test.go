@@ -214,6 +214,75 @@ func TestClassifyChangeBelowMinimumPreviousCountIsChanged(t *testing.T) {
 	require.Equal(t, "changed", result.Status)
 }
 
+func TestClassifyChangeAgainstMostlyMissingIDsIsSuspicious(t *testing.T) {
+	policy := DefaultChangeSafetyPolicy()
+	previousIDs := make(map[string]struct{})
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"} {
+		previousIDs[id] = struct{}{}
+	}
+	// Only 3 of 10 previous IDs survive (missing ratio 0.7), but the record
+	// count stays within drop tolerance (0.2), so only the ID-based rule can
+	// flag the candidate.
+	validated := &ValidatedPayload{
+		Kind:        domain.SnapshotCourseCatalog,
+		RecordCount: 8,
+		Raw: []domain.CourseSummary{
+			{CourseID: "a"}, {CourseID: "b"}, {CourseID: "c"},
+		},
+	}
+	result := ClassifyChangeAgainst(policy, validated, 10, previousIDs)
+	require.Equal(t, "suspicious", result.Status)
+	require.InDelta(t, 0.2, result.DropRatio, 0.001)
+}
+
+func TestClassifyChangeAgainstMostlyPresentIDsIsChanged(t *testing.T) {
+	policy := DefaultChangeSafetyPolicy()
+	previousIDs := make(map[string]struct{})
+	courses := make([]domain.CourseSummary, 0, 9)
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"} {
+		previousIDs[id] = struct{}{}
+		courses = append(courses, domain.CourseSummary{CourseID: id})
+	}
+	previousIDs["j"] = struct{}{}
+	// 9 of 10 previous IDs survive (missing ratio 0.1, at the tolerance
+	// boundary), so neither rule flags the candidate.
+	validated := &ValidatedPayload{
+		Kind:        domain.SnapshotCourseCatalog,
+		RecordCount: 9,
+		Raw:         courses,
+	}
+	result := ClassifyChangeAgainst(policy, validated, 10, previousIDs)
+	require.Equal(t, "changed", result.Status)
+	require.InDelta(t, 0.1, result.DropRatio, 0.001)
+}
+
+func TestClassifyChangeAgainstNilIDsBehavesLikeClassifyChange(t *testing.T) {
+	policy := DefaultChangeSafetyPolicy()
+	validated := &ValidatedPayload{
+		Kind:        domain.SnapshotCourseCatalog,
+		RecordCount: 45,
+	}
+	require.Equal(t,
+		ClassifyChange(policy, validated, 50),
+		ClassifyChangeAgainst(policy, validated, 50, nil),
+	)
+	// A large drop still takes precedence over the ID-based rule: with 3 of
+	// 10 IDs surviving and 10 records the drop rule fires first.
+	previousIDs := make(map[string]struct{})
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"} {
+		previousIDs[id] = struct{}{}
+	}
+	dropped := &ValidatedPayload{
+		Kind:        domain.SnapshotCourseCatalog,
+		RecordCount: 3,
+		Raw: []domain.CourseSummary{
+			{CourseID: "a"}, {CourseID: "b"}, {CourseID: "c"},
+		},
+	}
+	result := ClassifyChangeAgainst(policy, dropped, 10, previousIDs)
+	require.Equal(t, "suspicious", result.Status)
+}
+
 func TestValidateUnsupportedKind(t *testing.T) {
 	_, err := ValidatePayload("unknown_kind", "data", "")
 	require.Error(t, err)
