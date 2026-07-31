@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+const authSignalThreshold = 2
+
 var (
 	ErrAuthenticationResponse = errors.New("upstream returned an authentication page")
 	ErrUnexpectedContentType  = errors.New("unexpected response content type")
@@ -60,14 +62,14 @@ func (g *ResponseGuard) ValidateBody(body []byte, expectation ResponseExpectatio
 	if int64(len(body)) > g.MaxBodyBytes {
 		return ErrResponseTooLarge
 	}
-	if authSignalScore(body, expectation.RequireJSON) >= 2 {
+	if authSignalScore(body, expectation.RequireJSON) >= authSignalThreshold {
 		return ErrAuthenticationResponse
 	}
 	return nil
 }
 
 func authSignalsDetected(body []byte) bool {
-	return authSignalScore(body, false) >= 2
+	return authSignalScore(body, false) >= authSignalThreshold
 }
 
 func authSignalScore(body []byte, requireJSON bool) int {

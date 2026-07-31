@@ -99,6 +99,14 @@ func TestValidateBodyAndMetadataAcceptValidJSON(t *testing.T) {
 	require.NoError(t, guard.ValidateMetadata(resp, jsonExpectation("/admin/ClassAttendance")))
 }
 
+func TestValidateBodyDoesNotFlagTruncatedJSON(t *testing.T) {
+	guard := NewResponseGuard(1 << 20)
+	body := []byte(`{"students":[{"id":"1"`)
+	// Truncated JSON still starts with '{', so the RequireJSON signal does not fire;
+	// truncation is left to the JSON decoder downstream, not the guard.
+	require.NoError(t, guard.ValidateBody(body, ResponseExpectation{RequireJSON: true}))
+}
+
 func TestNewResponseGuardPanicsOnNonPositiveLimit(t *testing.T) {
 	require.Panics(t, func() { NewResponseGuard(0) })
 	require.Panics(t, func() { NewResponseGuard(-1) })
