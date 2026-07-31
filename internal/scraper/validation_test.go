@@ -136,6 +136,41 @@ func TestValidateCourseDetailSuccess(t *testing.T) {
 	require.Equal(t, 2, validated.RecordCount)
 }
 
+// Pins the production tolerance for course-detail payloads: the live warwick
+// source never populates SessionSummary.Date and always normalizes
+// SessionStatus, so empty Date and empty Status must validate cleanly with no
+// error and no warnings for those fields.
+func TestValidateCourseDetailToleratesEmptySessionDateAndStatus(t *testing.T) {
+	detail := domain.CourseDetail{
+		CourseSummary: domain.CourseSummary{CourseID: "c1"},
+		Sessions: []domain.SessionSummary{
+			{SessionID: "s1"},
+			{SessionID: "s2"},
+		},
+	}
+	validated, err := ValidatePayload(domain.SnapshotCourseDetail, detail, "c1")
+	require.NoError(t, err)
+	require.Equal(t, 2, validated.RecordCount)
+	require.Equal(t, 2, validated.DistinctIDs)
+	require.Empty(t, validated.Warnings)
+}
+
+// Documents the tolerance path: an empty resourceKey skips the key-match
+// check entirely, so a payload carrying a non-empty CourseID never triggers a
+// mismatch when no resource key is supplied.
+func TestValidateCourseDetailEmptyResourceKeySkipsKeyMatch(t *testing.T) {
+	detail := domain.CourseDetail{
+		CourseSummary: domain.CourseSummary{CourseID: "c1"},
+		Sessions: []domain.SessionSummary{
+			{SessionID: "s1"},
+		},
+	}
+	validated, err := ValidatePayload(domain.SnapshotCourseDetail, detail, "")
+	require.NoError(t, err)
+	require.Equal(t, 1, validated.RecordCount)
+	require.Empty(t, validated.Warnings)
+}
+
 func TestValidateStudentProfilesSuccess(t *testing.T) {
 	profiles := []domain.StudentProfile{
 		{StudentID: "st1", StudentGuid: "guid1"},
