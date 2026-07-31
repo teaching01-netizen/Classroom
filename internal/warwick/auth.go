@@ -184,7 +184,7 @@ func loginWithContext(ctx context.Context, client *http.Client, loginURL, email,
 		if err != nil {
 			return "", fmt.Errorf("reading login response: %w", err)
 		}
-		if isLoginPage(string(body)) {
+		if authSignalsDetected(body) {
 			return "", fmt.Errorf("login returned 200 OK but with login page HTML — check credentials")
 		}
 	}
@@ -226,14 +226,6 @@ func acquireGate(ctx context.Context, gate chan struct{}) error {
 
 func releaseGate(gate chan struct{}) {
 	<-gate
-}
-
-func isLoginPage(body string) bool {
-	return strings.Contains(body, "idg-box-login-primary") ||
-		strings.Contains(body, "idg-btn-sumbit") ||
-		(strings.Contains(body, "<title>WarWick</title>") &&
-			strings.Contains(body, "Forgot Password?") &&
-			strings.Contains(body, `name="password"`))
 }
 
 func extractSessionCookie(headers http.Header) (string, error) {

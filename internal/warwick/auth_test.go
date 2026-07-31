@@ -50,22 +50,22 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
-func TestIsLoginPage(t *testing.T) {
+func TestAuthSignalsDetectedLoginPage(t *testing.T) {
 	html := `<div class="idg-box-login-primary">
 		<span>Sign In</span>
 		<input name="password" />
 		<a href="/admin/SignIn/ForgotPassword">Forgot Password?</a>
 	</div>`
-	assert.True(t, isLoginPage(html))
+	assert.True(t, authSignalsDetected([]byte(html)))
 }
 
-func TestIsNotLoginPage(t *testing.T) {
+func TestAuthSignalsDetectedNotLoginPage(t *testing.T) {
 	html := `<title>WarWick</title>
 		<div id="wrapper">
 			<span>Adisak Seesom</span>
 			<table class="datatables">...</table>
 		</div>`
-	assert.False(t, isLoginPage(html))
+	assert.False(t, authSignalsDetected([]byte(html)))
 }
 
 func TestExtractSessionCookie(t *testing.T) {

@@ -54,6 +54,7 @@ type SnapshotFetchResult struct {
 type SnapshotSource struct {
 	client            *ClassroomClient
 	responseBodyLimit int64
+	responseGuard     *ResponseGuard
 	now               func() time.Time
 	traceSampleRate   float64
 }
@@ -75,6 +76,7 @@ func NewSnapshotSource(client *ClassroomClient, responseBodyLimit int64) *Snapsh
 	return &SnapshotSource{
 		client:            client,
 		responseBodyLimit: responseBodyLimit,
+		responseGuard:     NewResponseGuard(responseBodyLimit),
 		now:               time.Now,
 	}
 }
@@ -818,8 +820,11 @@ func (s *SnapshotSource) requestJSON(
 		return metadata, bytesRead, domain.NewInvalidPayloadError("upstream response body exceeds configured limit")
 	}
 	metadata.RawBodyHash = rawBodyHash(payload)
-	if isLoginPage(string(payload)) {
-		return metadata, bytesRead, domain.ErrAuthExpired
+	if err := s.responseGuard.ValidateBody(payload, ResponseExpectation{RequireJSON: true}); err != nil {
+		if errors.Is(err, ErrAuthenticationResponse) {
+			return metadata, bytesRead, domain.ErrAuthExpired
+		}
+		return metadata, bytesRead, domain.NewInvalidPayloadError(fmt.Sprintf("response guard: %v", err))
 	}
 	if err := json.Unmarshal(payload, destination); err != nil {
 		return metadata, bytesRead, domain.NewInvalidPayloadError(

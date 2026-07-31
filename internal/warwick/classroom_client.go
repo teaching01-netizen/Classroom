@@ -187,9 +187,8 @@ func (c *ClassroomClient) checkAuth(resp *http.Response) error {
 	if strings.Contains(contentType, "text/html") {
 		limited := io.LimitReader(resp.Body, maxBodySize)
 		respBody, _ := io.ReadAll(limited)
-		bodyStr := string(respBody)
-		resp.Body = io.NopCloser(strings.NewReader(bodyStr))
-		if isLoginPage(bodyStr) {
+		resp.Body = io.NopCloser(strings.NewReader(string(respBody)))
+		if authSignalsDetected(respBody) {
 			return domain.ErrAuthExpired
 		}
 	}

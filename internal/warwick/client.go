@@ -196,7 +196,7 @@ func (c *WarwickQrClient) doFetchContext(ctx context.Context, classID string, co
 		if err != nil {
 			return domain.QrResponse{}, domain.NewNetworkError(fmt.Sprintf("failed to read response body: %v", err))
 		}
-		if isLoginPage(string(respBody)) {
+		if authSignalsDetected(respBody) {
 			return domain.QrResponse{}, domain.ErrAuthExpired
 		}
 		return domain.QrResponse{}, domain.NewInvalidPayloadError("Received unexpected HTML response")
