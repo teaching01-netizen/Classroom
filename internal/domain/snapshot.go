@@ -159,8 +159,15 @@ type Snapshot struct {
 	Payload          json.RawMessage `json:"-"`
 	ContentFetchedAt time.Time       `json:"content_fetched_at"`
 	ValidatedAt      time.Time       `json:"validated_at"`
+	VerifiedAt       time.Time       `json:"verified_at"`
 	NextRunAt        time.Time       `json:"next_run_at"`
 	MaxServeAge      time.Duration   `json:"-"`
+	ParserVersion    string          `json:"parser_version,omitempty"`
+	SchemaVersion    string          `json:"schema_version,omitempty"`
+	RawBodyHash      string          `json:"raw_body_hash,omitempty"`
+	Complete         bool            `json:"complete"`
+	Manifest         SnapshotManifest `json:"manifest,omitempty"`
+	ValidationReport ValidationReport `json:"validation_report,omitempty"`
 }
 
 func (s Snapshot) Stale(now time.Time) bool {
@@ -175,14 +182,17 @@ func (s Snapshot) Expired(now time.Time) bool {
 }
 
 type SnapshotMetadata struct {
-	Kind          SnapshotKind `json:"kind"`
-	ResourceKey   string       `json:"resource_key"`
-	ParentKey     string       `json:"parent_key"`
-	Version       int64        `json:"version"`
-	ValidationSeq int64        `json:"validation_seq"`
-	ValidatedAt   time.Time    `json:"validated_at"`
-	Stale         bool         `json:"stale"`
-	EventSequence int64        `json:"eventSequence,omitempty"`
+	Kind          SnapshotKind   `json:"kind"`
+	ResourceKey   string         `json:"resource_key"`
+	ParentKey     string         `json:"parent_key"`
+	Version       int64          `json:"version"`
+	ValidationSeq int64          `json:"validation_seq"`
+	ValidatedAt   time.Time      `json:"validated_at"`
+	Stale         bool           `json:"stale"`
+	QualityState  DataQualityState `json:"quality_state"`
+	Complete      bool           `json:"complete"`
+	ParserVersion string         `json:"parser_version,omitempty"`
+	EventSequence int64          `json:"eventSequence,omitempty"`
 }
 
 func (m SnapshotMetadata) Ref(host string) TargetRef {

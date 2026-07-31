@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math/rand"
 	"testing"
 	"time"
@@ -33,6 +32,23 @@ func (s *coordinatorSource) Fetch(
 		return s.fetch(ctx, target)
 	}
 	return s.result, s.err
+}
+
+// coordinatorConfirmingSource implements ConfirmationSource on top of a
+// coordinatorSource so tests can exercise the confirmation flow.
+type coordinatorConfirmingSource struct {
+	coordinatorSource
+	confirmation warwick.SnapshotFetchResult
+	confirmErr   error
+	confirmCalls int
+}
+
+func (s *coordinatorConfirmingSource) FetchConfirmation(
+	_ context.Context,
+	_ domain.ScrapeTarget,
+) (warwick.SnapshotFetchResult, error) {
+	s.confirmCalls++
+	return s.confirmation, s.confirmErr
 }
 
 type coordinatorStore struct {
@@ -109,6 +125,10 @@ func coordinatorTarget(kind domain.SnapshotKind) domain.ScrapeTarget {
 }
 
 func newCoordinatorForTest(source *coordinatorSource, store *coordinatorStore, observer *coordinatorObserver, now time.Time) *Coordinator {
+	return newCoordinatorForTestAny(source, store, observer, now)
+}
+
+func newCoordinatorForTestAny(source Source, store *coordinatorStore, observer *coordinatorObserver, now time.Time) *Coordinator {
 	return NewCoordinator(source, store, observer, CoordinatorConfig{
 		FetchTimeout:          30 * time.Second,
 		CanonicalPayloadLimit: 1 << 20,
@@ -444,42 +464,14 @@ func TestCoordinatorCanonicalHashMatchesCommittedBytes(t *testing.T) {
 	require.Equal(t, sha256.Sum256(store.inputs[0].Payload), store.inputs[0].ContentHash)
 }
 
-func TestCoordinatorSuspiciousOutcomeOnLargeDrop(t *testing.T) {
+func TestCoordinatorSuspiciousOutcomeQuarantinesWithoutConfirmationSource(t *testing.T) {
 	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
-	// First fetch returns a large catalog
-	largeCatalog := make([]domain.CourseSummary, 50)
-	for i := range largeCatalog {
-		largeCatalog[i] = domain.CourseSummary{
-			CourseID: fmt.Sprintf("course-%d", i),
-			Name:     fmt.Sprintf("Course %d", i),
-			Status:   domain.CourseStatusActive,
-		}
+	// Second fetch returns only 2 courses (large drop from 50).
+	smallCatalog := []domain.CourseSummary{
+		{CourseID: "course-a", Name: "Course A", Status: domain.CourseStatusActive},
+		{CourseID: "course-b", Name: "Course B", Status: domain.CourseStatusActive},
 	}
 	source := &coordinatorSource{result: warwick.SnapshotFetchResult{
-		Value: largeCatalog,
-		Metadata: warwick.ResponseMetadata{
-			StatusCode: 200,
-			ETag:       `"v1"`,
-		},
-		BytesRead: 1000,
-	}}
-	store := &coordinatorStore{}
-	observer := &coordinatorObserver{}
-	coordinator := newCoordinatorForTest(source, store, observer, now)
-	target := coordinatorTarget(domain.SnapshotCourseCatalog)
-
-	// First run should succeed
-	result, err := coordinator.RunClaimed(context.Background(), target)
-	require.NoError(t, err)
-	require.Equal(t, "changed", result.Outcome)
-	require.Len(t, store.inputs, 1)
-
-	// Now simulate a second fetch that returns only 2 courses (large drop)
-	smallCatalog := []domain.CourseSummary{
-		{CourseID: "course-a", Name: "Course A"},
-		{CourseID: "course-b", Name: "Course B"},
-	}
-	source2 := &coordinatorSource{result: warwick.SnapshotFetchResult{
 		Value: smallCatalog,
 		Metadata: warwick.ResponseMetadata{
 			StatusCode: 200,
@@ -487,24 +479,133 @@ func TestCoordinatorSuspiciousOutcomeOnLargeDrop(t *testing.T) {
 		},
 		BytesRead: 100,
 	}}
-	store2 := &coordinatorStore{}
-	observer2 := &coordinatorObserver{}
-	coordinator2 := newCoordinatorForTest(source2, store2, observer2, now)
+	store := &coordinatorStore{}
+	coordinator := newCoordinatorForTest(source, store, &coordinatorObserver{}, now)
 
-	// Set up target with existing snapshot
-	target2 := coordinatorTarget(domain.SnapshotCourseCatalog)
-	target2.HasCurrentSnapshot = true
-	target2.CurrentVersion = 1
-	target2.ValidationSeq = 1
-	target2.PreviousRecordCount = 50
+	// Set up target with existing snapshot.
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target.HasCurrentSnapshot = true
+	target.CurrentVersion = 1
+	target.ValidationSeq = 1
+	target.PreviousRecordCount = 50
 
-	result2, err := coordinator2.RunClaimed(context.Background(), target2)
+	// A source without FetchConfirmation cannot confirm the suspicious drop,
+	// so the candidate is quarantined and the last-known-good is preserved.
+	result, err := coordinator.RunClaimed(context.Background(), target)
 	require.NoError(t, err)
-	require.Equal(t, "suspicious", result2.Outcome)
-	require.False(t, result2.Changed)
-	require.Len(t, store2.inputs, 1)
-	require.False(t, store2.inputs[0].Changed)
-	require.Nil(t, store2.inputs[0].Payload)
+	require.Equal(t, "quarantined", result.Outcome)
+	require.False(t, result.Changed)
+	require.Len(t, store.inputs, 1)
+	require.False(t, store.inputs[0].Changed)
+	require.Nil(t, store.inputs[0].Payload)
+	require.Len(t, store.inputs[0].Candidates, 1)
+	require.Equal(t, domain.CandidateQuarantinedAnomaly, store.inputs[0].Candidates[0].Disposition)
+	require.Equal(t, "confirmation_unavailable", store.inputs[0].Candidates[0].RejectionCode)
+	require.Equal(t, "confirmation_unavailable", store.inputs[0].LastRejectionCode)
+}
+
+func TestCoordinatorConfirmationConsistentPublishesChange(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	smallCatalog := []domain.CourseSummary{
+		{CourseID: "course-a", Name: "Course A", Status: domain.CourseStatusActive},
+		{CourseID: "course-b", Name: "Course B", Status: domain.CourseStatusActive},
+	}
+	source := &coordinatorConfirmingSource{
+		coordinatorSource: coordinatorSource{result: warwick.SnapshotFetchResult{
+			Value:     smallCatalog,
+			Metadata:  warwick.ResponseMetadata{StatusCode: 200},
+			BytesRead: 100,
+		}},
+		confirmation: warwick.SnapshotFetchResult{
+			Value:     smallCatalog,
+			Metadata:  warwick.ResponseMetadata{StatusCode: 200},
+			BytesRead: 100,
+		},
+	}
+	store := &coordinatorStore{}
+	coordinator := newCoordinatorForTestAny(source, store, &coordinatorObserver{}, now)
+
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target.HasCurrentSnapshot = true
+	target.CurrentVersion = 1
+	target.ValidationSeq = 1
+	target.PreviousRecordCount = 50
+
+	// The independent confirmation fetch matches, so the change is published.
+	result, err := coordinator.RunClaimed(context.Background(), target)
+	require.NoError(t, err)
+	require.Equal(t, "changed", result.Outcome)
+	require.True(t, result.Changed)
+	require.Equal(t, 1, source.confirmCalls)
+	require.Len(t, store.inputs, 1)
+	require.True(t, store.inputs[0].Changed)
+	require.NotNil(t, store.inputs[0].Payload)
+	require.Len(t, store.inputs[0].Candidates, 1)
+	require.Equal(t, domain.CandidateAccepted, store.inputs[0].Candidates[0].Disposition)
+	require.NotEmpty(t, store.inputs[0].Candidates[0].ConfirmationGroupUUID)
+	require.True(t, store.inputs[0].Manifest.Complete)
+}
+
+func TestCoordinatorConfirmationMismatchQuarantinesBothCandidates(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	smallCatalog := []domain.CourseSummary{
+		{CourseID: "course-a", Name: "Course A", Status: domain.CourseStatusActive},
+		{CourseID: "course-b", Name: "Course B", Status: domain.CourseStatusActive},
+	}
+	differentCatalog := []domain.CourseSummary{
+		{CourseID: "course-x", Name: "Course X", Status: domain.CourseStatusActive},
+		{CourseID: "course-y", Name: "Course Y", Status: domain.CourseStatusActive},
+	}
+	source := &coordinatorConfirmingSource{
+		coordinatorSource: coordinatorSource{result: warwick.SnapshotFetchResult{
+			Value:     smallCatalog,
+			Metadata:  warwick.ResponseMetadata{StatusCode: 200},
+			BytesRead: 100,
+		}},
+		confirmation: warwick.SnapshotFetchResult{
+			Value:     differentCatalog,
+			Metadata:  warwick.ResponseMetadata{StatusCode: 200},
+			BytesRead: 100,
+		},
+	}
+	store := &coordinatorStore{}
+	coordinator := newCoordinatorForTestAny(source, store, &coordinatorObserver{}, now)
+
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target.HasCurrentSnapshot = true
+	target.CurrentVersion = 1
+	target.ValidationSeq = 1
+	target.PreviousRecordCount = 50
+
+	// The confirmation fetch disagrees with the original fetch, so both
+	// candidates are quarantined under one confirmation group.
+	result, err := coordinator.RunClaimed(context.Background(), target)
+	require.NoError(t, err)
+	require.Equal(t, "quarantined", result.Outcome)
+	require.False(t, result.Changed)
+	require.Equal(t, 1, source.confirmCalls)
+	require.Len(t, store.inputs, 1)
+	require.Len(t, store.inputs[0].Candidates, 2)
+	var first, second domain.ScrapeCandidate
+	for _, candidate := range store.inputs[0].Candidates {
+		switch candidate.AttemptNumber {
+		case 1:
+			first = candidate
+		case 2:
+			second = candidate
+		default:
+			t.Fatalf("unexpected attempt number %d", candidate.AttemptNumber)
+		}
+	}
+	require.NotEmpty(t, first.ConfirmationGroupUUID)
+	require.Equal(t, first.ConfirmationGroupUUID, second.ConfirmationGroupUUID)
+	for _, candidate := range store.inputs[0].Candidates {
+		require.Equal(t, domain.CandidateQuarantinedAnomaly, candidate.Disposition)
+		require.Equal(t, "confirmation_mismatch", candidate.RejectionCode)
+		require.Len(t, candidate.CanonicalHash, 64)
+	}
+	require.NotEqual(t, first.CanonicalHash, second.CanonicalHash)
+	require.Equal(t, "confirmation_mismatch", store.inputs[0].LastRejectionCode)
 }
 
 func TestCoordinatorReconcileLifecycleCalledAfterSuccessfulCommit(t *testing.T) {

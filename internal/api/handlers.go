@@ -9,8 +9,13 @@ import (
 )
 
 type SnapshotVersionInfo struct {
-	Version     int64  `json:"version"`
-	GeneratedAt string `json:"generatedAt"`
+	Version       int64                  `json:"version"`
+	GeneratedAt   string                 `json:"generatedAt"`
+	Quality       domain.DataQualityState `json:"quality,omitempty"`
+	Complete      bool                   `json:"complete,omitempty"`
+	ParserVersion string                 `json:"parserVersion,omitempty"`
+	Stale         bool                   `json:"stale,omitempty"`
+	AgeSeconds    int64                  `json:"ageSeconds,omitempty"`
 }
 
 type ApiResponse struct {
@@ -36,12 +41,25 @@ func successResponse(data interface{}) ApiResponse {
 }
 
 func versionedResponse(data interface{}, metadata domain.SnapshotMetadata) ApiResponse {
+	now := time.Now().UTC()
+	ageSeconds := int64(0)
+	if !metadata.ValidatedAt.IsZero() {
+		ageSeconds = int64(now.Sub(metadata.ValidatedAt).Seconds())
+		if ageSeconds < 0 {
+			ageSeconds = 0
+		}
+	}
 	return ApiResponse{
 		Success: true,
 		Data:    data,
 		Snapshot: &SnapshotVersionInfo{
-			Version:     metadata.Version,
-			GeneratedAt: metadata.ValidatedAt.UTC().Format(time.RFC3339),
+			Version:       metadata.Version,
+			GeneratedAt:   metadata.ValidatedAt.UTC().Format(time.RFC3339),
+			Quality:       metadata.QualityState,
+			Complete:      metadata.Complete,
+			ParserVersion: metadata.ParserVersion,
+			Stale:         metadata.Stale,
+			AgeSeconds:    ageSeconds,
 		},
 	}
 }

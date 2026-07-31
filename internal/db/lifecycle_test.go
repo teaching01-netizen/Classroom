@@ -45,15 +45,7 @@ func newLifecycleTestRepository(t *testing.T) (*SnapshotRepository, context.Cont
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	for _, migration := range []string{
-		"migrations/009_create_scrape_snapshots.up.sql",
-		"migrations/011_add_hardening_schema.up.sql",
-	} {
-		up, err := migrations.ReadFile(migration)
-		require.NoError(t, err)
-		_, err = pool.Exec(ctx, string(up))
-		require.NoError(t, err)
-	}
+	applySnapshotTestMigrations(t, ctx, pool)
 
 	repo := NewSnapshotRepository(pool)
 	require.NoError(t, repo.SeedHost(ctx, HostStateSeed{
@@ -145,7 +137,7 @@ func TestUnchangedParentRecreatesMissingChildTarget(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, "missing", lifecycleState(ctx, repo, c2.ID))
-	require.Equal(t, 1, c2.MissingCount)
+	require.Equal(t, 1, c2.ConsecutiveMissingCount)
 
 	// Simulate: parent v3 lists c1 and c2 again (c2 reappears).
 	err = repo.ReconcileLifecycle(ctx, LifecycleReconcileInput{
@@ -217,7 +209,7 @@ func TestChildMissingOnceIsNotTombstoned(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, "missing", lifecycleState(ctx, repo, c2.ID))
-	require.Equal(t, 1, c2.MissingCount)
+	require.Equal(t, 1, c2.ConsecutiveMissingCount)
 }
 
 func TestChildTombstonedAfterConfirmedMisses(t *testing.T) {
@@ -267,7 +259,7 @@ func TestChildTombstonedAfterConfirmedMisses(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, "tombstoned", lifecycleState(ctx, repo, c2.ID))
-	require.Equal(t, 3, c2.MissingCount)
+	require.Equal(t, 3, c2.ConsecutiveMissingCount)
 }
 
 func TestReappearingTargetIsReactivatedImmediately(t *testing.T) {
@@ -373,13 +365,12 @@ func TestReactivatedTargetDoesNotKeepMaximumBackoff(t *testing.T) {
 	}}
 	discovered := []domain.TargetSeed{seed}
 
-	// Tombstone s1 (2 misses for session).
+	// Tombstone s1 (2 misses for session). The reconcile inputs list no seen
+	// children so s1 is marked missing on each pass.
 	for v := int64(2); v <= 3; v++ {
 		err := repo.ReconcileLifecycle(ctx, LifecycleReconcileInput{
-			ParentRef:       parentRef,
-			ParentVersion:   v,
-			DiscoveredSeeds: discovered,
-			SeenChildRefs:   seen,
+			ParentRef:     parentRef,
+			ParentVersion: v,
 		})
 		require.NoError(t, err)
 	}
@@ -431,10 +422,15 @@ func TestDeletedSessionNoLongerAppearsInActiveAPI(t *testing.T) {
 		lifecycleSessionSeed("course-1", "s2", now),
 	}))
 
-	// Commit a snapshot for s1 so it has current data.
-	s1Target, err := repo.Target(ctx, domain.TargetRef{
-		Host: testSnapshotHost, Kind: domain.SnapshotSessionDetail,
-		ParentKey: "course-1", ResourceKey: "s1",
+	// Claim and commit a snapshot for s1 so it has current data.
+	s1Target, err := repo.ClaimOne(ctx, ClaimOneRequest{
+		Ref: domain.TargetRef{
+			Host: testSnapshotHost, Kind: domain.SnapshotSessionDetail,
+			ParentKey: "course-1", ResourceKey: "s1",
+		},
+		Now:           now,
+		WorkerID:      "worker-1",
+		LeaseDuration: 2 * time.Minute,
 	})
 	require.NoError(t, err)
 
@@ -456,6 +452,7 @@ func TestDeletedSessionNoLongerAppearsInActiveAPI(t *testing.T) {
 		ContentHash:         [32]byte{1, 2, 3},
 		Payload:             json.RawMessage(`{"sessions":[]}`),
 		RecordsCount:        1,
+		Manifest:            domain.SnapshotManifest{Complete: true},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, commitResult.Snapshot)

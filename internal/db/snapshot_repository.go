@@ -90,6 +90,18 @@ type CommitInput struct {
 	Discovered          []domain.TargetSeed
 	SeenChildRefs       []domain.TargetRef
 	RecordsCount        int
+
+	// Verified snapshot pipeline evidence.
+	Manifest          domain.SnapshotManifest
+	Validation        domain.ValidationReport
+	ParserVersion     string
+	SchemaVersion     string
+	RawBodyHash       string
+	LastRejectionCode string
+	// Candidates holds scrape evidence rows (at most one per attempt) to
+	// persist in the same transaction. Quarantined runs persist both the
+	// original and the confirmation fetch under one confirmation group.
+	Candidates []domain.ScrapeCandidate
 }
 
 type CommitResult struct {
@@ -849,12 +861,22 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 	version := target.CurrentVersion
 	if successful && input.Changed {
 		version++
+		manifestJSON, err := json.Marshal(input.Manifest)
+		if err != nil {
+			return CommitResult{}, fmt.Errorf("commit snapshot: marshal manifest: %w", err)
+		}
+		validationJSON, err := json.Marshal(input.Validation)
+		if err != nil {
+			return CommitResult{}, fmt.Errorf("commit snapshot: marshal validation report: %w", err)
+		}
 		var insertedID int64
 		err = tx.QueryRow(ctx, `
 			INSERT INTO scrape_snapshots (
-				target_id, run_id, version, content_hash, payload, content_fetched_at
+				target_id, run_id, version, content_hash, payload, content_fetched_at,
+				verified_at, parser_version, schema_version, raw_body_hash,
+				complete, manifest, validation_report
 			)
-			VALUES ($1,$2,$3,$4,$5,$6)
+			VALUES ($1,$2,$3,$4,$5,$6,$6,NULLIF($7,''),NULLIF($8,''),NULLIF($9,''),TRUE,$10,$11)
 			RETURNING id`,
 			input.TargetID,
 			runID,
@@ -862,6 +884,11 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 			input.ContentHash[:],
 			input.Payload,
 			input.FinishedAt,
+			input.ParserVersion,
+			input.SchemaVersion,
+			input.RawBodyHash,
+			json.RawMessage(manifestJSON),
+			json.RawMessage(validationJSON),
 		).Scan(&insertedID)
 		if err != nil {
 			return CommitResult{}, fmt.Errorf("commit snapshot: insert version: %w", err)
@@ -898,6 +925,9 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 				current_content_hash=CASE WHEN $8::bigint IS NULL THEN current_content_hash ELSE $13 END,
 				last_content_change_at=CASE WHEN $8::bigint IS NULL THEN last_content_change_at ELSE $6 END,
 				previous_record_count=CASE WHEN $8::bigint IS NULL THEN previous_record_count ELSE $15 END,
+				quality_state='verified_fresh',
+				last_rejection_code=NULL,
+				current_parser_version=NULLIF($16, ''),
 				lease_owner=NULL,
 				lease_expires_at=NULL,
 				updated_at=$6
@@ -918,6 +948,7 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 			nullableHash(input.Changed, input.ContentHash),
 			input.LeaseGeneration,
 			input.RecordsCount,
+			input.ParserVersion,
 		)
 		if updateErr != nil {
 			return CommitResult{}, fmt.Errorf("commit snapshot: update target success: %w", updateErr)
@@ -932,6 +963,11 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 				current_interval_seconds=$3,
 				consecutive_failures=$4,
 				recent_changes=$5,
+				quality_state=CASE
+					WHEN current_snapshot_id IS NULL THEN 'unavailable'
+					ELSE 'degraded'
+				END,
+				last_rejection_code=NULLIF($8, ''),
 				lease_owner=NULL,
 				lease_expires_at=NULL,
 				updated_at=$6
@@ -943,6 +979,7 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 			trimBoolHistory(input.RecentChanges),
 			input.FinishedAt,
 			input.LeaseGeneration,
+			input.LastRejectionCode,
 		)
 		if updateErr != nil {
 			return CommitResult{}, fmt.Errorf("commit snapshot: update target failure: %w", updateErr)
@@ -954,6 +991,11 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 
 	for _, seed := range input.Discovered {
 		if err := upsertSeed(ctx, tx, seed); err != nil {
+			return CommitResult{}, err
+		}
+	}
+	for index := range input.Candidates {
+		if err := insertCandidate(ctx, tx, input.Candidates[index]); err != nil {
 			return CommitResult{}, err
 		}
 	}
@@ -969,17 +1011,24 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 			validatedAt = *input.ValidatedAt
 		}
 		snapshot := &domain.Snapshot{
-			ID:               *snapshotID,
-			TargetID:         input.TargetID,
-			Ref:              target.Ref,
-			Version:          version,
-			ValidationSeq:    validationSeqAfter,
-			ContentHash:      input.ContentHash,
-			Payload:          append(json.RawMessage(nil), input.Payload...),
-			ContentFetchedAt: input.FinishedAt,
-			ValidatedAt:      validatedAt,
-			NextRunAt:        input.NextRunAt,
-			MaxServeAge:      target.MaxServeAge,
+			ID:                *snapshotID,
+			TargetID:          input.TargetID,
+			Ref:               target.Ref,
+			Version:           version,
+			ValidationSeq:     validationSeqAfter,
+			ContentHash:       input.ContentHash,
+			Payload:           append(json.RawMessage(nil), input.Payload...),
+			ContentFetchedAt:  input.FinishedAt,
+			ValidatedAt:       validatedAt,
+			VerifiedAt:        input.FinishedAt,
+			NextRunAt:         input.NextRunAt,
+			MaxServeAge:       target.MaxServeAge,
+			ParserVersion:     input.ParserVersion,
+			SchemaVersion:     input.SchemaVersion,
+			RawBodyHash:       input.RawBodyHash,
+			Complete:          input.Manifest.Complete,
+			Manifest:          input.Manifest,
+			ValidationReport:  input.Validation,
 		}
 		metadata := &domain.SnapshotMetadata{
 			Kind:          target.Ref.Kind,
@@ -989,6 +1038,9 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 			ValidationSeq: validationSeqAfter,
 			ValidatedAt:   validatedAt,
 			Stale:         validatedAt.After(input.NextRunAt),
+			QualityState:  domain.DataQualityVerifiedFresh,
+			Complete:      input.Manifest.Complete,
+			ParserVersion: input.ParserVersion,
 		}
 		notification, marshalErr := json.Marshal(metadata)
 		if marshalErr != nil {
@@ -1154,7 +1206,8 @@ func validateCommit(input CommitInput) error {
 	}
 	switch input.Outcome {
 	case "changed", "unchanged", "not_modified", "rate_limited", "auth_error",
-		"transient_error", "not_found", "permanent_error", "invalid_payload", "canceled":
+		"transient_error", "not_found", "permanent_error", "invalid_payload",
+		"canceled", "quarantined":
 	default:
 		return fmt.Errorf("invalid scrape outcome %q", input.Outcome)
 	}
@@ -1170,6 +1223,9 @@ func validateCommit(input CommitInput) error {
 	if input.Changed {
 		if input.Outcome != "changed" {
 			return errors.New("only changed outcome may insert content")
+		}
+		if !input.Manifest.Complete {
+			return errors.New("changed commit requires a complete manifest")
 		}
 		if domain.IsZeroContentHash(input.ContentHash) {
 			return errors.New("changed commit content hash is required")
@@ -1190,6 +1246,71 @@ func nullableHash(changed bool, hash [32]byte) any {
 		return nil
 	}
 	return hash[:]
+}
+
+func insertCandidate(
+	ctx context.Context,
+	tx pgx.Tx,
+	candidate domain.ScrapeCandidate,
+) error {
+	manifest, err := json.Marshal(candidate.Manifest)
+	if err != nil {
+		return fmt.Errorf("insert scrape candidate: marshal manifest: %w", err)
+	}
+	validation, err := json.Marshal(candidate.Validation)
+	if err != nil {
+		return fmt.Errorf("insert scrape candidate: marshal validation report: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO scrape_candidates (
+			target_id, lease_generation, attempt_number, fetched_at,
+			request_id, http_status, content_type, content_length, etag, last_modified,
+			raw_body_hash, canonical_hash,
+			parser_version, schema_version, canonicalizer_version,
+			payload, manifest, validation_report,
+			disposition, rejection_code, confirmation_group
+		)
+		VALUES (
+			$1, $2, $3, $4,
+			NULLIF($5, ''), $6, NULLIF($7, ''), $8, NULLIF($9, ''), NULLIF($10, ''),
+			NULLIF($11, ''), NULLIF($12, ''),
+			$13, $14, $15,
+			$16, $17, $18,
+			$19, NULLIF($20, ''), NULLIF($21, '')::uuid
+		)`,
+		candidate.TargetID,
+		candidate.LeaseGeneration,
+		candidate.AttemptNumber,
+		candidate.FetchedAt,
+		candidate.RequestID,
+		candidate.HTTPStatus,
+		candidate.ContentType,
+		candidate.ContentLength,
+		candidate.ETag,
+		candidate.LastModified,
+		candidate.RawBodyHash,
+		candidate.CanonicalHash,
+		candidate.ParserVersion,
+		candidate.SchemaVersion,
+		candidate.CanonicalizerVersion,
+		nullableJSON(candidate.Payload),
+		json.RawMessage(manifest),
+		json.RawMessage(validation),
+		string(candidate.Disposition),
+		candidate.RejectionCode,
+		candidate.ConfirmationGroupUUID,
+	)
+	if err != nil {
+		return fmt.Errorf("insert scrape candidate: %w", err)
+	}
+	return nil
+}
+
+func nullableJSON(payload json.RawMessage) any {
+	if len(payload) == 0 {
+		return nil
+	}
+	return payload
 }
 
 func nullIfEmpty(value string) any {
@@ -1249,7 +1370,7 @@ func existingCommitResult(
 	if outcome != "changed" {
 		return result, true, nil
 	}
-	snapshot, err := snapshotByRun(ctx, tx, runID)
+	snapshot, quality, err := snapshotByRun(ctx, tx, runID, time.Now().UTC())
 	if err != nil {
 		return CommitResult{}, false, err
 	}
@@ -1262,22 +1383,41 @@ func existingCommitResult(
 		ValidationSeq: snapshot.ValidationSeq,
 		ValidatedAt:   snapshot.ValidatedAt,
 		Stale:         snapshot.Stale(time.Now().UTC()),
+		QualityState:  quality,
+		Complete:      snapshot.Complete,
+		ParserVersion: snapshot.ParserVersion,
 	}
 	return result, true, nil
 }
 
-func snapshotByRun(ctx context.Context, tx pgx.Tx, runID int64) (domain.Snapshot, error) {
+func snapshotByRun(
+	ctx context.Context,
+	tx pgx.Tx,
+	runID int64,
+	now time.Time,
+) (domain.Snapshot, domain.DataQualityState, error) {
 	var snapshot domain.Snapshot
 	var kind string
 	var hash []byte
 	var payload []byte
 	var maxServeAgeSeconds int64
+	var qualityState string
+	var verifiedAt *time.Time
+	var parserVersion *string
+	var schemaVersion *string
+	var rawBodyHash *string
+	var manifestBytes []byte
+	var validationBytes []byte
 	err := tx.QueryRow(ctx, `
 		SELECT snapshot.id, snapshot.target_id, target.host, target.kind,
 			target.resource_key, target.parent_key, snapshot.version,
 			run.validation_seq_after, snapshot.content_hash, snapshot.payload,
 			snapshot.content_fetched_at, run.finished_at,
-			run.next_run_at, target.max_serve_age_seconds
+			run.next_run_at, target.max_serve_age_seconds,
+			snapshot.verified_at, snapshot.parser_version, snapshot.schema_version,
+			snapshot.raw_body_hash, snapshot.complete,
+			snapshot.manifest, snapshot.validation_report,
+			target.quality_state
 		FROM scrape_snapshots AS snapshot
 		JOIN scrape_targets AS target ON target.id=snapshot.target_id
 		JOIN scrape_runs AS run ON run.id=snapshot.run_id
@@ -1298,9 +1438,17 @@ func snapshotByRun(ctx context.Context, tx pgx.Tx, runID int64) (domain.Snapshot
 		&snapshot.ValidatedAt,
 		&snapshot.NextRunAt,
 		&maxServeAgeSeconds,
+		&verifiedAt,
+		&parserVersion,
+		&schemaVersion,
+		&rawBodyHash,
+		&snapshot.Complete,
+		&manifestBytes,
+		&validationBytes,
+		&qualityState,
 	)
 	if err != nil {
-		return domain.Snapshot{}, fmt.Errorf("read snapshot by run: %w", err)
+		return domain.Snapshot{}, "", fmt.Errorf("read snapshot by run: %w", err)
 	}
 	snapshot.Ref.Kind = domain.SnapshotKind(kind)
 	copy(snapshot.ContentHash[:], hash)
@@ -1309,7 +1457,31 @@ func snapshotByRun(ctx context.Context, tx pgx.Tx, runID int64) (domain.Snapshot
 	snapshot.ContentFetchedAt = snapshot.ContentFetchedAt.UTC()
 	snapshot.ValidatedAt = snapshot.ValidatedAt.UTC()
 	snapshot.NextRunAt = snapshot.NextRunAt.UTC()
-	return snapshot, nil
+	if verifiedAt != nil {
+		snapshot.VerifiedAt = verifiedAt.UTC()
+	}
+	if parserVersion != nil {
+		snapshot.ParserVersion = *parserVersion
+	}
+	if schemaVersion != nil {
+		snapshot.SchemaVersion = *schemaVersion
+	}
+	if rawBodyHash != nil {
+		snapshot.RawBodyHash = *rawBodyHash
+	}
+	if len(manifestBytes) > 0 {
+		_ = json.Unmarshal(manifestBytes, &snapshot.Manifest)
+	}
+	if len(validationBytes) > 0 {
+		_ = json.Unmarshal(validationBytes, &snapshot.ValidationReport)
+	}
+	quality := deriveQualityState(
+		domain.DataQualityState(qualityState),
+		verifiedAt,
+		snapshot.MaxServeAge,
+		now,
+	)
+	return snapshot, quality, nil
 }
 
 func applyChildPresence(
@@ -1370,10 +1542,19 @@ func (r *SnapshotRepository) Current(ctx context.Context, ref domain.TargetRef) 
 	var hash []byte
 	var payload []byte
 	var maxServeAgeSeconds int64
+	var verifiedAt *time.Time
+	var parserVersion *string
+	var schemaVersion *string
+	var rawBodyHash *string
+	var manifestBytes []byte
+	var validationBytes []byte
 	err := r.pool.QueryRow(ctx, `
 		SELECT snapshot.id, target.id, snapshot.version, target.validation_seq,
 			snapshot.content_hash, snapshot.payload, snapshot.content_fetched_at,
-			target.last_validated_at, target.next_run_at, target.max_serve_age_seconds
+			target.last_validated_at, target.next_run_at, target.max_serve_age_seconds,
+			snapshot.verified_at, snapshot.parser_version, snapshot.schema_version,
+			snapshot.raw_body_hash, snapshot.complete,
+			snapshot.manifest, snapshot.validation_report
 		FROM scrape_targets AS target
 		JOIN scrape_snapshots AS snapshot ON snapshot.id=target.current_snapshot_id
 		WHERE target.host=$1 AND target.kind=$2
@@ -1394,6 +1575,13 @@ func (r *SnapshotRepository) Current(ctx context.Context, ref domain.TargetRef) 
 		&snapshot.ValidatedAt,
 		&snapshot.NextRunAt,
 		&maxServeAgeSeconds,
+		&verifiedAt,
+		&parserVersion,
+		&schemaVersion,
+		&rawBodyHash,
+		&snapshot.Complete,
+		&manifestBytes,
+		&validationBytes,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Snapshot{}, domain.ErrSnapshotNotFound
@@ -1408,6 +1596,24 @@ func (r *SnapshotRepository) Current(ctx context.Context, ref domain.TargetRef) 
 	snapshot.ContentFetchedAt = snapshot.ContentFetchedAt.UTC()
 	snapshot.ValidatedAt = snapshot.ValidatedAt.UTC()
 	snapshot.NextRunAt = snapshot.NextRunAt.UTC()
+	if verifiedAt != nil {
+		snapshot.VerifiedAt = verifiedAt.UTC()
+	}
+	if parserVersion != nil {
+		snapshot.ParserVersion = *parserVersion
+	}
+	if schemaVersion != nil {
+		snapshot.SchemaVersion = *schemaVersion
+	}
+	if rawBodyHash != nil {
+		snapshot.RawBodyHash = *rawBodyHash
+	}
+	if len(manifestBytes) > 0 {
+		_ = json.Unmarshal(manifestBytes, &snapshot.Manifest)
+	}
+	if len(validationBytes) > 0 {
+		_ = json.Unmarshal(validationBytes, &snapshot.ValidationReport)
+	}
 	return snapshot, nil
 }
 
@@ -1416,19 +1622,86 @@ func (r *SnapshotRepository) Metadata(
 	ref domain.TargetRef,
 	now time.Time,
 ) (domain.SnapshotMetadata, error) {
-	snapshot, err := r.Current(ctx, ref)
-	if err != nil {
-		return domain.SnapshotMetadata{}, err
+	var metadata domain.SnapshotMetadata
+	var kind string
+	var validatedAt time.Time
+	var nextRunAt time.Time
+	var maxServeAgeSeconds int64
+	var qualityState string
+	var complete bool
+	var parserVersion *string
+	var verifiedAt *time.Time
+	err := r.pool.QueryRow(ctx, `
+		SELECT target.kind, target.resource_key, target.parent_key,
+			target.current_version, target.validation_seq, target.last_validated_at,
+			target.next_run_at, target.max_serve_age_seconds,
+			target.quality_state, snapshot.complete, snapshot.parser_version,
+			snapshot.verified_at
+		FROM scrape_targets AS target
+		JOIN scrape_snapshots AS snapshot ON snapshot.id = target.current_snapshot_id
+		WHERE target.host=$1 AND target.kind=$2
+		  AND target.parent_key=$3 AND target.resource_key=$4
+		  AND target.lifecycle_state = 'active'`,
+		ref.Host,
+		ref.Kind,
+		ref.ParentKey,
+		ref.ResourceKey,
+	).Scan(
+		&kind,
+		&metadata.ResourceKey,
+		&metadata.ParentKey,
+		&metadata.Version,
+		&metadata.ValidationSeq,
+		&validatedAt,
+		&nextRunAt,
+		&maxServeAgeSeconds,
+		&qualityState,
+		&complete,
+		&parserVersion,
+		&verifiedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.SnapshotMetadata{}, domain.ErrSnapshotNotFound
 	}
-	return domain.SnapshotMetadata{
-		Kind:          ref.Kind,
-		ResourceKey:   ref.ResourceKey,
-		ParentKey:     ref.ParentKey,
-		Version:       snapshot.Version,
-		ValidationSeq: snapshot.ValidationSeq,
-		ValidatedAt:   snapshot.ValidatedAt,
-		Stale:         snapshot.Stale(now),
-	}, nil
+	if err != nil {
+		return domain.SnapshotMetadata{}, fmt.Errorf("read snapshot metadata: %w", err)
+	}
+	metadata.Kind = domain.SnapshotKind(kind)
+	metadata.ValidatedAt = validatedAt.UTC()
+	metadata.Stale = now.After(nextRunAt)
+	metadata.Complete = complete
+	if parserVersion != nil {
+		metadata.ParserVersion = *parserVersion
+	}
+	metadata.QualityState = deriveQualityState(
+		domain.DataQualityState(qualityState),
+		verifiedAt,
+		time.Duration(maxServeAgeSeconds)*time.Second,
+		now,
+	)
+	return metadata, nil
+}
+
+// deriveQualityState refines the stored quality state: a verified snapshot
+// whose verification has aged past the serve window is reported stale.
+func deriveQualityState(
+	stored domain.DataQualityState,
+	verifiedAt *time.Time,
+	maxServeAge time.Duration,
+	now time.Time,
+) domain.DataQualityState {
+	if !stored.Valid() {
+		return domain.DataQualityUnavailable
+	}
+	if stored != domain.DataQualityVerifiedFresh ||
+		verifiedAt == nil || verifiedAt.IsZero() ||
+		maxServeAge <= 0 {
+		return stored
+	}
+	if now.Sub(*verifiedAt) > maxServeAge {
+		return domain.DataQualityVerifiedStale
+	}
+	return stored
 }
 
 func (r *SnapshotRepository) ListMetadata(
@@ -1438,8 +1711,11 @@ func (r *SnapshotRepository) ListMetadata(
 	rows, err := r.pool.Query(ctx, `
 		SELECT target.kind, target.resource_key, target.parent_key,
 			target.current_version, target.validation_seq, target.last_validated_at,
-			target.next_run_at
+			target.next_run_at, target.max_serve_age_seconds,
+			target.quality_state, snapshot.complete, snapshot.parser_version,
+			snapshot.verified_at
 		FROM scrape_targets AS target
+		JOIN scrape_snapshots AS snapshot ON snapshot.id = target.current_snapshot_id
 		WHERE target.current_snapshot_id IS NOT NULL
 		ORDER BY target.kind, target.parent_key, target.resource_key`)
 	if err != nil {
@@ -1451,6 +1727,11 @@ func (r *SnapshotRepository) ListMetadata(
 		var item domain.SnapshotMetadata
 		var kind string
 		var nextRunAt time.Time
+		var maxServeAgeSeconds int64
+		var qualityState string
+		var complete bool
+		var parserVersion *string
+		var verifiedAt *time.Time
 		if err := rows.Scan(
 			&kind,
 			&item.ResourceKey,
@@ -1459,6 +1740,11 @@ func (r *SnapshotRepository) ListMetadata(
 			&item.ValidationSeq,
 			&item.ValidatedAt,
 			&nextRunAt,
+			&maxServeAgeSeconds,
+			&qualityState,
+			&complete,
+			&parserVersion,
+			&verifiedAt,
 		); err != nil {
 			return nil, fmt.Errorf("list snapshot metadata: scan: %w", err)
 		}
@@ -1466,6 +1752,16 @@ func (r *SnapshotRepository) ListMetadata(
 		item.ValidatedAt = item.ValidatedAt.UTC()
 		nextRunAt = nextRunAt.UTC()
 		item.Stale = now.After(nextRunAt)
+		item.Complete = complete
+		if parserVersion != nil {
+			item.ParserVersion = *parserVersion
+		}
+		item.QualityState = deriveQualityState(
+			domain.DataQualityState(qualityState),
+			verifiedAt,
+			time.Duration(maxServeAgeSeconds)*time.Second,
+			now,
+		)
 		metadata = append(metadata, item)
 	}
 	if err := rows.Err(); err != nil {

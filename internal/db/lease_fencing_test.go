@@ -151,7 +151,7 @@ func TestOldWorkerCannotOverwriteNewWorker(t *testing.T) {
 	// Verify Worker B's snapshot is the current one.
 	currentB, err := repo.Current(ctx, targetB[0].Ref)
 	require.NoError(t, err)
-	require.Equal(t, payloadB, currentB.Payload)
+	require.JSONEq(t, string(payloadB), string(currentB.Payload))
 
 	// Worker A tries to overwrite → rejected.
 	_, err = repo.Commit(ctx, changedCommit(targetA[0], "worker-a", now.Add(3*time.Second), json.RawMessage(`{"source":"worker-a","data":"stale"}`)))
@@ -160,7 +160,7 @@ func TestOldWorkerCannotOverwriteNewWorker(t *testing.T) {
 	// Current snapshot still belongs to Worker B — not overwritten.
 	currentAfter, err := repo.Current(ctx, targetB[0].Ref)
 	require.NoError(t, err)
-	require.Equal(t, payloadB, currentAfter.Payload)
+	require.JSONEq(t, string(payloadB), string(currentAfter.Payload))
 }
 
 // TestLeaseHeartbeatStopsAfterClaimLoss proves the heartbeat goroutine exits
@@ -425,6 +425,7 @@ func TestConcurrentCommitRejection(t *testing.T) {
 			Changed:             true,
 			ContentHash:         hashA,
 			Payload:             json.RawMessage(`{"from":"a"}`),
+			Manifest:            domain.SnapshotManifest{Complete: true},
 		})
 	}()
 	go func() {
@@ -448,6 +449,7 @@ func TestConcurrentCommitRejection(t *testing.T) {
 			Changed:             true,
 			ContentHash:         hashB,
 			Payload:             json.RawMessage(`{"from":"b"}`),
+			Manifest:            domain.SnapshotManifest{Complete: true},
 		})
 	}()
 	wg.Wait()

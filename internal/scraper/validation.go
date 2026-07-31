@@ -30,8 +30,8 @@ type ChangeSafetyPolicy struct {
 
 func DefaultChangeSafetyPolicy() ChangeSafetyPolicy {
 	return ChangeSafetyPolicy{
-		MinimumPreviousCount: 20,
-		MaximumDropRatio:     0.8,
+		MinimumPreviousCount: 2,
+		MaximumDropRatio:     0.20,
 		ConfirmationAttempts: 2,
 	}
 }
@@ -222,13 +222,7 @@ func ClassifyChange(
 		Warnings:      validated.Warnings,
 	}
 
-	if previousCount == 0 {
-		result.Status = "changed"
-		return result
-	}
-
-	if previousCount < policy.MinimumPreviousCount {
-		result.Status = "changed"
+	if previousCount <= 0 {
 		return result
 	}
 
@@ -236,13 +230,22 @@ func ClassifyChange(
 		result.DropRatio = float64(previousCount-validated.RecordCount) / float64(previousCount)
 	}
 
-	if result.DropRatio > policy.MaximumDropRatio {
+	// A previously non-empty dataset becoming empty is never published
+	// without an independent confirmation fetch.
+	if validated.RecordCount == 0 {
+		result.Status = "suspicious"
+		metrics.ScrapeSuspiciousResponseTotal.
+			WithLabelValues(string(validated.Kind), "became_empty").Inc()
+		return result
+	}
+
+	if previousCount >= policy.MinimumPreviousCount &&
+		result.DropRatio > policy.MaximumDropRatio {
 		result.Status = "suspicious"
 		metrics.ScrapeSuspiciousResponseTotal.
 			WithLabelValues(string(validated.Kind), "large_drop").Inc()
 		return result
 	}
 
-	result.Status = "changed"
 	return result
 }

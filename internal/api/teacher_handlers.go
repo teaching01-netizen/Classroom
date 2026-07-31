@@ -50,6 +50,11 @@ func setSnapshotFreshnessHeaders(w http.ResponseWriter, metadata domain.Snapshot
 	w.Header().Set("X-Snapshot-Validated-At", metadata.ValidatedAt.UTC().Format(time.RFC3339))
 	w.Header().Set("X-Snapshot-Stale", strconv.FormatBool(metadata.Stale))
 	w.Header().Set("X-Snapshot-Generated-At", metadata.ValidatedAt.UTC().Format(time.RFC3339))
+	w.Header().Set("X-Snapshot-Quality", string(metadata.QualityState))
+	w.Header().Set("X-Snapshot-Complete", strconv.FormatBool(metadata.Complete))
+	if metadata.ParserVersion != "" {
+		w.Header().Set("X-Snapshot-Parser-Version", metadata.ParserVersion)
+	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	if metadata.ParentKey != "" {
 		w.Header().Set("ETag", `W/"target:`+metadata.ResourceKey+`:parent:`+metadata.ParentKey+`:version:`+strconv.FormatInt(metadata.Version, 10)+`"`)

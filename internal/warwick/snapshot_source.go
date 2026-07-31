@@ -2,7 +2,9 @@ package warwick
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,12 +36,19 @@ type ResponseMetadata struct {
 	LastModified string
 	CacheControl string
 	RetryAfter   string
+	ContentType  string
+	RawBodyHash  string
 }
 
 type SnapshotFetchResult struct {
 	Value     any
 	Metadata  ResponseMetadata
 	BytesRead int64
+
+	// Pagination evidence used to build the completeness manifest.
+	ReportedCount int
+	ExpectedPages int
+	FetchedPages  int
 }
 
 type SnapshotSource struct {
@@ -85,6 +94,17 @@ func (s *SnapshotSource) Fetch(
 		return SnapshotFetchResult{}, errors.New("snapshot source: classroom client has no authentication source")
 	}
 	return s.fetchWithAuth(ctx, target)
+}
+
+// FetchConfirmation is an independent, unconditional fetch used to confirm a
+// suspicious candidate. It never sends conditional headers, so a 304 cannot
+// mask a changed dataset.
+func (s *SnapshotSource) FetchConfirmation(
+	ctx context.Context,
+	target domain.ScrapeTarget,
+) (SnapshotFetchResult, error) {
+	target.Conditional = domain.ConditionalHeaders{}
+	return s.Fetch(ctx, target)
 }
 
 func (s *SnapshotSource) withSampledHTTPTrace(
@@ -328,7 +348,13 @@ func (s *SnapshotSource) fetchCatalog(
 		s.conditionalHeaders(target),
 		&response,
 	)
-	result := SnapshotFetchResult{Metadata: metadata, BytesRead: bytesRead}
+	result := SnapshotFetchResult{
+		Metadata:      metadata,
+		BytesRead:     bytesRead,
+		ReportedCount: response.RecordsFiltered,
+		ExpectedPages: 1,
+		FetchedPages:  1,
+	}
 	if err != nil {
 		return result, err
 	}
@@ -421,7 +447,13 @@ func (s *SnapshotSource) fetchCourse(
 		s.conditionalHeaders(target),
 		&response,
 	)
-	result := SnapshotFetchResult{Metadata: metadata, BytesRead: bytesRead}
+	result := SnapshotFetchResult{
+		Metadata:      metadata,
+		BytesRead:     bytesRead,
+		ReportedCount: response.RecordsFiltered,
+		ExpectedPages: 1,
+		FetchedPages:  1,
+	}
 	if err != nil {
 		return result, err
 	}
@@ -509,7 +541,13 @@ func (s *SnapshotSource) fetchSession(
 		s.conditionalHeaders(target),
 		&response,
 	)
-	result := SnapshotFetchResult{Metadata: metadata, BytesRead: bytesRead}
+	result := SnapshotFetchResult{
+		Metadata:      metadata,
+		BytesRead:     bytesRead,
+		ReportedCount: response.RecordsFiltered,
+		ExpectedPages: 1,
+		FetchedPages:  1,
+	}
 	if err != nil {
 		return result, err
 	}
@@ -567,8 +605,10 @@ func (s *SnapshotSource) fetchProfiles(
 	seenStudentGUIDs := make(map[string]struct{})
 	var totalBytes int64
 	var firstMetadata ResponseMetadata
+	fetchedPages := 0
 	total := -1
 	for start := 0; total < 0 || start < total; start += profilePageSize {
+		fetchedPages++
 		request := DefaultDataTablesRequest([]string{"StudentID", "StudentGuid", "FullName", "School"})
 		request.Start = start
 		request.Length = profilePageSize
@@ -647,7 +687,12 @@ func (s *SnapshotSource) fetchProfiles(
 		}
 	}
 	return SnapshotFetchResult{
-		Value: profiles, Metadata: firstMetadata, BytesRead: totalBytes,
+		Value:         profiles,
+		Metadata:      firstMetadata,
+		BytesRead:     totalBytes,
+		ReportedCount: total,
+		ExpectedPages: (total + profilePageSize - 1) / profilePageSize,
+		FetchedPages:  fetchedPages,
 	}, nil
 }
 
@@ -762,6 +807,7 @@ func (s *SnapshotSource) requestJSON(
 		drainErrorBody(response.Body)
 		return metadata, 0, domain.NewInvalidPayloadError("unsupported upstream content type")
 	}
+	metadata.ContentType = contentType
 	limited := io.LimitReader(response.Body, s.responseBodyLimit+1)
 	payload, err := io.ReadAll(limited)
 	if err != nil {
@@ -771,6 +817,7 @@ func (s *SnapshotSource) requestJSON(
 	if bytesRead > s.responseBodyLimit {
 		return metadata, bytesRead, domain.NewInvalidPayloadError("upstream response body exceeds configured limit")
 	}
+	metadata.RawBodyHash = rawBodyHash(payload)
 	if isLoginPage(string(payload)) {
 		return metadata, bytesRead, domain.ErrAuthExpired
 	}
@@ -790,6 +837,11 @@ func responseMetadata(response *http.Response) ResponseMetadata {
 		CacheControl: response.Header.Get("Cache-Control"),
 		RetryAfter:   response.Header.Get("Retry-After"),
 	}
+}
+
+func rawBodyHash(payload []byte) string {
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 func drainErrorBody(body io.Reader) {

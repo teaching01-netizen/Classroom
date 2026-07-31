@@ -173,7 +173,9 @@ func TestClassifyChangeBelowMinimumPreviousCountIsChanged(t *testing.T) {
 		Kind:        domain.SnapshotCourseCatalog,
 		RecordCount: 1,
 	}
-	result := ClassifyChange(policy, validated, 10)
+	// Previous count (1) is below the minimum (2), so the drop-ratio rule
+	// does not apply; only a drop to zero would be suspicious.
+	result := ClassifyChange(policy, validated, 1)
 	require.Equal(t, "changed", result.Status)
 }
 

@@ -2,11 +2,13 @@ package scraper
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
-	"math/rand"
+	mathrand "math/rand"
 	"net/http"
 	"regexp"
 	"sort"
@@ -24,6 +26,20 @@ type Source interface {
 	Fetch(context.Context, domain.ScrapeTarget) (warwick.SnapshotFetchResult, error)
 }
 
+// ConfirmationSource is implemented by sources that can perform an
+// independent, unconditional refetch of a target. It is used to confirm
+// suspicious candidates before a destructive change may be published.
+type ConfirmationSource interface {
+	FetchConfirmation(context.Context, domain.ScrapeTarget) (warwick.SnapshotFetchResult, error)
+}
+
+// Version identity recorded on every published snapshot and candidate.
+const (
+	ParserVersion       = "warwick-v1"
+	SchemaVersion       = "schema-v1"
+	CanonicalizerVersion = "canonical-v1"
+)
+
 type Store interface {
 	Commit(context.Context, db.CommitInput) (db.CommitResult, error)
 	ReleaseLease(context.Context, db.ReleaseLeaseRequest) error
@@ -39,7 +55,7 @@ type CoordinatorConfig struct {
 	FetchTimeout          time.Duration
 	CanonicalPayloadLimit int64
 	Clock                 func() time.Time
-	Random                *rand.Rand
+	Random                *mathrand.Rand
 }
 
 type Coordinator struct {
@@ -50,7 +66,7 @@ type Coordinator struct {
 	canonicalPayloadLimit int64
 	clock                 func() time.Time
 	randomMu              sync.Mutex
-	random                *rand.Rand
+	random                *mathrand.Rand
 }
 
 func NewCoordinator(
@@ -78,7 +94,7 @@ func NewCoordinator(
 		config.Clock = time.Now
 	}
 	if config.Random == nil {
-		config.Random = rand.New(rand.NewSource(time.Now().UnixNano()))
+		config.Random = mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
 	}
 	return &Coordinator{
 		source:                source,
@@ -148,6 +164,11 @@ func (c *Coordinator) RunClaimedWithRelease(
 	changed := false
 	var recordsCount int
 	var validationWarnings []ValidationWarning
+	var manifest domain.SnapshotManifest
+	var validationReport domain.ValidationReport
+	confirmationGroup := ""
+	confirmationRejectionCode := ""
+	var candidates []domain.ScrapeCandidate
 	if fetchErr == nil {
 		var canonicalErr error
 		payload, contentHash, recordsCount, canonicalErr = Canonicalize(
@@ -177,14 +198,38 @@ func (c *Coordinator) RunClaimedWithRelease(
 					previousCount = target.PreviousRecordCount
 				}
 				classification := ClassifyChange(DefaultChangeSafetyPolicy(), validated, previousCount)
+				manifest = buildSnapshotManifest(fetchResult, validated)
+				validationReport = buildValidationReport(
+					manifest,
+					validated.Warnings,
+					classification.Status == "suspicious",
+				)
+
 				if classification.Status == "suspicious" {
-					outcome = "suspicious"
-					changed = false
-					payload = nil
-					contentHash = [32]byte{}
-					metrics.ScrapeSuspiciousResponseTotal.
-						WithLabelValues(string(target.Ref.Kind), "large_drop").Inc()
-				} else {
+					confirmationGroup = newConfirmationGroup()
+					confirmed, confirmationCode, confirmationEvidence := c.confirmChange(
+						ctx,
+						target,
+						contentHash,
+						recordsCount,
+					)
+					if !confirmed {
+						outcome = "quarantined"
+						errorKind = "confirmation"
+						fetchErr = fmt.Errorf(
+							"suspicious change was not independently confirmed: %s",
+							confirmationCode,
+						)
+						changed = false
+						confirmationRejectionCode = confirmationCode
+						if confirmationEvidence != nil {
+							confirmationEvidence.ConfirmationGroupUUID = confirmationGroup
+							candidates = append(candidates, *confirmationEvidence)
+						}
+					}
+				}
+
+				if outcome != "quarantined" {
 					changed = !target.HasContentHash() || contentHash != target.CurrentContentHash
 					if changed {
 						outcome = "changed"
@@ -208,6 +253,57 @@ func (c *Coordinator) RunClaimedWithRelease(
 	}
 
 	successful := isSuccessfulOutcome(outcome)
+	lastRejectionCode := ""
+	if !successful && errorKind != "" {
+		lastRejectionCode = errorKind
+	}
+	if confirmationRejectionCode != "" {
+		lastRejectionCode = confirmationRejectionCode
+	}
+	switch outcome {
+	case "changed", "unchanged", "quarantined":
+		disposition := domain.CandidateAccepted
+		rejectionCode := ""
+		switch outcome {
+		case "unchanged":
+			disposition = domain.CandidateUnchanged
+		case "quarantined":
+			disposition = domain.CandidateQuarantinedAnomaly
+			rejectionCode = lastRejectionCode
+		}
+		candidates = append(candidates, domain.ScrapeCandidate{
+			TargetID:              target.ID,
+			LeaseGeneration:       target.LeaseGeneration,
+			AttemptNumber:         1,
+			FetchedAt:             finishedAt,
+			RequestID:             newRequestID(),
+			HTTPStatus:            statusCodeValue(statusCode),
+			ContentType:           fetchResult.Metadata.ContentType,
+			ContentLength:         fetchResult.BytesRead,
+			ETag:                  fetchResult.Metadata.ETag,
+			LastModified:          fetchResult.Metadata.LastModified,
+			RawBodyHash:           fetchResult.Metadata.RawBodyHash,
+			CanonicalHash:         hex.EncodeToString(contentHash[:]),
+			ParserVersion:         ParserVersion,
+			SchemaVersion:         SchemaVersion,
+			CanonicalizerVersion:  CanonicalizerVersion,
+			Payload:               payload,
+			Manifest:              manifest,
+			Validation:            validationReport,
+			Disposition:           disposition,
+			RejectionCode:         rejectionCode,
+			ConfirmationGroupUUID: confirmationGroup,
+		})
+	}
+	if outcome == "quarantined" {
+		// Candidate rows carry the full evidence; the run commit itself
+		// must not reference payload or content hash so nothing is published
+		// and the last-known-good snapshot remains authoritative.
+		payload = nil
+		contentHash = [32]byte{}
+		manifest = domain.SnapshotManifest{}
+		validationReport = domain.ValidationReport{}
+	}
 	currentInterval := target.CurrentInterval
 	recentChanges := append([]bool(nil), target.RecentChanges...)
 	consecutiveFailures := target.ConsecutiveFailures
@@ -301,6 +397,13 @@ func (c *Coordinator) RunClaimedWithRelease(
 		Discovered:          discovered,
 		SeenChildRefs:       seen,
 		RecordsCount:        recordsCount,
+		Manifest:            manifest,
+		Validation:          validationReport,
+		ParserVersion:       ParserVersion,
+		SchemaVersion:       SchemaVersion,
+		RawBodyHash:         fetchResult.Metadata.RawBodyHash,
+		LastRejectionCode:   lastRejectionCode,
+		Candidates:          candidates,
 	}
 	commitResult, commitErr := c.store.Commit(ctx, input)
 
@@ -520,7 +623,7 @@ func failureNextRun(
 	outcome string,
 	consecutiveFailures int,
 	retryAfter time.Duration,
-	rng *rand.Rand,
+	rng *mathrand.Rand,
 ) time.Time {
 	switch outcome {
 	case "rate_limited":
@@ -536,6 +639,8 @@ func failureNextRun(
 	case "permanent_error":
 		return now.Add(24 * time.Hour)
 	case "invalid_payload":
+		return now.Add(time.Hour)
+	case "quarantined":
 		return now.Add(time.Hour)
 	default:
 		delay := FullJitter(FailureDelay(consecutiveFailures), rng)
@@ -636,4 +741,166 @@ func safeUpstreamError(err error) string {
 		message = message[:2048]
 	}
 	return strings.ToValidUTF8(message, "")
+}
+
+// confirmChange re-fetches a suspicious candidate without conditional headers
+// and accepts it only when the independent fetch canonicalizes to the same
+// hash and record count. On a mismatch it returns the confirmation-fetch
+// evidence so the caller can persist both candidates under one group.
+func (c *Coordinator) confirmChange(
+	ctx context.Context,
+	target domain.ScrapeTarget,
+	firstHash [32]byte,
+	firstCount int,
+) (bool, string, *domain.ScrapeCandidate) {
+	source, ok := c.source.(ConfirmationSource)
+	if !ok {
+		return false, "confirmation_unavailable", nil
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, c.fetchTimeout)
+	defer cancel()
+	second, err := source.FetchConfirmation(fetchCtx, target)
+	if err != nil {
+		return false, "confirmation_fetch_failed", nil
+	}
+	secondPayload, secondHash, secondCount, err := Canonicalize(
+		target.Ref.Kind,
+		second.Value,
+		c.canonicalPayloadLimit,
+	)
+	if err != nil {
+		return false, "confirmation_parse_failed", nil
+	}
+	if secondHash == firstHash && secondCount == firstCount {
+		return true, "", nil
+	}
+	evidence := &domain.ScrapeCandidate{
+		TargetID:             target.ID,
+		LeaseGeneration:      target.LeaseGeneration,
+		AttemptNumber:        2,
+		FetchedAt:            c.clock().UTC(),
+		RequestID:            newRequestID(),
+		HTTPStatus:           second.Metadata.StatusCode,
+		ContentType:          second.Metadata.ContentType,
+		ContentLength:        second.BytesRead,
+		ETag:                 second.Metadata.ETag,
+		LastModified:         second.Metadata.LastModified,
+		RawBodyHash:          second.Metadata.RawBodyHash,
+		CanonicalHash:        hex.EncodeToString(secondHash[:]),
+		ParserVersion:        ParserVersion,
+		SchemaVersion:        SchemaVersion,
+		CanonicalizerVersion: CanonicalizerVersion,
+		Payload:              secondPayload,
+		Manifest:             manifestFromEvidence(second, secondCount),
+		Validation: domain.ValidationReport{
+			Complete: secondCount == second.ReportedCount ||
+				second.ReportedCount <= 0,
+			Violations: []domain.ValidationViolation{{
+				Code:     "confirmation_mismatch",
+				Severity: domain.SeverityFatal,
+				Message: "independent confirmation fetch did not match " +
+					"the original candidate",
+			}},
+		},
+		Disposition:   domain.CandidateQuarantinedAnomaly,
+		RejectionCode: "confirmation_mismatch",
+	}
+	return false, "confirmation_mismatch", evidence
+}
+
+// buildSnapshotManifest records pagination and count evidence so a snapshot
+// can prove it is complete. Fetch functions reject incomplete collections
+// before returning, so a built manifest is complete unless counts disagree.
+func buildSnapshotManifest(
+	result warwick.SnapshotFetchResult,
+	validated *ValidatedPayload,
+) domain.SnapshotManifest {
+	manifest := domain.SnapshotManifest{
+		SourceReportedCount: result.ReportedCount,
+		ParsedCount:         validated.RecordCount,
+		UniqueCount:         validated.DistinctIDs,
+		ExpectedPageCount:   result.ExpectedPages,
+		FetchedPageCount:    result.FetchedPages,
+	}
+	manifest.Complete =
+		(manifest.ExpectedPageCount <= 0 ||
+			manifest.FetchedPageCount >= manifest.ExpectedPageCount) &&
+			(manifest.SourceReportedCount <= 0 ||
+				manifest.ParsedCount == manifest.SourceReportedCount)
+	if !manifest.Complete {
+		manifest.IncompleteReasons = append(manifest.IncompleteReasons, "parsed count differs from reported count")
+	}
+	return manifest
+}
+
+// manifestFromEvidence builds a completeness manifest for a confirmation
+// fetch, which is not run through the full validation pipeline.
+func manifestFromEvidence(
+	result warwick.SnapshotFetchResult,
+	parsedCount int,
+) domain.SnapshotManifest {
+	manifest := domain.SnapshotManifest{
+		SourceReportedCount: result.ReportedCount,
+		ParsedCount:         parsedCount,
+		UniqueCount:         parsedCount,
+		ExpectedPageCount:   result.ExpectedPages,
+		FetchedPageCount:    result.FetchedPages,
+	}
+	manifest.Complete =
+		(manifest.ExpectedPageCount <= 0 ||
+			manifest.FetchedPageCount >= manifest.ExpectedPageCount) &&
+			(manifest.SourceReportedCount <= 0 ||
+				manifest.ParsedCount == manifest.SourceReportedCount)
+	if !manifest.Complete {
+		manifest.IncompleteReasons = append(manifest.IncompleteReasons, "parsed count differs from reported count")
+	}
+	return manifest
+}
+
+func buildValidationReport(
+	manifest domain.SnapshotManifest,
+	warnings []ValidationWarning,
+	requiresConfirmation bool,
+) domain.ValidationReport {
+	report := domain.ValidationReport{
+		Complete:             manifest.Complete,
+		RequiresConfirmation: requiresConfirmation,
+	}
+	if !manifest.Complete {
+		report.Add(
+			"incomplete_manifest",
+			domain.SeverityFatal,
+			"",
+			"candidate collection is incomplete",
+		)
+	}
+	for _, warning := range warnings {
+		report.Add(warning.Code, domain.SeverityWarning, "", warning.Message)
+	}
+	if requiresConfirmation {
+		report.Add(
+			"suspicious_change",
+			domain.SeverityWarning,
+			"",
+			"record count change requires independent confirmation",
+		)
+	}
+	return report
+}
+
+func newConfirmationGroup() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf(
+		"%x-%x-%x-%x-%x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16],
+	)
+}
+
+func newRequestID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }

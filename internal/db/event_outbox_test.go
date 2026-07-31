@@ -46,15 +46,7 @@ func newEventOutboxTest(t *testing.T) (*SnapshotRepository, context.Context) {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	up, err := migrations.ReadFile("migrations/009_create_scrape_snapshots.up.sql")
-	require.NoError(t, err)
-	_, err = pool.Exec(ctx, string(up))
-	require.NoError(t, err)
-
-	hardeningUp, err := migrations.ReadFile("migrations/011_add_hardening_schema.up.sql")
-	require.NoError(t, err)
-	_, err = pool.Exec(ctx, string(hardeningUp))
-	require.NoError(t, err)
+	applySnapshotTestMigrations(t, ctx, pool)
 
 	repo := NewSnapshotRepository(pool)
 	require.NoError(t, repo.SeedHost(ctx, HostStateSeed{
@@ -119,6 +111,7 @@ func TestCommitAndOutboxEventAreAtomic(t *testing.T) {
 		Changed:             true,
 		ContentHash:         hash,
 		Payload:             payload,
+		Manifest:            domain.SnapshotManifest{Complete: true},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result.Snapshot)
@@ -161,6 +154,7 @@ func TestListenerCatchesUpAfterNotificationLoss(t *testing.T) {
 			Changed:             true,
 			ContentHash:         hash,
 			Payload:             payload,
+			Manifest:            domain.SnapshotManifest{Complete: true},
 		})
 		require.NoError(t, err)
 	}
@@ -203,6 +197,7 @@ func TestListenerCatchesUpAfterDatabaseReconnect(t *testing.T) {
 			Changed:             true,
 			ContentHash:         hash,
 			Payload:             payload,
+			Manifest:            domain.SnapshotManifest{Complete: true},
 		})
 		require.NoError(t, err)
 		require.NotNil(t, result.Snapshot)
@@ -214,10 +209,12 @@ func TestListenerCatchesUpAfterDatabaseReconnect(t *testing.T) {
 		}
 	}
 
-	// After reconnecting, the listener should only see events after its checkpoint.
+	// After reconnecting, the listener should only see events after its
+	// checkpoint. The two new commits produced sequences 1 and 2, so with a
+	// checkpoint of 1 exactly one event remains.
 	events, err := repo.MissedEvents(ctx, 1, 10)
 	require.NoError(t, err)
-	require.Len(t, events, 2)
+	require.Len(t, events, 1)
 	require.True(t, events[0].Sequence > 1)
 
 	// Advance checkpoint and verify it persists.
@@ -252,6 +249,7 @@ func TestDuplicateNotificationDoesNotDuplicateStateEffect(t *testing.T) {
 		Changed:             true,
 		ContentHash:         hash,
 		Payload:             payload,
+		Manifest:            domain.SnapshotManifest{Complete: true},
 	}
 
 	// First commit succeeds.
@@ -299,6 +297,7 @@ func TestCheckpointDoesNotAdvanceOnPublishFailure(t *testing.T) {
 		Changed:             true,
 		ContentHash:         hash,
 		Payload:             payload,
+		Manifest:            domain.SnapshotManifest{Complete: true},
 	})
 	require.NoError(t, err)
 
@@ -328,20 +327,47 @@ func TestLongCatchupCompactsByTargetSafely(t *testing.T) {
 	targetB := seedCommitTarget(t, ctx, repo, now.Add(time.Second), "compact-target-b")
 
 	versions := []struct {
-		target  domain.ScrapeTarget
-		version int64
+		targetID int64
+		ref      domain.TargetRef
+		version  int64
 	}{
-		{targetA, 2}, {targetB, 2}, {targetA, 3}, {targetB, 3}, {targetA, 4},
+		{targetA.ID, targetA.Ref, 2},
+		{targetB.ID, targetB.Ref, 2},
+		{targetA.ID, targetA.Ref, 3},
+		{targetB.ID, targetB.Ref, 3},
+		{targetA.ID, targetA.Ref, 4},
 	}
 
+	// Release the previous lease before each claim so every commit runs under
+	// a fresh lease generation (idempotency is keyed by target + generation).
+	// Seed the map with the original claims' generations so the first release
+	// clears the lease acquired by seedCommitTarget.
+	lastGeneration := map[int64]int64{
+		targetA.ID: targetA.LeaseGeneration,
+		targetB.ID: targetB.LeaseGeneration,
+	}
 	for _, v := range versions {
+		if generation, ok := lastGeneration[v.targetID]; ok {
+			require.NoError(t, repo.ReleaseLease(ctx, ReleaseLeaseRequest{
+				TargetID:        v.targetID,
+				LeaseGeneration: generation,
+			}))
+		}
+		claimed, err := repo.ClaimOne(ctx, ClaimOneRequest{
+			Ref:           v.ref,
+			Now:           now,
+			WorkerID:      "outbox-worker",
+			LeaseDuration: 2 * time.Minute,
+		})
+		require.NoError(t, err)
+		lastGeneration[claimed.ID] = claimed.LeaseGeneration
 		payload := json.RawMessage(fmt.Sprintf(`{"v":%d}`, v.version))
 		hash := sha256.Sum256(payload)
-		seq := v.target.ValidationSeq + v.version
-		_, err := repo.Commit(ctx, CommitInput{
-			TargetID:            v.target.ID,
+		seq := claimed.ValidationSeq + 1
+		_, err = repo.Commit(ctx, CommitInput{
+			TargetID:            claimed.ID,
 			WorkerID:            "outbox-worker",
-			LeaseGeneration:     v.target.LeaseGeneration,
+			LeaseGeneration:     claimed.LeaseGeneration,
 			Outcome:             "changed",
 			StartedAt:           now.Add(-time.Second),
 			FinishedAt:          now,
@@ -355,6 +381,7 @@ func TestLongCatchupCompactsByTargetSafely(t *testing.T) {
 			Changed:             true,
 			ContentHash:         hash,
 			Payload:             payload,
+			Manifest:            domain.SnapshotManifest{Complete: true},
 		})
 		require.NoError(t, err)
 	}
@@ -370,14 +397,16 @@ func TestLongCatchupCompactsByTargetSafely(t *testing.T) {
 	require.Len(t, compacted, 2,
 		"compaction must return exactly one event per target")
 
-	// Verify the compacted events have the highest versions.
+	// Verify the compacted events have the highest versions. Fresh targets
+	// start at current_version 0, so the three commits for target-a produce
+	// versions 1, 2, 3 and the two for target-b produce 1, 2.
 	for _, event := range compacted {
 		switch event.TargetID {
 		case targetA.ID:
-			require.Equal(t, int64(4), event.SnapshotVersion,
+			require.Equal(t, int64(3), event.SnapshotVersion,
 				"compacted event for target-a must have the latest version")
 		case targetB.ID:
-			require.Equal(t, int64(3), event.SnapshotVersion,
+			require.Equal(t, int64(2), event.SnapshotVersion,
 				"compacted event for target-b must have the latest version")
 		default:
 			t.Fatalf("unexpected target ID in compacted events: %d", event.TargetID)

@@ -22,6 +22,26 @@ import (
 
 const testSnapshotHost = "warwick.humantix.cloud"
 
+// snapshotTestMigrations is the scrape-schema migration chain applied by
+// repository test helpers so the schema matches production.
+var snapshotTestMigrations = []string{
+	"migrations/009_create_scrape_snapshots.up.sql",
+	"migrations/010_reparse_course_detail_session_status.up.sql",
+	"migrations/011_add_hardening_schema.up.sql",
+	"migrations/012_add_previous_record_count.up.sql",
+	"migrations/013_verified_snapshot_pipeline.up.sql",
+}
+
+func applySnapshotTestMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	for _, migration := range snapshotTestMigrations {
+		up, err := migrations.ReadFile(migration)
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, string(up))
+		require.NoError(t, err)
+	}
+}
+
 func newSnapshotRepositoryTest(t *testing.T) (*SnapshotRepository, context.Context) {
 	t.Helper()
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
@@ -52,10 +72,7 @@ func newSnapshotRepositoryTest(t *testing.T) (*SnapshotRepository, context.Conte
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	up, err := migrations.ReadFile("migrations/009_create_scrape_snapshots.up.sql")
-	require.NoError(t, err)
-	_, err = pool.Exec(ctx, string(up))
-	require.NoError(t, err)
+	applySnapshotTestMigrations(t, ctx, pool)
 
 	repo := NewSnapshotRepository(pool)
 	require.NoError(t, repo.SeedHost(ctx, HostStateSeed{
@@ -399,6 +416,12 @@ func changedCommit(target domain.ScrapeTarget, worker string, now time.Time, pay
 		Changed:             true,
 		ContentHash:         hash,
 		Payload:             payload,
+		Manifest: domain.SnapshotManifest{
+			SourceReportedCount: 1,
+			ParsedCount:         1,
+			UniqueCount:         1,
+			Complete:            true,
+		},
 	}
 }
 
@@ -1144,4 +1167,131 @@ func TestSnapshotRepositoryPruneKeepsCurrentAndLatestThree(t *testing.T) {
 		versions = append(versions, version)
 	}
 	require.Equal(t, []int64{5, 6, 7}, versions)
+}
+
+func TestSnapshotRepositoryPersistsVerificationEvidence(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{catalogSeed(now)}))
+	target := claimOneTestTarget(t, ctx, repo, now, "evidence-worker")
+
+	manifest := domain.SnapshotManifest{
+		SourceReportedCount: 3,
+		ParsedCount:         3,
+		UniqueCount:         3,
+		ExpectedPageCount:   1,
+		FetchedPageCount:    1,
+		FirstRecordKey:      "a",
+		LastRecordKey:       "c",
+		Complete:            true,
+	}
+	rawBodyHash := strings.Repeat("ab", 32)
+	input := changedCommit(target, "evidence-worker", now, json.RawMessage(`{"courses":[]}`))
+	input.Manifest = manifest
+	input.ParserVersion = "warwick-v1"
+	input.SchemaVersion = "schema-v1"
+	input.RawBodyHash = rawBodyHash
+	input.Candidates = []domain.ScrapeCandidate{{
+		TargetID:             target.ID,
+		LeaseGeneration:      target.LeaseGeneration,
+		AttemptNumber:        1,
+		FetchedAt:            now,
+		RequestID:            "req-1",
+		HTTPStatus:           200,
+		ContentType:          "application/json",
+		ContentLength:        100,
+		RawBodyHash:          rawBodyHash,
+		CanonicalHash:        strings.Repeat("ef", 32),
+		ParserVersion:        "warwick-v1",
+		SchemaVersion:        "schema-v1",
+		CanonicalizerVersion: "canonical-v1",
+		Payload:              json.RawMessage(`{"courses":[]}`),
+		Manifest:             manifest,
+		Validation:           domain.ValidationReport{Complete: true},
+		Disposition:          domain.CandidateAccepted,
+	}}
+	result, err := repo.Commit(ctx, input)
+	require.NoError(t, err)
+	require.NotNil(t, result.Snapshot)
+	require.True(t, result.Snapshot.Complete)
+	require.Equal(t, manifest, result.Snapshot.Manifest)
+	require.Equal(t, "warwick-v1", result.Snapshot.ParserVersion)
+	require.Equal(t, rawBodyHash, result.Snapshot.RawBodyHash)
+	require.False(t, result.Snapshot.VerifiedAt.IsZero())
+
+	// The candidate evidence row is persisted alongside the snapshot.
+	var disposition string
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT disposition FROM scrape_candidates WHERE target_id=$1`,
+		target.ID,
+	).Scan(&disposition))
+	require.Equal(t, string(domain.CandidateAccepted), disposition)
+
+	// The target reports verified_fresh with the parser version.
+	metadata, err := repo.Metadata(ctx, target.Ref, now.Add(time.Minute))
+	require.NoError(t, err)
+	require.Equal(t, domain.DataQualityVerifiedFresh, metadata.QualityState)
+	require.True(t, metadata.Complete)
+	require.Equal(t, "warwick-v1", metadata.ParserVersion)
+
+	listed, err := repo.ListMetadata(ctx, now.Add(time.Minute))
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	require.Equal(t, domain.DataQualityVerifiedFresh, listed[0].QualityState)
+
+	// Current() reads the verification evidence back from the snapshot row.
+	current, err := repo.Current(ctx, target.Ref)
+	require.NoError(t, err)
+	require.True(t, current.Complete)
+	require.Equal(t, manifest, current.Manifest)
+	require.Equal(t, rawBodyHash, current.RawBodyHash)
+	require.Equal(t, "warwick-v1", current.ParserVersion)
+
+	// Once the verification age exceeds max_serve_age (48h), the read path
+	// derives verified_stale without rewriting the stored state.
+	stale, err := repo.Metadata(ctx, target.Ref, now.Add(72*time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, domain.DataQualityVerifiedStale, stale.QualityState)
+}
+
+func TestSnapshotRepositoryFailedCommitDegradesQualityState(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+	target := claimOneTestTarget(t, ctx, repo, now, "fail-worker")
+
+	// First commit succeeds → verified_fresh.
+	_, err := repo.Commit(ctx, changedCommit(target, "fail-worker", now, json.RawMessage(`{"ok":true}`)))
+	require.NoError(t, err)
+
+	// Re-claim after the target is due again and commit a failure.
+	failAt := now.Add(time.Minute)
+	require.NoError(t, repo.SetDueNow(ctx, seed.Ref, failAt))
+	reclaimed, err := repo.ClaimDue(ctx, ClaimRequest{
+		Now: failAt, Limit: 1, WorkerID: "fail-worker-2", LeaseDuration: 2 * time.Minute,
+	})
+	require.NoError(t, err)
+	require.Len(t, reclaimed, 1)
+	failInput := changedCommit(reclaimed[0], "fail-worker-2", failAt, json.RawMessage(`{"ok":true}`))
+	failInput.Outcome = "transient_error"
+	failInput.Changed = false
+	failInput.ValidationSeqAfter = nil
+	failInput.LastRejectionCode = "network"
+	_, err = repo.Commit(ctx, failInput)
+	require.NoError(t, err)
+
+	// A target with a retained last-known-good is degraded, not unavailable.
+	metadata, err := repo.Metadata(ctx, seed.Ref, failAt.Add(time.Minute))
+	require.NoError(t, err)
+	require.Equal(t, domain.DataQualityDegraded, metadata.QualityState)
+
+	// The rejection code is recorded for diagnosability.
+	var rejectionCode *string
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT last_rejection_code FROM scrape_targets WHERE id=$1`,
+		reclaimed[0].ID,
+	).Scan(&rejectionCode))
+	require.NotNil(t, rejectionCode)
+	require.Equal(t, "network", *rejectionCode)
 }
