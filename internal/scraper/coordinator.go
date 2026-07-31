@@ -182,7 +182,11 @@ func (c *Coordinator) RunClaimedWithRelease(
 			errorKind = "canonicalization"
 			metrics.ScrapeValidationFailedTotal.Inc()
 		} else {
-			validated, validationErr := ValidatePayload(target.Ref.Kind, fetchResult.Value)
+			validated, validationErr := ValidatePayload(
+				target.Ref.Kind,
+				fetchResult.Value,
+				target.Ref.ResourceKey,
+			)
 			if validationErr != nil {
 				fetchErr = validationErr
 				outcome = "invalid_payload"

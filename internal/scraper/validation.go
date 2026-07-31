@@ -3,6 +3,7 @@ package scraper
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"qr-command-center/internal/domain"
 	"qr-command-center/internal/metrics"
@@ -46,7 +47,10 @@ type ClassifiedChange struct {
 
 const validationVersion = 1
 
-func ValidatePayload(kind domain.SnapshotKind, raw any) (*ValidatedPayload, error) {
+// resourceKey is the target's ResourceKey (the stable upstream identity the
+// fetch was requested for); kind-specific validators use it to reject a
+// response that was served for a different resource.
+func ValidatePayload(kind domain.SnapshotKind, raw any, resourceKey string) (*ValidatedPayload, error) {
 	if raw == nil {
 		return nil, fmt.Errorf("nil payload")
 	}
@@ -55,9 +59,9 @@ func ValidatePayload(kind domain.SnapshotKind, raw any) (*ValidatedPayload, erro
 	case domain.SnapshotCourseCatalog:
 		return validateCourseCatalog(raw)
 	case domain.SnapshotCourseDetail:
-		return validateCourseDetail(raw)
+		return validateCourseDetail(raw, resourceKey)
 	case domain.SnapshotSessionDetail:
-		return validateSessionDetail(raw)
+		return validateSessionDetail(raw, resourceKey)
 	case domain.SnapshotStudentProfiles:
 		return validateStudentProfiles(raw)
 	default:
@@ -107,7 +111,7 @@ func validateCourseCatalog(raw any) (*ValidatedPayload, error) {
 	}, nil
 }
 
-func validateCourseDetail(raw any) (*ValidatedPayload, error) {
+func validateCourseDetail(raw any, resourceKey string) (*ValidatedPayload, error) {
 	var detail domain.CourseDetail
 	switch typed := raw.(type) {
 	case domain.CourseDetail:
@@ -121,6 +125,14 @@ func validateCourseDetail(raw any) (*ValidatedPayload, error) {
 		return nil, fmt.Errorf("course_detail: expected domain.CourseDetail, got %T", raw)
 	}
 
+	if resourceKey != "" && detail.CourseID != resourceKey {
+		return nil, fmt.Errorf(
+			"course_detail: CourseID %q does not match requested resource key %q",
+			detail.CourseID,
+			resourceKey,
+		)
+	}
+
 	var warnings []ValidationWarning
 	seen := make(map[string]bool, len(detail.Sessions))
 
@@ -132,6 +144,26 @@ func validateCourseDetail(raw any) (*ValidatedPayload, error) {
 			return nil, fmt.Errorf("course_detail: duplicate SessionID %q", session.SessionID)
 		}
 		seen[session.SessionID] = true
+
+		if status := strings.TrimSpace(string(session.Status)); status != "" {
+			if _, err := domain.GetSessionStatus(status); err != nil {
+				return nil, fmt.Errorf(
+					"course_detail: session %s has invalid SessionStatus %q",
+					session.SessionID,
+					session.Status,
+				)
+			}
+		}
+
+		if session.Date != "" {
+			if _, err := time.Parse("2006-01-02", session.Date); err != nil {
+				return nil, fmt.Errorf(
+					"course_detail: session %s has invalid date %q",
+					session.SessionID,
+					session.Date,
+				)
+			}
+		}
 	}
 
 	return &ValidatedPayload{
@@ -144,7 +176,7 @@ func validateCourseDetail(raw any) (*ValidatedPayload, error) {
 	}, nil
 }
 
-func validateSessionDetail(raw any) (*ValidatedPayload, error) {
+func validateSessionDetail(raw any, resourceKey string) (*ValidatedPayload, error) {
 	var detail domain.SessionDetail
 	switch typed := raw.(type) {
 	case domain.SessionDetail:
@@ -158,8 +190,17 @@ func validateSessionDetail(raw any) (*ValidatedPayload, error) {
 		return nil, fmt.Errorf("session_detail: expected domain.SessionDetail, got %T", raw)
 	}
 
+	if resourceKey != "" && detail.SessionID != resourceKey {
+		return nil, fmt.Errorf(
+			"session_detail: SessionID %q does not match requested resource key %q",
+			detail.SessionID,
+			resourceKey,
+		)
+	}
+
 	var warnings []ValidationWarning
 	seen := make(map[string]bool, len(detail.Students))
+	checkedIn := 0
 
 	for _, student := range detail.Students {
 		if strings.TrimSpace(student.StudentID) == "" {
@@ -169,6 +210,17 @@ func validateSessionDetail(raw any) (*ValidatedPayload, error) {
 			return nil, fmt.Errorf("session_detail: duplicate StudentID %q", student.StudentID)
 		}
 		seen[student.StudentID] = true
+		if student.CheckedIn {
+			checkedIn++
+		}
+	}
+
+	if checkedIn != detail.CheckedInCount {
+		return nil, fmt.Errorf(
+			"session_detail: CheckedInCount %d does not match %d checked-in students",
+			detail.CheckedInCount,
+			checkedIn,
+		)
 	}
 
 	return &ValidatedPayload{
@@ -198,6 +250,19 @@ func validateStudentProfiles(raw any) (*ValidatedPayload, error) {
 			return nil, fmt.Errorf("student_profiles: duplicate StudentID %q", profile.StudentID)
 		}
 		seen[profile.StudentID] = true
+
+		if strings.TrimSpace(profile.StudentGuid) == "" {
+			warnings = append(warnings, ValidationWarning{
+				Code:    "missing_student_guid",
+				Message: fmt.Sprintf("student %s has empty StudentGuid", profile.StudentID),
+			})
+		}
+		if strings.TrimSpace(profile.FullName) == "" {
+			warnings = append(warnings, ValidationWarning{
+				Code:    "missing_full_name",
+				Message: fmt.Sprintf("student %s has empty FullName", profile.StudentID),
+			})
+		}
 	}
 
 	return &ValidatedPayload{

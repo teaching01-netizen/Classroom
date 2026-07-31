@@ -9,13 +9,13 @@ import (
 )
 
 func TestRejectsNilPayload(t *testing.T) {
-	_, err := ValidatePayload(domain.SnapshotCourseCatalog, nil)
+	_, err := ValidatePayload(domain.SnapshotCourseCatalog, nil, "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "nil payload")
 }
 
 func TestRejectsWrongTypeForKind(t *testing.T) {
-	_, err := ValidatePayload(domain.SnapshotCourseCatalog, "wrong type")
+	_, err := ValidatePayload(domain.SnapshotCourseCatalog, "wrong type", "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "expected []domain.CourseSummary")
 }
@@ -25,7 +25,7 @@ func TestRejectsDuplicateCourseIDs(t *testing.T) {
 		{CourseID: "c1", Name: "Course 1", Status: domain.CourseStatusActive},
 		{CourseID: "c1", Name: "Course 1 Duplicate", Status: domain.CourseStatusActive},
 	}
-	_, err := ValidatePayload(domain.SnapshotCourseCatalog, courses)
+	_, err := ValidatePayload(domain.SnapshotCourseCatalog, courses, "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "duplicate CourseID")
 }
@@ -34,7 +34,7 @@ func TestRejectsEmptyCourseID(t *testing.T) {
 	courses := []domain.CourseSummary{
 		{CourseID: "", Name: "No ID", Status: domain.CourseStatusActive},
 	}
-	_, err := ValidatePayload(domain.SnapshotCourseCatalog, courses)
+	_, err := ValidatePayload(domain.SnapshotCourseCatalog, courses, "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "empty CourseID")
 }
@@ -47,13 +47,13 @@ func TestRejectsDuplicateSessionIDs(t *testing.T) {
 			{SessionID: "s1"},
 		},
 	}
-	_, err := ValidatePayload(domain.SnapshotCourseDetail, detail)
+	_, err := ValidatePayload(domain.SnapshotCourseDetail, detail, "c1")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "duplicate SessionID")
 }
 
 func TestRejectsWrongSessionPayload(t *testing.T) {
-	_, err := ValidatePayload(domain.SnapshotCourseDetail, "wrong type")
+	_, err := ValidatePayload(domain.SnapshotCourseDetail, "wrong type", "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "expected domain.CourseDetail")
 }
@@ -66,13 +66,13 @@ func TestRejectsDuplicateStudentIDs(t *testing.T) {
 			{StudentID: "st1", Name: "Student 1 Duplicate"},
 		},
 	}
-	_, err := ValidatePayload(domain.SnapshotSessionDetail, detail)
+	_, err := ValidatePayload(domain.SnapshotSessionDetail, detail, "s1")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "duplicate StudentID")
 }
 
 func TestRejectsWrongSessionPayloadForTarget(t *testing.T) {
-	_, err := ValidatePayload(domain.SnapshotSessionDetail, "wrong type")
+	_, err := ValidatePayload(domain.SnapshotSessionDetail, "wrong type", "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "expected domain.SessionDetail")
 }
@@ -96,7 +96,7 @@ func TestLegitimateEmptySessionPassesValidation(t *testing.T) {
 		SessionSummary: domain.SessionSummary{SessionID: "s1"},
 		Students:       []domain.StudentCheckin{},
 	}
-	validated, err := ValidatePayload(domain.SnapshotSessionDetail, detail)
+	validated, err := ValidatePayload(domain.SnapshotSessionDetail, detail, "s1")
 	require.NoError(t, err)
 	require.Equal(t, 0, validated.RecordCount)
 	require.Equal(t, 0, validated.DistinctIDs)
@@ -106,7 +106,7 @@ func TestInvalidResponseDoesNotAdvanceTargetHash(t *testing.T) {
 	_, err := ValidatePayload(domain.SnapshotCourseCatalog, []domain.CourseSummary{
 		{CourseID: "dup", Name: "A"},
 		{CourseID: "dup", Name: "B"},
-	})
+	}, "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "duplicate CourseID")
 }
@@ -116,7 +116,7 @@ func TestValidateCourseCatalogSuccess(t *testing.T) {
 		{CourseID: "c1", Name: "Alpha", Status: domain.CourseStatusActive},
 		{CourseID: "c2", Name: "Beta", Status: domain.CourseStatusUpcoming},
 	}
-	validated, err := ValidatePayload(domain.SnapshotCourseCatalog, courses)
+	validated, err := ValidatePayload(domain.SnapshotCourseCatalog, courses, "")
 	require.NoError(t, err)
 	require.Equal(t, 2, validated.RecordCount)
 	require.Equal(t, 2, validated.DistinctIDs)
@@ -131,7 +131,7 @@ func TestValidateCourseDetailSuccess(t *testing.T) {
 			{SessionID: "s2"},
 		},
 	}
-	validated, err := ValidatePayload(domain.SnapshotCourseDetail, detail)
+	validated, err := ValidatePayload(domain.SnapshotCourseDetail, detail, "c1")
 	require.NoError(t, err)
 	require.Equal(t, 2, validated.RecordCount)
 }
@@ -141,7 +141,7 @@ func TestValidateStudentProfilesSuccess(t *testing.T) {
 		{StudentID: "st1", StudentGuid: "guid1"},
 		{StudentID: "st2", StudentGuid: "guid2"},
 	}
-	validated, err := ValidatePayload(domain.SnapshotStudentProfiles, profiles)
+	validated, err := ValidatePayload(domain.SnapshotStudentProfiles, profiles, "")
 	require.NoError(t, err)
 	require.Equal(t, 2, validated.RecordCount)
 }
@@ -180,19 +180,149 @@ func TestClassifyChangeBelowMinimumPreviousCountIsChanged(t *testing.T) {
 }
 
 func TestValidateUnsupportedKind(t *testing.T) {
-	_, err := ValidatePayload("unknown_kind", "data")
+	_, err := ValidatePayload("unknown_kind", "data", "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unsupported snapshot kind")
 }
 
 func TestValidateEmptyCourseCatalog(t *testing.T) {
-	validated, err := ValidatePayload(domain.SnapshotCourseCatalog, []domain.CourseSummary{})
+	validated, err := ValidatePayload(domain.SnapshotCourseCatalog, []domain.CourseSummary{}, "")
 	require.NoError(t, err)
 	require.Equal(t, 0, validated.RecordCount)
 }
 
 func TestValidateEmptyStudentProfiles(t *testing.T) {
-	validated, err := ValidatePayload(domain.SnapshotStudentProfiles, []domain.StudentProfile{})
+	validated, err := ValidatePayload(domain.SnapshotStudentProfiles, []domain.StudentProfile{}, "")
 	require.NoError(t, err)
 	require.Equal(t, 0, validated.RecordCount)
+}
+
+func TestRejectsCourseDetailWrongResource(t *testing.T) {
+	detail := domain.CourseDetail{
+		CourseSummary: domain.CourseSummary{CourseID: "c1"},
+		Sessions: []domain.SessionSummary{
+			{SessionID: "s1"},
+		},
+	}
+	_, err := ValidatePayload(domain.SnapshotCourseDetail, detail, "c2")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not match requested resource key")
+	require.Contains(t, err.Error(), `"c1"`)
+	require.Contains(t, err.Error(), `"c2"`)
+}
+
+func TestRejectsCourseDetailInvalidSessionStatus(t *testing.T) {
+	detail := domain.CourseDetail{
+		CourseSummary: domain.CourseSummary{CourseID: "c1"},
+		Sessions: []domain.SessionSummary{
+			{SessionID: "s1", Status: "bogus"},
+		},
+	}
+	_, err := ValidatePayload(domain.SnapshotCourseDetail, detail, "c1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid SessionStatus")
+}
+
+func TestRejectsCourseDetailInvalidSessionDate(t *testing.T) {
+	detail := domain.CourseDetail{
+		CourseSummary: domain.CourseSummary{CourseID: "c1"},
+		Sessions: []domain.SessionSummary{
+			{SessionID: "s1", Date: "not-a-date"},
+		},
+	}
+	_, err := ValidatePayload(domain.SnapshotCourseDetail, detail, "c1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid date")
+}
+
+func TestValidateCourseDetailWithSemantics(t *testing.T) {
+	detail := domain.CourseDetail{
+		CourseSummary: domain.CourseSummary{CourseID: "c1", Name: "Math"},
+		Sessions: []domain.SessionSummary{
+			{SessionID: "s1", Status: domain.SessionStatusNotStarted, Date: "2026-07-26"},
+			{SessionID: "s2", Status: domain.SessionStatusDone, Date: "2026-07-27"},
+		},
+	}
+	validated, err := ValidatePayload(domain.SnapshotCourseDetail, detail, "c1")
+	require.NoError(t, err)
+	require.Equal(t, 2, validated.RecordCount)
+	require.Equal(t, 2, validated.DistinctIDs)
+	require.Empty(t, validated.Warnings)
+}
+
+func TestRejectsSessionDetailWrongResource(t *testing.T) {
+	detail := domain.SessionDetail{
+		SessionSummary: domain.SessionSummary{SessionID: "s1"},
+		Students:       []domain.StudentCheckin{},
+	}
+	_, err := ValidatePayload(domain.SnapshotSessionDetail, detail, "s2")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not match requested resource key")
+	require.Contains(t, err.Error(), `"s1"`)
+	require.Contains(t, err.Error(), `"s2"`)
+}
+
+func TestRejectsSessionDetailCheckedInCountMismatch(t *testing.T) {
+	detail := domain.SessionDetail{
+		SessionSummary: domain.SessionSummary{
+			SessionID:      "s1",
+			CheckedInCount: 1,
+		},
+		Students: []domain.StudentCheckin{
+			{StudentID: "st1", Name: "Student 1", CheckedIn: false},
+		},
+	}
+	_, err := ValidatePayload(domain.SnapshotSessionDetail, detail, "s1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "CheckedInCount 1 does not match 0 checked-in students")
+}
+
+func TestValidateSessionDetailWithSemantics(t *testing.T) {
+	detail := domain.SessionDetail{
+		SessionSummary: domain.SessionSummary{
+			SessionID:      "s1",
+			CheckedInCount: 1,
+			TotalStudents:  2,
+		},
+		Students: []domain.StudentCheckin{
+			{StudentID: "st1", Name: "Student 1", CheckedIn: true},
+			{StudentID: "st2", Name: "Student 2", CheckedIn: false},
+		},
+	}
+	validated, err := ValidatePayload(domain.SnapshotSessionDetail, detail, "s1")
+	require.NoError(t, err)
+	require.Equal(t, 2, validated.RecordCount)
+	require.Equal(t, 2, validated.DistinctIDs)
+	require.Empty(t, validated.Warnings)
+}
+
+func TestValidateStudentProfilesMissingIdentityWarns(t *testing.T) {
+	profiles := []domain.StudentProfile{
+		{StudentID: "st1"},
+		{StudentID: "st2", StudentGuid: "guid2"},
+		{StudentID: "st3", FullName: "Student 3"},
+	}
+	validated, err := ValidatePayload(domain.SnapshotStudentProfiles, profiles, "")
+	require.NoError(t, err)
+	require.Equal(t, 3, validated.RecordCount)
+
+	codes := make([]string, 0, len(validated.Warnings))
+	for _, warning := range validated.Warnings {
+		codes = append(codes, warning.Code)
+	}
+	require.ElementsMatch(t, []string{
+		"missing_student_guid", "missing_student_guid",
+		"missing_full_name", "missing_full_name",
+	}, codes)
+}
+
+func TestValidateStudentProfilesCompleteIdentity(t *testing.T) {
+	profiles := []domain.StudentProfile{
+		{StudentID: "st1", StudentGuid: "guid1", FullName: "Student 1"},
+		{StudentID: "st2", StudentGuid: "guid2", FullName: "Student 2"},
+	}
+	validated, err := ValidatePayload(domain.SnapshotStudentProfiles, profiles, "")
+	require.NoError(t, err)
+	require.Equal(t, 2, validated.RecordCount)
+	require.Empty(t, validated.Warnings)
 }
