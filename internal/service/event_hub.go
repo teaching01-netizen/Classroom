@@ -178,7 +178,7 @@ func (h *EventHub) recordDrop(event AppEvent, queue string) {
 		if h.lastDropWarning.CompareAndSwap(last, now) {
 			slog.Warn(
 				"event_hub_events_dropped",
-				"event_class", eventHubEventClass(event.Type),
+				"event_class", EventHubEventClass(event.Type),
 				"queue", queue,
 				"dropped_total", total,
 			)
@@ -187,7 +187,10 @@ func (h *EventHub) recordDrop(event AppEvent, queue string) {
 	}
 }
 
-func eventHubEventClass(eventType string) string {
+// EventHubEventClass maps an event type to a bounded, low-cardinality class
+// for metrics labels. The WebSocket byte counter reuses it so labels stay
+// consistent across the event hub and the API layer.
+func EventHubEventClass(eventType string) string {
 	switch eventType {
 	case "SnapshotCommitted", "SnapshotStateSync":
 		return "snapshot"

@@ -197,6 +197,12 @@ func (w *responseStatusRecorder) Write(payload []byte) (int, error) {
 	return n, err
 }
 
+// Unwrap lets http.ResponseController reach the underlying writer, so
+// Flusher/Hijacker assertions still work through this wrapper.
+func (w *responseStatusRecorder) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 // routeClass maps a request path to a bounded, low-cardinality metric label.
 // Room IDs, course IDs, student IDs, and session IDs never appear in labels.
 func routeClass(path string) string {
@@ -235,17 +241,21 @@ func admittedActivityMiddleware(recorder service.ActivityRecorder) func(http.Han
 				}()
 			}
 			next.ServeHTTP(statusWriter, r)
-			status := statusWriter.status
-			if status == 0 {
-				status = http.StatusOK
-			}
-			success := status >= 200 && status < 400
-			if recorder != nil && lease == nil && success {
-				recorder.RecordActivity()
-			}
-			metrics.HTTPResponseBytesTotal.
-				WithLabelValues(routeClass(r.URL.Path)).
-				Add(float64(statusWriter.bytes))
+			// Recorded in a defer so a handler panic still accounts for the
+			// bytes written before it unwound.
+			defer func() {
+				status := statusWriter.status
+				if status == 0 {
+					status = http.StatusOK
+				}
+				success := status >= 200 && status < 400
+				if recorder != nil && lease == nil && success {
+					recorder.RecordActivity()
+				}
+				metrics.HTTPResponseBytesTotal.
+					WithLabelValues(routeClass(r.URL.Path)).
+					Add(float64(statusWriter.bytes))
+			}()
 		})
 	}
 }
@@ -262,8 +272,8 @@ func gzipMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		gz := &gzipResponseWriter{ResponseWriter: w}
+		defer gz.close()
 		next.ServeHTTP(gz, r)
-		gz.close()
 	})
 }
 

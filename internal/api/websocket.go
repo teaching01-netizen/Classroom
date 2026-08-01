@@ -156,25 +156,10 @@ func writeWebSocketEvent(
 	err := connection.Write(writeCtx, websocket.MessageText, data)
 	if err == nil {
 		metrics.WebsocketBytesSentTotal.
-			WithLabelValues(webSocketEventClass(eventType)).
+			WithLabelValues(service.EventHubEventClass(eventType)).
 			Add(float64(len(data)))
 	}
 	return err
-}
-
-// webSocketEventClass maps an event type to the same bounded buckets used by
-// the service layer's event hub (service.eventHubEventClass) so labels stay
-// consistent. Room IDs and session IDs never appear in labels.
-func webSocketEventClass(eventType string) string {
-	switch eventType {
-	case "SnapshotCommitted", "SnapshotStateSync":
-		return "snapshot"
-	case "RoomCreated", "RoomUpdated", "RoomDeleted", "FullStateSync",
-		"ROOM_CHANGED", "CHECKIN_UPDATED", "CHECKINS_UPDATED", "SESSION_STATS_UPDATED":
-		return "room"
-	default:
-		return "application"
-	}
 }
 
 func logWebSocketWriteError(err error) {
