@@ -1,7 +1,9 @@
 package service
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -90,4 +92,91 @@ func TestEnsureSessionRoom_RegistersAndStartsPersistedRoom(t *testing.T) {
 	assert.NotEqual(t, domain.Idle, room.Status)
 	assert.NotEqual(t, domain.Stopped, room.Status)
 	require.NoError(t, rm.StopRoom("session-1"))
+}
+
+func TestRoomEventsUseSummaries(t *testing.T) {
+	qr := strings.Repeat("R", 64*1024)
+	lastUpdated := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	roomWithQR := domain.Room{
+		RoomID:        "room-3",
+		ClassID:       "class-3",
+		Status:        domain.Running,
+		QRURL:         &qr,
+		LastUpdatedAt: &lastUpdated,
+	}
+	roomToStop := domain.Room{RoomID: "room-2", ClassID: "class-2", Status: domain.Idle}
+	hub := NewEventHub(32, 32)
+	defer hub.Close()
+	repo := newIdleRoomRepository(roomWithQR, roomToStop)
+	rm := NewRoomManagerWithEventHub(idleQRClient{}, repo, hub)
+	require.NoError(t, rm.LoadRoomsFromDB())
+
+	events, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+
+	// Creating a room emits RoomCreated (RoomLite) plus the
+	// RoomUpdated(RoomLite) + ROOM_CHANGED pair.
+	_, err := rm.CreateRoom("room-1", "class-1", nil)
+	require.NoError(t, err)
+
+	created, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "RoomCreated", created.Type)
+	createdLite, ok := created.Data.(domain.RoomLite)
+	require.True(t, ok, "RoomCreated payload must be RoomLite, not full Room")
+	assert.Equal(t, "room-1", createdLite.RoomID)
+
+	updated, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "RoomUpdated", updated.Type)
+	updatedLite, ok := updated.Data.(domain.RoomLite)
+	require.True(t, ok, "RoomUpdated payload must be RoomLite, not full Room")
+	assert.Equal(t, domain.Idle, updatedLite.Status)
+
+	changed, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "ROOM_CHANGED", changed.Type)
+	roomChanged, ok := changed.Data.(domain.RoomChanged)
+	require.True(t, ok)
+	assert.Equal(t, "room-1", roomChanged.RoomID)
+	assert.Equal(t, domain.Idle, roomChanged.Status)
+	assert.False(t, roomChanged.HasQR)
+	assert.Greater(t, roomChanged.Revision, int64(0))
+
+	// Starting a room that already carries a QR propagates HasQR and the
+	// deterministic LastUpdatedAt revision without leaking the QR string.
+	require.NoError(t, rm.StartRoom("room-3"))
+	startedUpdated, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "RoomUpdated", startedUpdated.Type)
+	_, ok = startedUpdated.Data.(domain.RoomLite)
+	require.True(t, ok)
+	startedChanged, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "ROOM_CHANGED", startedChanged.Type)
+	startedRoomChanged, ok := startedChanged.Data.(domain.RoomChanged)
+	require.True(t, ok)
+	assert.Equal(t, "room-3", startedRoomChanged.RoomID)
+	assert.True(t, startedRoomChanged.HasQR)
+	assert.Equal(t, lastUpdated.UnixNano(), startedRoomChanged.Revision)
+
+	// Stopping a room emits RoomUpdated(RoomLite, Stopped) + ROOM_CHANGED.
+	// The stopped room was never emitted before, so the per-room 5s gate
+	// does not swallow the pair.
+	require.NoError(t, rm.StopRoom("room-2"))
+	stoppedUpdated, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "RoomUpdated", stoppedUpdated.Type)
+	stoppedLite, ok := stoppedUpdated.Data.(domain.RoomLite)
+	require.True(t, ok, "RoomUpdated payload must be RoomLite, not full Room")
+	assert.Equal(t, domain.Stopped, stoppedLite.Status)
+	stoppedChanged, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "ROOM_CHANGED", stoppedChanged.Type)
+	stoppedRoomChanged, ok := stoppedChanged.Data.(domain.RoomChanged)
+	require.True(t, ok)
+	assert.Equal(t, domain.Stopped, stoppedRoomChanged.Status)
+
+	// Stop the started room so its worker goroutine exits.
+	require.NoError(t, rm.StopRoom("room-3"))
 }

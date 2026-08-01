@@ -173,6 +173,19 @@ func RoomsToLite(rooms []Room) []RoomLite {
 	return lite
 }
 
+// RoomChanged is the metadata-only payload carried by the ROOM_CHANGED
+// WebSocket event. It describes a room state change without the large QR
+// payload; clients observing HasQR == true refetch the room detail endpoint
+// to obtain the QR for just that room.
+type RoomChanged struct {
+	RoomID    string     `json:"room_id"`
+	ClassID   string     `json:"class_id"`
+	Status    RoomStatus `json:"status"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	HasQR     bool       `json:"has_qr"`
+	Revision  int64      `json:"revision"`
+}
+
 func NewRoom(roomID string, classID string, name *string) Room {
 	return Room{
 		RoomID:  roomID,

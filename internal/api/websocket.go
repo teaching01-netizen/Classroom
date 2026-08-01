@@ -78,7 +78,7 @@ func wsHandlerWithSnapshots(
 
 		var rooms any = []any{}
 		if rm != nil {
-			rooms = rm.GetAllRooms()
+			rooms = domain.RoomsToLite(rm.GetAllRooms())
 		}
 		snapshotVersions := make(map[string]int64)
 		var snapshotMetadata []domain.SnapshotMetadata

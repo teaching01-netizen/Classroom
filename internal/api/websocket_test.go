@@ -17,6 +17,7 @@ import (
 
 	"qr-command-center/internal/domain"
 	"qr-command-center/internal/service"
+	"qr-command-center/internal/warwick"
 )
 
 func TestWSGuard_RejectsWhenAtLimit(t *testing.T) {
@@ -182,4 +183,127 @@ func TestWebSocketSubscribesBeforeStateSyncAndDropsBufferedDuplicate(t *testing.
 	require.NoError(t, json.Unmarshal(event["SnapshotCommitted"], &received))
 	require.Equal(t, int64(5), received.Version)
 	require.Equal(t, 1, store.listCalls)
+}
+
+// connectWebSocketWithRoom dials a WebSocket handler backed by a RoomManager
+// pre-loaded with the given room, and returns the connection, the manager, and
+// a bounded context for reading frames.
+func connectWebSocketWithRoom(t *testing.T, room domain.Room, qrClient domain.QrClient) (*websocket.Conn, *service.RoomManager, context.Context) {
+	t.Helper()
+	wsConnCount.Store(0)
+	t.Cleanup(func() { wsConnCount.Store(0) })
+	hub := service.NewEventHub(16, 16)
+	t.Cleanup(hub.Close)
+	rm := service.NewRoomManagerWithEventHub(qrClient, newTestRoomRepository(room), hub)
+	require.NoError(t, rm.LoadRoomsFromDB())
+	server := httptest.NewServer(wsHandlerWithSnapshots(rm, hub, nil, 10, nil))
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	t.Cleanup(cancel)
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "test complete") })
+	return conn, rm, ctx
+}
+
+// readRoomChangedFrame reads WebSocket frames until a ROOM_CHANGED envelope
+// arrives and returns the raw frame payload plus its decoded RoomChanged data.
+func readRoomChangedFrame(t *testing.T, ctx context.Context, conn *websocket.Conn) ([]byte, domain.RoomChanged) {
+	t.Helper()
+	for {
+		_, payload, err := conn.Read(ctx)
+		require.NoError(t, err)
+		var envelope map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(payload, &envelope))
+		if raw, ok := envelope["ROOM_CHANGED"]; ok {
+			var changed domain.RoomChanged
+			require.NoError(t, json.Unmarshal(raw, &changed))
+			return payload, changed
+		}
+	}
+}
+
+// runningRoomWithQR builds a Running room carrying a QR so a StartRoom emit
+// exercises the has_qr=true path. Expiry is an hour out so the QR worker does
+// not immediately re-fetch and emit extra frames.
+func runningRoomWithQR(roomID, classID, qr string) domain.Room {
+	now := time.Now()
+	expiresAt := now.Add(time.Hour)
+	return domain.Room{
+		RoomID:        roomID,
+		ClassID:       classID,
+		Status:        domain.Running,
+		QRURL:         &qr,
+		ExpiresAt:     &expiresAt,
+		LastUpdatedAt: &now,
+	}
+}
+
+func TestWebSocketFullStateSyncOmitsQRData(t *testing.T) {
+	qr := strings.Repeat("F", 64*1024)
+	conn, _, ctx := connectWebSocketWithRoom(t, runningRoomWithQR("r1", "c1", qr), testQRClient{})
+
+	roomSync := readWebSocketEnvelope(t, ctx, conn)
+	require.Contains(t, roomSync, "FullStateSync")
+	frame := string(roomSync["FullStateSync"])
+	assert.NotContains(t, frame, "qr_url")
+	assert.NotContains(t, frame, qr)
+
+	var lite []domain.RoomLite
+	require.NoError(t, json.Unmarshal(roomSync["FullStateSync"], &lite))
+	require.Len(t, lite, 1)
+	assert.Equal(t, "r1", lite[0].RoomID)
+	assert.Equal(t, domain.Running, lite[0].Status)
+}
+
+func TestWebSocketRoomChangedFrameContainsNoQR(t *testing.T) {
+	qr := strings.Repeat("G", 64*1024)
+	conn, rm, ctx := connectWebSocketWithRoom(t, runningRoomWithQR("r1", "c1", qr), testQRClient{})
+	readWebSocketEnvelope(t, ctx, conn) // consume FullStateSync
+
+	require.NoError(t, rm.StartRoom("r1"))
+	payload, changed := readRoomChangedFrame(t, ctx, conn)
+	assert.True(t, changed.HasQR)
+	assert.NotContains(t, string(payload), "qr_url")
+	assert.NotContains(t, string(payload), qr)
+	require.NoError(t, rm.StopRoom("r1"))
+}
+
+func TestWebSocketQRRefreshFrameUnder1KB(t *testing.T) {
+	qr := strings.Repeat("H", 64*1024)
+	conn, rm, ctx := connectWebSocketWithRoom(t, runningRoomWithQR("r1", "c1", qr), testQRClient{})
+	readWebSocketEnvelope(t, ctx, conn) // consume FullStateSync
+
+	require.NoError(t, rm.StartRoom("r1"))
+	payload, changed := readRoomChangedFrame(t, ctx, conn)
+	assert.Less(t, len(payload), 1024)
+	assert.True(t, changed.HasQR)
+	require.NoError(t, rm.StopRoom("r1"))
+}
+
+func TestWebSocketRoomDetailStillReturnsQRURLAfterEvent(t *testing.T) {
+	qr := "data:image/png;base64,QUJD"
+	conn, rm, ctx := connectWebSocketWithRoom(t, runningRoomWithQR("r1", "c1", qr), testQRClient{})
+	readWebSocketEnvelope(t, ctx, conn) // consume FullStateSync
+	require.NoError(t, rm.StartRoom("r1"))
+	readRoomChangedFrame(t, ctx, conn) // consume the ROOM_CHANGED frame
+	require.NoError(t, rm.StopRoom("r1"))
+
+	cc := warwick.NewClassroomClient(nil)
+	ts := service.NewTeacherService(cc, &stubFetcher{}, 2)
+	router, rl := NewRouter(rm, ts, nil, nil, RouterOptions{WSMaxConns: 100})
+	defer rl.Stop()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms/r1", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var envelope struct {
+		Success bool        `json:"success"`
+		Data    domain.Room `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &envelope))
+	require.NotNil(t, envelope.Data.QRURL)
+	assert.Equal(t, qr, *envelope.Data.QRURL)
 }

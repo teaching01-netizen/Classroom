@@ -162,7 +162,8 @@ func (rm *RoomManager) CreateRoom(roomID string, classID string, name *string) (
 	rm.rooms[saved.RoomID] = &RoomState{room: saved}
 	rm.mu.Unlock()
 
-	rm.emit(RoomManagerEvent{Type: "RoomCreated", Data: saved})
+	rm.emit(RoomManagerEvent{Type: "RoomCreated", Data: domain.NewRoomLite(saved)})
+	rm.emitRoomEvents(saved)
 	return saved, nil
 }
 
@@ -273,7 +274,7 @@ func (rm *RoomManager) StartRoom(roomID string) error {
 		slog.Warn("invalid transition", "error", err)
 	}
 
-	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: state.room})
+	rm.emitRoomEvents(state.room)
 
 	driver := rm.syncDriver
 	courseID := state.courseID
@@ -321,33 +322,48 @@ func (rm *RoomManager) StopRoom(roomID string) error {
 
 	rm.persistRoomUpdate(state, room)
 
-	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: room})
+	rm.emitRoomEvents(room)
 	return nil
 }
 
 func (rm *RoomManager) emit(event RoomManagerEvent) {
-	// Rate limit per room: skip RoomUpdated if emitted too recently.
-	// Room is already updated in-memory; subscribers see latest state on next allowed emit.
-	if event.Type == "RoomUpdated" {
-		roomData, ok := event.Data.(domain.Room)
-		if !ok {
-			slog.Warn("emit: RoomUpdated with non-Room data", "type", fmt.Sprintf("%T", event.Data))
-		} else {
-			rm.emitMu.Lock()
-			last, exists := rm.lastEmittedAt[roomData.RoomID]
-			now := time.Now()
-			if exists && now.Sub(last) < minEmitInterval {
-				rm.emitMu.Unlock()
-				return
-			}
-			rm.lastEmittedAt[roomData.RoomID] = now
-			rm.emitMu.Unlock()
-		}
-	}
-
 	if !rm.eventHub.Publish(event) {
 		slog.Warn("event channel full, dropping event", "type", event.Type)
 	}
+}
+
+// emitRoomEvents publishes the RoomUpdated (summary) and ROOM_CHANGED pair for
+// a room state change. Both events share the per-room 5s rate-limit gate, so a
+// skipped pair skips both. A dropped ROOM_CHANGED is recovered by the frontend
+// polling the room detail query until qr_url arrives, so has_qr needs no
+// special-casing here.
+func (rm *RoomManager) emitRoomEvents(room domain.Room) {
+	rm.emitMu.Lock()
+	last, exists := rm.lastEmittedAt[room.RoomID]
+	now := time.Now()
+	if exists && now.Sub(last) < minEmitInterval {
+		rm.emitMu.Unlock()
+		return
+	}
+	rm.lastEmittedAt[room.RoomID] = now
+	rm.emitMu.Unlock()
+
+	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: domain.NewRoomLite(room)})
+	rm.emit(RoomManagerEvent{Type: "ROOM_CHANGED", Data: domain.RoomChanged{
+		RoomID:    room.RoomID,
+		ClassID:   room.ClassID,
+		Status:    room.Status,
+		ExpiresAt: room.ExpiresAt,
+		HasQR:     room.QRURL != nil,
+		Revision:  roomRevision(room),
+	}})
+}
+
+func roomRevision(room domain.Room) int64 {
+	if room.LastUpdatedAt != nil {
+		return room.LastUpdatedAt.UnixNano()
+	}
+	return time.Now().UnixNano()
 }
 
 func (rm *RoomManager) handleNoQRClient(state *RoomState) {
@@ -358,7 +374,7 @@ func (rm *RoomManager) handleNoQRClient(state *RoomState) {
 	roomCopy := state.room
 	rm.mu.Unlock()
 	rm.persistRoomUpdate(state, roomCopy)
-	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+	rm.emitRoomEvents(roomCopy)
 }
 
 func (rm *RoomManager) persistRoomUpdate(state *RoomState, room domain.Room) {
@@ -430,7 +446,7 @@ func (rm *RoomManager) StopAllActiveRooms(ctx context.Context) error {
 			item.state.stopPersistPending = false
 			rm.mu.Unlock()
 		}
-		rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: item.room})
+		rm.emitRoomEvents(item.room)
 	}
 	return errors.Join(errs...)
 }
@@ -464,7 +480,7 @@ func (rm *RoomManager) handleRoomFetchSuccess(state *RoomState, resp *domain.QrR
 	roomCopy := state.room
 	rm.mu.Unlock()
 	rm.persistRoomUpdate(state, roomCopy)
-	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+	rm.emitRoomEvents(roomCopy)
 }
 
 // handleNonRecoverableError sets warning on a non-auth error and emits.
@@ -475,7 +491,7 @@ func (rm *RoomManager) handleNonRecoverableError(state *RoomState, err error) {
 	roomCopy := state.room
 	rm.mu.Unlock()
 	rm.persistRoomUpdate(state, roomCopy)
-	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+	rm.emitRoomEvents(roomCopy)
 }
 
 // recoveryLoop attempts to re-authenticate and re-fetch the QR code with
@@ -514,7 +530,7 @@ func (rm *RoomManager) recoveryLoop(ctx context.Context, state *RoomState, class
 				roomCopy := state.room
 				rm.mu.Unlock()
 				rm.persistRoomUpdate(state, roomCopy)
-				rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+				rm.emitRoomEvents(roomCopy)
 				return true
 			}
 
@@ -527,7 +543,7 @@ func (rm *RoomManager) recoveryLoop(ctx context.Context, state *RoomState, class
 				roomCopy := state.room
 				rm.mu.Unlock()
 				rm.persistRoomUpdate(state, roomCopy)
-				rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+				rm.emitRoomEvents(roomCopy)
 				return false
 			}
 
@@ -553,7 +569,7 @@ func (rm *RoomManager) recoveryLoop(ctx context.Context, state *RoomState, class
 				roomCopy := state.room
 				rm.mu.Unlock()
 				rm.persistRoomUpdate(state, roomCopy)
-				rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+				rm.emitRoomEvents(roomCopy)
 				return false
 			}
 
@@ -572,7 +588,7 @@ func (rm *RoomManager) recoveryLoop(ctx context.Context, state *RoomState, class
 	roomCopy := state.room
 	rm.mu.Unlock()
 	rm.persistRoomUpdate(state, roomCopy)
-	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+	rm.emitRoomEvents(roomCopy)
 	return false
 }
 
@@ -625,7 +641,7 @@ func (rm *RoomManager) roomWorkerTick(ctx context.Context, state *RoomState) boo
 	}
 	fetchingRoom := state.room
 	rm.mu.Unlock()
-	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: fetchingRoom})
+	rm.emitRoomEvents(fetchingRoom)
 
 	resp, err := rm.qrClient.FetchQRContext(ctx, classID)
 	select {
@@ -652,7 +668,7 @@ func (rm *RoomManager) roomWorkerTick(ctx context.Context, state *RoomState) boo
 			roomCopy := state.room
 			rm.mu.Unlock()
 			rm.persistRoomUpdate(state, roomCopy)
-			rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+			rm.emitRoomEvents(roomCopy)
 
 			return rm.recoveryLoop(ctx, state, classID)
 		}
