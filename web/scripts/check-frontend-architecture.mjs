@@ -6,6 +6,10 @@ import process from 'node:process'
 const sourceRoot = fileURLToPath(new globalThis.URL('../src/', import.meta.url))
 const architectureRoots = ['app', 'features', 'shared']
 const sourceExtensions = new Set(['.ts', '.tsx'])
+// The realtime layer is a domain hub that must share the rooms feature's
+// query keys and zod response schemas (egress-reduction plan, bug.md
+// Phase 3.3). Keep this allowance as narrow as possible.
+const sharedFeatureImportsAllowedPrefixes = ['shared/realtime/']
 const failures = []
 
 async function filesUnder(directory) {
@@ -23,7 +27,11 @@ for (const root of architectureRoots) {
   for (const file of files) {
     const source = await readFile(file, 'utf8')
     const label = relative(sourceRoot, file)
-    if (root === 'shared' && /from ['"]@\/features\//.test(source)) {
+    if (
+      root === 'shared'
+      && /from ['"]@\/features\//.test(source)
+      && !sharedFeatureImportsAllowedPrefixes.some((prefix) => label.startsWith(prefix))
+    ) {
       failures.push(`${label}: shared code imports a feature`)
     }
     if (/\/routes\//.test(file) && /\bfetch\s*\(/.test(source)) {
