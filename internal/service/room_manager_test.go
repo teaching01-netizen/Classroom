@@ -272,6 +272,11 @@ func TestRetainRoomsDeletesOnlyStaleStoppedRooms(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), deleted)
 
+	// The deleted room must leave the in-memory map as well, so memory and
+	// storage do not diverge after the sweep.
+	require.Nil(t, rm.GetRoom("old-stopped"), "retained room must be removed from memory")
+	require.NotNil(t, rm.GetRoom("recent-stopped"))
+
 	_, err = repo.GetRoom("old-stopped")
 	require.Error(t, err, "stopped room older than the cutoff must be deleted")
 	_, err = repo.GetRoom("recent-stopped")

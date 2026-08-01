@@ -134,7 +134,7 @@ func TestDeleteStaleRoomsDeletesOnlyOldStoppedRows(t *testing.T) {
 
 	deleted, err := repo.DeleteStaleRooms(ctx, cutoff)
 	require.NoError(t, err)
-	require.Equal(t, int64(1), deleted)
+	require.Equal(t, []string{"old-stopped"}, deleted)
 
 	require.False(t, roomExists(ctx, repo.pool, "old-stopped"), "old stopped room must be deleted")
 	require.True(t, roomExists(ctx, repo.pool, "recent-stopped"), "recently updated stopped room must be kept")

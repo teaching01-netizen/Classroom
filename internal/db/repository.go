@@ -22,8 +22,9 @@ type RoomRepository interface {
 	// parameter so the behaviour is deterministic and testable.
 	ClearExpiredRoomQRs(ctx context.Context, now time.Time) (int64, error)
 	// DeleteStaleRooms removes stopped room rows that have not been updated
-	// since cutoff.
-	DeleteStaleRooms(ctx context.Context, cutoff time.Time) (int64, error)
+	// since cutoff and returns the ids of the rows it deleted, so callers can
+	// scrub them from in-memory state.
+	DeleteStaleRooms(ctx context.Context, cutoff time.Time) ([]string, error)
 }
 
 type PgRoomRepository struct {
@@ -129,17 +130,31 @@ func (r *PgRoomRepository) ClearExpiredRoomQRs(ctx context.Context, now time.Tim
 	return result.RowsAffected(), nil
 }
 
-func (r *PgRoomRepository) DeleteStaleRooms(ctx context.Context, cutoff time.Time) (int64, error) {
-	result, err := r.pool.Exec(ctx,
+func (r *PgRoomRepository) DeleteStaleRooms(ctx context.Context, cutoff time.Time) ([]string, error) {
+	rows, err := r.pool.Query(ctx,
 		`DELETE FROM rooms
 		 WHERE status = 'stopped'::room_status
-		   AND last_updated_at < $1`,
+		   AND last_updated_at < $1
+		 RETURNING room_id`,
 		cutoff,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("delete stale rooms: %w", err)
+		return nil, fmt.Errorf("delete stale rooms: %w", err)
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+
+	var deleted []string
+	for rows.Next() {
+		var roomID string
+		if err := rows.Scan(&roomID); err != nil {
+			return nil, fmt.Errorf("delete stale rooms: scan: %w", err)
+		}
+		deleted = append(deleted, roomID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("delete stale rooms: rows: %w", err)
+	}
+	return deleted, nil
 }
 
 func roomStatusToString(status domain.RoomStatus) string {

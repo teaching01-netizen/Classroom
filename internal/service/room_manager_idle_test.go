@@ -94,14 +94,14 @@ func (r *idleRoomRepository) ClearExpiredRoomQRs(ctx context.Context, now time.T
 	return cleared, nil
 }
 
-func (r *idleRoomRepository) DeleteStaleRooms(ctx context.Context, cutoff time.Time) (int64, error) {
+func (r *idleRoomRepository) DeleteStaleRooms(ctx context.Context, cutoff time.Time) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var deleted int64
+	var deleted []string
 	for id, room := range r.rooms {
 		if room.Status == domain.Stopped && room.LastUpdatedAt != nil && room.LastUpdatedAt.Before(cutoff) {
 			delete(r.rooms, id)
-			deleted++
+			deleted = append(deleted, id)
 		}
 	}
 	return deleted, nil

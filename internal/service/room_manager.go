@@ -137,41 +137,59 @@ func (rm *RoomManager) RecoverLoadedRooms(ctx context.Context) error {
 }
 
 // ClearExpiredQRs removes QR payloads from in-memory rooms whose QR has
-// expired or that are no longer serving one (stopped/idle), persisting the
-// cleared values. It mirrors the repository predicate so memory and storage
-// stay consistent after a cold start.
+// expired or that are no longer serving one (stopped/idle), then clears the
+// same rows in storage with a single bulk UPDATE. The in-memory predicate is
+// kept in lock-step with the repository predicate so memory and storage
+// converge on one convention after a cold start.
 func (rm *RoomManager) ClearExpiredQRs(ctx context.Context, now time.Time) error {
 	rm.mu.Lock()
-	changed := make([]domain.Room, 0)
+	cleared := 0
 	for _, state := range rm.rooms {
 		if state.room.QRURL == nil {
 			continue
 		}
-		if state.room.ExpiresAt == nil || !state.room.ExpiresAt.After(now) ||
+		if state.room.ExpiresAt == nil || state.room.ExpiresAt.Before(now) ||
 			state.room.Status == domain.Stopped || state.room.Status == domain.Idle {
 			state.room.QRURL = nil
 			state.room.ExpiresAt = nil
-			changed = append(changed, state.room)
+			cleared++
 		}
 	}
 	rm.mu.Unlock()
 
-	var errs []error
-	for _, room := range changed {
-		if _, err := rm.repository.UpdateRoom(ctx, room); err != nil {
-			errs = append(errs, fmt.Errorf("persist cleared room %s: %w", room.RoomID, err))
-		}
+	storedCleared, err := rm.repository.ClearExpiredRoomQRs(ctx, now)
+	if err != nil {
+		return err
 	}
-	if len(changed) > 0 {
-		slog.Info("cleared expired room QRs", "cleared", len(changed), "failed", len(errs))
+	if cleared > 0 || storedCleared > 0 {
+		slog.Info("cleared expired room QRs", "memory", cleared, "storage", storedCleared)
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 // RetainRooms deletes stopped room rows not updated since cutoff, bounding
-// how long QR-room records are kept.
+// how long QR-room records are kept, and drops the deleted rooms from the
+// in-memory map so memory matches storage.
 func (rm *RoomManager) RetainRooms(ctx context.Context, cutoff time.Time) (int64, error) {
-	return rm.repository.DeleteStaleRooms(ctx, cutoff)
+	deleted, err := rm.repository.DeleteStaleRooms(ctx, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	if len(deleted) == 0 {
+		return 0, nil
+	}
+	rm.mu.Lock()
+	for _, roomID := range deleted {
+		delete(rm.rooms, roomID)
+	}
+	rm.mu.Unlock()
+	rm.emitMu.Lock()
+	for _, roomID := range deleted {
+		delete(rm.lastEmittedAt, roomID)
+	}
+	rm.emitMu.Unlock()
+	slog.Info("retained stale stopped rooms", "deleted", len(deleted))
+	return int64(len(deleted)), nil
 }
 
 func (rm *RoomManager) CreateRoom(roomID string, classID string, name *string) (domain.Room, error) {
