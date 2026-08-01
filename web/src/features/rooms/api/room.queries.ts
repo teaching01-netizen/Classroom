@@ -23,7 +23,7 @@ export function useRoomQuery(roomId: string | undefined, enabled: boolean) {
     queryFn: ({ signal }) =>
       apiClient.get(endpoints.room(roomId ?? ''), { schema: roomSchema, signal }),
     enabled: enabled && roomId !== undefined,
-    refetchInterval: (query) => query.state.data?.qr_url === undefined ? 2_000 : false,
+    refetchInterval: (query) => query.state.data?.qr_url ? false : 2_000,
   })
 }
 

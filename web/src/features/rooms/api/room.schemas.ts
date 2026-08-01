@@ -3,11 +3,11 @@ import { sessionIdSchema } from '@/features/sessions'
 
 export const roomSchema = z.looseObject({
   room_id: z.string().min(1),
-  name: z.string().optional(),
-  class_id: z.string().optional(),
+  name: z.string().nullish(),
+  class_id: z.string().nullish(),
   status: z.string(),
-  qr_url: z.string().optional(),
-  expires_at: z.string().optional(),
+  qr_url: z.string().nullish(),
+  expires_at: z.string().nullish(),
 })
 
 export const roomsSchema = z.array(roomSchema)
