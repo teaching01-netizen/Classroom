@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"qr-command-center/internal/domain"
@@ -42,7 +43,12 @@ type SnapshotProvider struct {
 	coldRefreshTimeout time.Duration
 }
 
-const defaultColdRefreshTimeout = 10 * time.Second
+const (
+	defaultColdRefreshTimeout = 10 * time.Second
+	// snapshotEnrichConcurrency bounds the per-course detail reads used to
+	// enrich the course list with session counts and attendance.
+	snapshotEnrichConcurrency = 4
+)
 
 func NewSnapshotProvider(
 	reader SnapshotReader,
@@ -134,7 +140,12 @@ func (p *SnapshotProvider) read(ctx context.Context, ref domain.TargetRef, desti
 }
 
 func (p *SnapshotProvider) GetCourses(ctx context.Context) ([]domain.CourseSummary, error) {
-	return p.GetCourseCatalog(ctx)
+	courses, err := p.GetCourseCatalog(ctx)
+	if err != nil {
+		return nil, err
+	}
+	p.enrichCourses(ctx, courses)
+	return courses, nil
 }
 
 func (p *SnapshotProvider) GetCourseCatalog(ctx context.Context) ([]domain.CourseSummary, error) {
@@ -143,6 +154,83 @@ func (p *SnapshotProvider) GetCourseCatalog(ctx context.Context) ([]domain.Cours
 		return nil, err
 	}
 	return courses, nil
+}
+
+// enrichCourses overlays session counts and average attendance onto catalog
+// courses from their course-detail and session-detail snapshots, mirroring the
+// enrichment the live client performs against Warwick. Unlike the live client,
+// finished courses are enriched too: their detail snapshots are cheap DB reads
+// and their session counts belong on the card just like active courses. It is
+// best-effort: a course without a committed course-detail snapshot keeps its
+// catalog values.
+func (p *SnapshotProvider) enrichCourses(ctx context.Context, courses []domain.CourseSummary) {
+	if len(courses) == 0 {
+		return
+	}
+	_ = runBoundedJobs(ctx, len(courses), snapshotEnrichConcurrency, func(index int) {
+		course := &courses[index]
+		var detail domain.CourseDetail
+		if err := p.readCurrent(ctx, p.CourseRef(course.CourseID), &detail); err != nil {
+			return
+		}
+		course.TotalSessions = detail.TotalSessions
+		course.CompletedSessions = detail.CompletedSessions
+		checkedIn, totalStudents := p.sessionAttendance(ctx, course.CourseID, detail.Sessions)
+		course.AvgAttendanceRate = attendanceRate(checkedIn, totalStudents)
+	})
+}
+
+// readCurrent decodes the current committed snapshot without triggering a cold
+// synchronous refresh. It is used for best-effort composition reads where a
+// missing child snapshot must not cause an upstream Warwick request.
+func (p *SnapshotProvider) readCurrent(ctx context.Context, ref domain.TargetRef, destination any) error {
+	snapshot, err := p.reader.Current(ctx, ref)
+	if err != nil {
+		return err
+	}
+	if snapshot.Expired(p.clock().UTC()) {
+		return fmt.Errorf("%w: %s %q", domain.ErrSnapshotExpired, ref.Kind, ref.ResourceKey)
+	}
+	if err := json.Unmarshal(snapshot.Payload, destination); err != nil {
+		return fmt.Errorf("decode %s snapshot %q: %w", ref.Kind, ref.ResourceKey, err)
+	}
+	return nil
+}
+
+// sessionAttendance sums checked-in and total student counts across completed
+// sessions that have a committed session snapshot. Sessions without a snapshot
+// are excluded from both the numerator and the denominator, matching the
+// report path which counts attendance over completed sessions only.
+func (p *SnapshotProvider) sessionAttendance(ctx context.Context, courseID string, sessions []domain.SessionSummary) (checkedIn, totalStudents int) {
+	if len(sessions) == 0 {
+		return 0, 0
+	}
+	var mu sync.Mutex
+	_ = runBoundedJobs(ctx, len(sessions), snapshotEnrichConcurrency, func(index int) {
+		session := sessions[index]
+		if session.Status != domain.SessionStatusDone {
+			return
+		}
+		var detail domain.SessionDetail
+		if err := p.readCurrent(ctx, p.SessionRef(courseID, session.SessionID), &detail); err != nil {
+			return
+		}
+		if detail.TotalStudents <= 0 {
+			return
+		}
+		mu.Lock()
+		checkedIn += detail.CheckedInCount
+		totalStudents += detail.TotalStudents
+		mu.Unlock()
+	})
+	return checkedIn, totalStudents
+}
+
+func attendanceRate(checkedIn, totalStudents int) float64 {
+	if totalStudents <= 0 {
+		return 0
+	}
+	return float64(checkedIn) / float64(totalStudents)
 }
 
 func (p *SnapshotProvider) GetCourseDetail(
@@ -164,7 +252,72 @@ func (p *SnapshotProvider) GetCourseDetailWithName(
 	if detail.Status == "" {
 		detail.Status = domain.CourseStatusActive
 	}
+	p.composeCourseDetail(ctx, courseID, &detail)
 	return &detail, nil
+}
+
+// composeCourseDetail joins the course-detail snapshot with the catalog
+// snapshot (enrollment and dates) and each session's detail snapshot
+// (check-in totals), then derives the course-level average attendance from
+// completed sessions. Every child read is best-effort: a missing catalog or
+// session snapshot leaves the corresponding fields at their snapshot defaults
+// instead of failing the whole read or triggering an upstream refresh.
+func (p *SnapshotProvider) composeCourseDetail(ctx context.Context, courseID string, detail *domain.CourseDetail) {
+	p.overlayCatalogCourse(ctx, courseID, detail)
+	checkedIn, totalStudents := p.overlaySessionCounts(ctx, courseID, detail)
+	detail.AvgAttendanceRate = attendanceRate(checkedIn, totalStudents)
+}
+
+// overlayCatalogCourse copies enrollment and dates from the catalog snapshot
+// onto the course detail. The catalog read is best-effort: without it the
+// course detail keeps its snapshot defaults for those fields.
+func (p *SnapshotProvider) overlayCatalogCourse(ctx context.Context, courseID string, detail *domain.CourseDetail) {
+	var catalog []domain.CourseSummary
+	if err := p.readCurrent(ctx, p.CatalogRef(), &catalog); err != nil {
+		return
+	}
+	for _, course := range catalog {
+		if course.CourseID != courseID {
+			continue
+		}
+		detail.EnrolledCount = course.EnrolledCount
+		detail.StartDate = course.StartDate
+		detail.EndDate = course.EndDate
+		if detail.Name == "" {
+			detail.Name = course.Name
+		}
+		return
+	}
+}
+
+// overlaySessionCounts fills each session's checked-in and total student
+// counts from its session-detail snapshot and returns the course-level
+// attendance accumulated over completed sessions. Sessions without a committed
+// snapshot keep their course-detail defaults and are excluded from both the
+// numerator and denominator of the attendance rate, matching the report path
+// which counts attendance over completed sessions only. Reads are bounded so a
+// course with many sessions does not serialize the whole read path.
+func (p *SnapshotProvider) overlaySessionCounts(ctx context.Context, courseID string, detail *domain.CourseDetail) (checkedIn, totalStudents int) {
+	if len(detail.Sessions) == 0 {
+		return 0, 0
+	}
+	var mu sync.Mutex
+	_ = runBoundedJobs(ctx, len(detail.Sessions), snapshotEnrichConcurrency, func(index int) {
+		session := &detail.Sessions[index]
+		var sessionDetail domain.SessionDetail
+		if err := p.readCurrent(ctx, p.SessionRef(courseID, session.SessionID), &sessionDetail); err != nil {
+			return
+		}
+		session.CheckedInCount = sessionDetail.CheckedInCount
+		session.TotalStudents = sessionDetail.TotalStudents
+		if session.Status == domain.SessionStatusDone && sessionDetail.TotalStudents > 0 {
+			mu.Lock()
+			checkedIn += sessionDetail.CheckedInCount
+			totalStudents += sessionDetail.TotalStudents
+			mu.Unlock()
+		}
+	})
+	return checkedIn, totalStudents
 }
 
 func (p *SnapshotProvider) GetSessionDetail(

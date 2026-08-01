@@ -408,3 +408,220 @@ func TestTeacherServiceLiveRollbackAllowsRequestLevelLiveSource(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, report)
 }
+
+// seedCourseSnapshot writes a catalog course, its course-detail snapshot, and
+// per-session snapshots into the fake reader and returns the refs used.
+func seedCourseSnapshots(
+	t *testing.T,
+	provider *SnapshotProvider,
+	reader *snapshotReaderFake,
+	now time.Time,
+	course domain.CourseSummary,
+	sessions []domain.SessionSummary,
+	sessionDetails map[string]domain.SessionDetail,
+) {
+	t.Helper()
+	catalogRef := provider.CatalogRef()
+	var catalog []domain.CourseSummary
+	if existing, ok := reader.snapshots[catalogRef.IdentityKey()]; ok {
+		_ = json.Unmarshal(existing.Payload, &catalog)
+	}
+	catalog = append(catalog, course)
+	reader.snapshots[catalogRef.IdentityKey()] = providerSnapshot(
+		catalogRef, catalog, now, now.Add(time.Hour),
+	)
+	reader.snapshots[provider.CourseRef(course.CourseID).IdentityKey()] = providerSnapshot(
+		provider.CourseRef(course.CourseID),
+		domain.CourseDetail{
+			CourseSummary: domain.CourseSummary{
+				CourseID:          course.CourseID,
+				TotalSessions:     len(sessions),
+				CompletedSessions: completedSessionCount(sessions),
+			},
+			Sessions: sessions,
+		},
+		now,
+		now.Add(time.Hour),
+	)
+	for _, session := range sessions {
+		detail, ok := sessionDetails[session.SessionID]
+		if !ok {
+			continue
+		}
+		detail.SessionID = session.SessionID
+		reader.snapshots[provider.SessionRef(course.CourseID, session.SessionID).IdentityKey()] = providerSnapshot(
+			provider.SessionRef(course.CourseID, session.SessionID),
+			detail,
+			now,
+			now.Add(time.Hour),
+		)
+	}
+}
+
+func completedSessionCount(sessions []domain.SessionSummary) int {
+	count := 0
+	for _, session := range sessions {
+		if session.Status == domain.SessionStatusDone {
+			count++
+		}
+	}
+	return count
+}
+
+func TestSnapshotProviderGetCoursesEnrichesFromCourseAndSessionSnapshots(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	reader := &snapshotReaderFake{snapshots: map[string]domain.Snapshot{}, errors: map[string]error{}}
+	provider := NewSnapshotProvider(reader, &snapshotRefresherFake{}, "warwick.humantix.cloud", func() time.Time { return now })
+
+	seedCourseSnapshots(t, provider, reader, now,
+		domain.CourseSummary{
+			CourseID: "course-1", Name: "Math", StartDate: "2026-01-01", EndDate: "2026-06-30",
+			EnrolledCount: 15, Status: domain.CourseStatusActive,
+		},
+		[]domain.SessionSummary{
+			{SessionID: "session-1", SessionNumber: 1, Name: "Week 1", Status: domain.SessionStatusDone},
+			{SessionID: "session-2", SessionNumber: 2, Name: "Week 2", Status: domain.SessionStatusActive},
+		},
+		map[string]domain.SessionDetail{
+			"session-1": {
+				SessionSummary: domain.SessionSummary{TotalStudents: 15, CheckedInCount: 9},
+				Students:       []domain.StudentCheckin{},
+			},
+		},
+	)
+
+	courses, err := provider.GetCourses(context.Background())
+	require.NoError(t, err)
+	require.Len(t, courses, 1)
+	require.Equal(t, 15, courses[0].EnrolledCount)
+	require.Equal(t, 2, courses[0].TotalSessions)
+	require.Equal(t, 1, courses[0].CompletedSessions)
+	require.InDelta(t, 0.6, courses[0].AvgAttendanceRate, 1e-9)
+}
+
+func TestSnapshotProviderGetCoursesKeepsCatalogValuesWhenDetailSnapshotMissing(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	reader := &snapshotReaderFake{snapshots: map[string]domain.Snapshot{}, errors: map[string]error{}}
+	refresher := &snapshotRefresherFake{}
+	provider := NewSnapshotProvider(reader, refresher, "warwick.humantix.cloud", func() time.Time { return now })
+
+	catalogRef := provider.CatalogRef()
+	reader.snapshots[catalogRef.IdentityKey()] = providerSnapshot(
+		catalogRef,
+		[]domain.CourseSummary{{
+			CourseID: "course-1", Name: "Math", EnrolledCount: 15, Status: domain.CourseStatusActive,
+		}},
+		now,
+		now.Add(time.Hour),
+	)
+
+	courses, err := provider.GetCourses(context.Background())
+	require.NoError(t, err)
+	require.Len(t, courses, 1)
+	require.Equal(t, 15, courses[0].EnrolledCount)
+	require.Zero(t, courses[0].TotalSessions)
+	require.Zero(t, courses[0].CompletedSessions)
+	require.Zero(t, courses[0].AvgAttendanceRate)
+	// A missing child snapshot must not trigger an upstream refresh.
+	require.Empty(t, refresher.refreshes)
+}
+
+func TestSnapshotProviderGetCourseDetailComposesCatalogAndSessionSnapshots(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	reader := &snapshotReaderFake{snapshots: map[string]domain.Snapshot{}, errors: map[string]error{}}
+	refresher := &snapshotRefresherFake{}
+	provider := NewSnapshotProvider(reader, refresher, "warwick.humantix.cloud", func() time.Time { return now })
+
+	seedCourseSnapshots(t, provider, reader, now,
+		domain.CourseSummary{
+			CourseID: "course-1", Name: "Math", StartDate: "2026-01-01", EndDate: "2026-06-30",
+			EnrolledCount: 15, Status: domain.CourseStatusActive,
+		},
+		[]domain.SessionSummary{
+			{SessionID: "session-1", SessionNumber: 1, Name: "Week 1", Status: domain.SessionStatusDone},
+			{SessionID: "session-2", SessionNumber: 2, Name: "Week 2", Status: domain.SessionStatusDone},
+		},
+		map[string]domain.SessionDetail{
+			"session-1": {
+				SessionSummary: domain.SessionSummary{TotalStudents: 15, CheckedInCount: 9},
+				Students:       []domain.StudentCheckin{},
+			},
+			"session-2": {
+				SessionSummary: domain.SessionSummary{TotalStudents: 15, CheckedInCount: 3},
+				Students:       []domain.StudentCheckin{},
+			},
+		},
+	)
+
+	detail, err := provider.GetCourseDetail(context.Background(), "course-1")
+	require.NoError(t, err)
+	require.Equal(t, "Math", detail.Name)
+	require.Equal(t, 15, detail.EnrolledCount)
+	require.Equal(t, "2026-01-01", detail.StartDate)
+	require.Equal(t, "2026-06-30", detail.EndDate)
+	require.Equal(t, 2, detail.TotalSessions)
+	require.Equal(t, 2, detail.CompletedSessions)
+	require.Equal(t, 9, detail.Sessions[0].CheckedInCount)
+	require.Equal(t, 15, detail.Sessions[0].TotalStudents)
+	require.Equal(t, 3, detail.Sessions[1].CheckedInCount)
+	require.Equal(t, 15, detail.Sessions[1].TotalStudents)
+	require.InDelta(t, 0.4, detail.AvgAttendanceRate, 1e-9)
+	// Child composition reads must not trigger upstream refreshes.
+	require.Empty(t, refresher.refreshes)
+}
+
+func TestSnapshotProviderGetCourseDetailKeepsSessionDefaultsWhenSessionSnapshotMissing(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	reader := &snapshotReaderFake{snapshots: map[string]domain.Snapshot{}, errors: map[string]error{}}
+	refresher := &snapshotRefresherFake{}
+	provider := NewSnapshotProvider(reader, refresher, "warwick.humantix.cloud", func() time.Time { return now })
+
+	seedCourseSnapshots(t, provider, reader, now,
+		domain.CourseSummary{
+			CourseID: "course-1", Name: "Math", EnrolledCount: 15, Status: domain.CourseStatusActive,
+		},
+		[]domain.SessionSummary{
+			{SessionID: "session-1", SessionNumber: 1, Name: "Week 1", Status: domain.SessionStatusDone},
+		},
+		nil,
+	)
+
+	detail, err := provider.GetCourseDetail(context.Background(), "course-1")
+	require.NoError(t, err)
+	require.Equal(t, 1, detail.CompletedSessions)
+	require.Zero(t, detail.Sessions[0].CheckedInCount)
+	require.Zero(t, detail.Sessions[0].TotalStudents)
+	require.Zero(t, detail.AvgAttendanceRate)
+	require.Empty(t, refresher.refreshes)
+}
+
+func TestSnapshotProviderGetCourseDetailIgnoresActiveSessionsInAttendance(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	reader := &snapshotReaderFake{snapshots: map[string]domain.Snapshot{}, errors: map[string]error{}}
+	provider := NewSnapshotProvider(reader, &snapshotRefresherFake{}, "warwick.humantix.cloud", func() time.Time { return now })
+
+	seedCourseSnapshots(t, provider, reader, now,
+		domain.CourseSummary{
+			CourseID: "course-1", Name: "Math", EnrolledCount: 15, Status: domain.CourseStatusActive,
+		},
+		[]domain.SessionSummary{
+			{SessionID: "session-1", SessionNumber: 1, Name: "Week 1", Status: domain.SessionStatusDone},
+			{SessionID: "session-2", SessionNumber: 2, Name: "Week 2", Status: domain.SessionStatusActive},
+		},
+		map[string]domain.SessionDetail{
+			"session-1": {
+				SessionSummary: domain.SessionSummary{TotalStudents: 15, CheckedInCount: 9},
+				Students:       []domain.StudentCheckin{},
+			},
+			"session-2": {
+				SessionSummary: domain.SessionSummary{TotalStudents: 15, CheckedInCount: 15},
+				Students:       []domain.StudentCheckin{},
+			},
+		},
+	)
+
+	detail, err := provider.GetCourseDetail(context.Background(), "course-1")
+	require.NoError(t, err)
+	// Only the completed session counts toward the average attendance.
+	require.InDelta(t, 0.6, detail.AvgAttendanceRate, 1e-9)
+}
