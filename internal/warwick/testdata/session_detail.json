@@ -1,0 +1,57 @@
+{
+  "draw": 1,
+  "recordsFiltered": 5,
+  "data": [
+    {
+      "StudentID": "S20240001",
+      "StudentName": "Olivia Chen",
+      "StudentNickName": "Oli",
+      "StudentSchool": "School of Engineering",
+      "StudentImg": "",
+      "StudentCheckIn": true,
+      "StudentPPoint": 2,
+      "StudentGivePoint": false
+    },
+    {
+      "StudentID": "S20240002",
+      "StudentName": "Liam Patel",
+      "StudentNickName": "Li",
+      "StudentSchool": "School of Computer Science",
+      "StudentImg": "",
+      "StudentCheckIn": true,
+      "StudentPPoint": 3,
+      "StudentGivePoint": false
+    },
+    {
+      "StudentID": "S20240003",
+      "StudentName": "Jose Almeida",
+      "StudentNickName": "",
+      "StudentSchool": "School of Engineering",
+      "StudentImg": "",
+      "StudentCheckIn": false,
+      "StudentPPoint": 0,
+      "StudentGivePoint": false
+    },
+    {
+      "StudentID": "S20240004",
+      "StudentName": "Noah Kim",
+      "StudentNickName": "No",
+      "StudentSchool": "School of Mathematics",
+      "StudentImg": "",
+      "StudentCheckIn": true,
+      "StudentPPoint": 1,
+      "StudentGivePoint": false
+    },
+    {
+      "StudentID": "S20240005",
+      "StudentName": "Ava Thompson",
+      "StudentNickName": "Ava",
+      "StudentSchool": "School of Computer Science",
+      "StudentImg": "",
+      "StudentCheckIn": false,
+      "StudentPPoint": 0,
+      "StudentGivePoint": false
+    }
+  ],
+  "recordsTotal": 5
+}

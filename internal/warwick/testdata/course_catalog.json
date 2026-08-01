@@ -1,0 +1,47 @@
+{
+  "draw": 1,
+  "recordsFiltered": 5,
+  "data": [
+    {
+      "ID": "CSE-2025-101",
+      "Enrolled": 42,
+      "CourseName": "Introduction to Python Programming",
+      "Cycle": "13 Jan 2025 - 21 Mar 2025",
+      "StartDate": "2025-01-13T00:00:00",
+      "EndDate": "2025-03-21T00:00:00"
+    },
+    {
+      "ID": "MATH-2025-202",
+      "Enrolled": 27,
+      "CourseName": "Discrete Mathematics",
+      "Cycle": "08 Sep 2025 - 12 Dec 2025",
+      "StartDate": "2025-09-08T00:00:00",
+      "EndDate": "2025-12-12T00:00:00"
+    },
+    {
+      "ID": "CSE-2027-301",
+      "Enrolled": 35,
+      "CourseName": "Machine Learning Fundamentals",
+      "Cycle": "14 Sep 2027 - 11 Dec 2027",
+      "StartDate": "2027-09-14T00:00:00",
+      "EndDate": "2027-12-11T00:00:00"
+    },
+    {
+      "ID": "DBS-2026-401",
+      "Enrolled": 31,
+      "CourseName": "Database Systems",
+      "Cycle": "05 Jan 2026 - 31 Dec 2027",
+      "StartDate": "2026-01-05T00:00:00",
+      "EndDate": "2027-12-31T00:00:00"
+    },
+    {
+      "ID": "NET-2026-501",
+      "Enrolled": 29,
+      "CourseName": "Computer Networks",
+      "Cycle": "01 Sep 2025 - 31 Dec 2027",
+      "StartDate": "2025-09-01T00:00:00",
+      "EndDate": "2027-12-31T00:00:00"
+    }
+  ],
+  "recordsTotal": 5
+}

@@ -1,0 +1,73 @@
+{
+  "draw": 1,
+  "recordsFiltered": 6,
+  "data": [
+    {
+      "StudentID": "W240001",
+      "StudentGuid": "9f2c1a7e-4b3d-4f8a-9e1c-2d5b6a7c8d9e",
+      "FullName": "Olivia Chen",
+      "School": "School of Engineering",
+      "MobilePhone": "13800000001",
+      "ParentPhone": "13800000002",
+      "IsActive": true,
+      "TerminateStatus": "",
+      "ExpireDateStr": "2027-08-31"
+    },
+    {
+      "StudentID": "W240002",
+      "StudentGuid": "1a2b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d",
+      "FullName": "Liam Patel",
+      "School": "School of Computer Science",
+      "MobilePhone": "13800000003",
+      "ParentPhone": "13800000004",
+      "IsActive": true,
+      "TerminateStatus": "",
+      "ExpireDateStr": "2027-08-31"
+    },
+    {
+      "StudentID": "W240003",
+      "StudentGuid": "8e7d6c5b-4a3f-4e2d-9c1b-0a9f8e7d6c5b",
+      "FullName": "Jose Almeida",
+      "School": "School of Engineering",
+      "MobilePhone": "13800000005",
+      "ParentPhone": "13800000006",
+      "IsActive": true,
+      "TerminateStatus": "",
+      "ExpireDateStr": "2027-08-31"
+    },
+    {
+      "StudentID": "W240004",
+      "StudentGuid": "5c4b3a2f-1e9d-4c8b-7a6f-5e4d3c2b1a09",
+      "FullName": "Noah Kim",
+      "School": "School of Mathematics",
+      "MobilePhone": "13800000007",
+      "ParentPhone": "13800000008",
+      "IsActive": false,
+      "TerminateStatus": "graduated",
+      "ExpireDateStr": "2026-06-30"
+    },
+    {
+      "StudentID": "W240005",
+      "StudentGuid": "0f1e2d3c-4b5a-4c6d-8e7f-0a1b2c3d4e5f",
+      "FullName": "Ava Thompson",
+      "School": "School of Computer Science",
+      "MobilePhone": "13800000009",
+      "ParentPhone": "13800000010",
+      "IsActive": true,
+      "TerminateStatus": "",
+      "ExpireDateStr": "2027-08-31"
+    },
+    {
+      "StudentID": "W240006",
+      "StudentGuid": "6a7b8c9d-0e1f-4a2b-3c4d-5e6f7a8b9c0d",
+      "FullName": "Mia Williams",
+      "School": "School of Engineering",
+      "MobilePhone": "13800000011",
+      "ParentPhone": "13800000012",
+      "IsActive": true,
+      "TerminateStatus": "",
+      "ExpireDateStr": "2027-08-31"
+    }
+  ],
+  "recordsTotal": 6
+}

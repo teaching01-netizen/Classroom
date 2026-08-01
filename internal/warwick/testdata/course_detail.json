@@ -1,0 +1,27 @@
+{
+  "draw": 1,
+  "recordsFiltered": 4,
+  "data": [
+    {
+      "dName": "Week 1: Introduction and Setup",
+      "dStatus": "",
+      "dID": "1001"
+    },
+    {
+      "dName": "Week 2: Variables and Control Flow",
+      "dStatus": "Active",
+      "dID": "1002"
+    },
+    {
+      "dName": "Week 3: Functions and Modules",
+      "dStatus": "Finished",
+      "dID": "1003"
+    },
+    {
+      "dName": "Week 4: Data Structures",
+      "dStatus": "Active",
+      "dID": "1004"
+    }
+  ],
+  "recordsTotal": 4
+}
