@@ -1,5 +1,11 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { z } from 'zod'
+import { roomKeys } from '@/features/rooms/api/room.queries'
+import {
+  roomSummarySchema,
+  roomSummariesSchema,
+  type RoomSummary,
+} from '@/features/rooms/api/room.schemas'
 import { getAffectedQueryKeys } from './invalidation-map'
 import {
   acceptSnapshotCommitted,
@@ -8,6 +14,14 @@ import {
 } from './snapshot-events'
 import { applyCheckinDelta, isSessionDetailLike } from './checkin-update'
 import { useConnectionStore } from './connection-store'
+import {
+  applyRoomChanged,
+  applyRoomCreated,
+  applyRoomDeleted,
+  applyRoomUpdated,
+  roomChangedSchema,
+  type RoomChanged,
+} from './room-events'
 
 const checkinUpdateSchema = z.object({
   student_id: z.string(),
@@ -25,10 +39,11 @@ const checkinsUpdateSchema = z.object({
 })
 
 const eventSchema = z.looseObject({
-  FullStateSync: z.unknown().optional(),
-  RoomCreated: z.unknown().optional(),
-  RoomUpdated: z.unknown().optional(),
+  FullStateSync: roomSummariesSchema.optional(),
+  RoomCreated: roomSummarySchema.optional(),
+  RoomUpdated: roomSummarySchema.optional(),
   RoomDeleted: z.string().optional(),
+  ROOM_CHANGED: roomChangedSchema.optional(),
   CHECKIN_UPDATED: checkinUpdateSchema.optional(),
   CHECKINS_UPDATED: checkinsUpdateSchema.optional(),
   SESSION_STATS_UPDATED: z.unknown().optional(),
@@ -46,6 +61,7 @@ export class RealtimeClient {
   #reconnectTimer: number | null = null
   #reconnectAttempts = 0
   #stopped = true
+  #roomRevisions = new Map<string, number>()
 
   constructor(queryClient: QueryClient) {
     this.#queryClient = queryClient
@@ -111,6 +127,27 @@ export class RealtimeClient {
     }
   }
 
+  #applyRoomChanged(event: RoomChanged): void {
+    const lastSeen = this.#roomRevisions.get(event.room_id)
+    if (lastSeen !== undefined && event.revision <= lastSeen) {
+      return
+    }
+    this.#roomRevisions.set(event.room_id, event.revision)
+    // Patch only the matching room in the cached list; if the list is not
+    // cached yet, FullStateSync or the list fetch will populate it.
+    this.#queryClient.setQueryData<RoomSummary[]>(roomKeys.all, (rooms) =>
+      applyRoomChanged(rooms, event),
+    )
+    if (event.has_qr) {
+      // A QR became available: refetch only this room's detail query, which
+      // is the sole place qr_url lives. Never refetch the whole list.
+      void this.#queryClient.invalidateQueries({
+        queryKey: roomKeys.detail(event.room_id),
+        exact: true,
+      })
+    }
+  }
+
   #handleMessage(raw: unknown): void {
     if (typeof raw !== 'string') {
       return
@@ -128,10 +165,28 @@ export class RealtimeClient {
     const event = result.data
 
     if (event.FullStateSync !== undefined) {
-      this.#queryClient.setQueryData(['rooms'], event.FullStateSync)
+      this.#queryClient.setQueryData(roomKeys.all, event.FullStateSync)
     }
-    if (event.RoomCreated !== undefined || event.RoomUpdated !== undefined || event.RoomDeleted !== undefined) {
-      void this.#queryClient.invalidateQueries({ queryKey: ['rooms'] })
+    if (event.RoomCreated !== undefined) {
+      const created = event.RoomCreated
+      this.#queryClient.setQueryData<RoomSummary[]>(roomKeys.all, (rooms) =>
+        applyRoomCreated(rooms, created),
+      )
+    }
+    if (event.RoomUpdated !== undefined) {
+      const updated = event.RoomUpdated
+      this.#queryClient.setQueryData<RoomSummary[]>(roomKeys.all, (rooms) =>
+        applyRoomUpdated(rooms, updated),
+      )
+    }
+    if (event.RoomDeleted !== undefined) {
+      const deletedRoomId = event.RoomDeleted
+      this.#queryClient.setQueryData<RoomSummary[]>(roomKeys.all, (rooms) =>
+        applyRoomDeleted(rooms, deletedRoomId),
+      )
+    }
+    if (event.ROOM_CHANGED !== undefined) {
+      this.#applyRoomChanged(event.ROOM_CHANGED)
     }
     if (event.CHECKIN_UPDATED !== undefined) {
       const update = event.CHECKIN_UPDATED
