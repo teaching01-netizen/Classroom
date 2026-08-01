@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -104,6 +105,46 @@ func TestFetchQRPoolExhaustion(t *testing.T) {
 
 	pool.Release(ref1)
 	pool.Release(ref2)
+}
+
+func TestFetchQRWaitsForReleasedSession(t *testing.T) {
+	loginServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "ASP.NET_SessionId=abc123; path=/; HttpOnly")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer loginServer.Close()
+
+	qrServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"qrUrl":"data:image/png;base64,abcd","qrTime":60}`))
+	}))
+	defer qrServer.Close()
+
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	client := NewWarwickQrClientFromPool(pool, TierQR)
+	client.SetBaseURL(qrServer.URL)
+
+	// Hold the only QR session so the fetch has to queue within its budget.
+	held, err := pool.Acquire(TierQR)
+	require.NoError(t, err)
+
+	result := make(chan error, 1)
+	go func() {
+		_, fetchErr := client.FetchQR("18248")
+		result <- fetchErr
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	pool.Release(held)
+
+	select {
+	case err := <-result:
+		require.NoError(t, err, "fetch should succeed once the queued session is released")
+	case <-time.After(3 * time.Second):
+		t.Fatal("QR fetch did not complete after the held session was released")
+	}
 }
 
 func TestFetchQRWithFreshAuthPoolExhaustion(t *testing.T) {

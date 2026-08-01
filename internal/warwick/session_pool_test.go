@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"qr-command-center/internal/metrics"
 )
 
 func TestAcquireWithTimeoutSucceedsImmediately(t *testing.T) {
@@ -115,6 +118,29 @@ func TestSessionPoolReleaseIsIdempotent(t *testing.T) {
 
 	_, err = pool.AcquireWithTimeout(TierQR, 10*time.Millisecond)
 	assert.ErrorIs(t, err, ErrNoAvailableSessions)
+}
+
+func TestAcquireTimeoutIncrementsExhaustionMetric(t *testing.T) {
+	loginServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "ASP.NET_SessionId=testcookie; path=/; HttpOnly")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer loginServer.Close()
+
+	pool, err := NewSessionPool("test@test.com", "pass", loginServer.URL, 1, 1, 1)
+	require.NoError(t, err)
+
+	before := testutil.ToFloat64(metrics.WarwickSessionPoolExhaustedTotal.WithLabelValues(TierQR.String()))
+
+	ref, err := pool.Acquire(TierQR)
+	require.NoError(t, err)
+	defer pool.Release(ref)
+
+	_, err = pool.AcquireWithTimeout(TierQR, 10*time.Millisecond)
+	require.ErrorIs(t, err, ErrNoAvailableSessions)
+
+	after := testutil.ToFloat64(metrics.WarwickSessionPoolExhaustedTotal.WithLabelValues(TierQR.String()))
+	assert.Equal(t, before+1, after, "a timed-out acquisition should bump the exhaustion counter")
 }
 
 func TestAcquireWithTimeoutContextHonorsCancellation(t *testing.T) {

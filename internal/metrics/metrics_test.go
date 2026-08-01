@@ -86,6 +86,15 @@ func TestMetrics_PoolWaitHistogramObservable(t *testing.T) {
 	assert.GreaterOrEqual(t, count, 1, "should be collectable")
 }
 
+// TestMetrics_SessionPoolExhaustedCounterObservable verifies the session pool
+// exhaustion counter can be incremented with the expected tier label.
+func TestMetrics_SessionPoolExhaustedCounterObservable(t *testing.T) {
+	WarwickSessionPoolExhaustedTotal.WithLabelValues("qr").Inc()
+
+	count := testutil.CollectAndCount(WarwickSessionPoolExhaustedTotal)
+	assert.Equal(t, 1, count, "warwick_session_pool_exhausted_total should be collectable")
+}
+
 func TestMetrics_ReportRetryCountersObservable(t *testing.T) {
 	ReportRateLimitRetriesTotal.Inc()
 	ReportRateLimitRetryExhaustedTotal.Inc()

@@ -48,6 +48,19 @@ var (
 		[]string{"tier"},
 	)
 
+	// WarwickSessionPoolExhaustedTotal counts acquisition attempts that failed
+	// because every session in the tier was in use: immediate non-blocking
+	// failures and timed-out waits. Label: tier (bounded, low-cardinality tier
+	// value). Caller cancellation is NOT counted — the session was available,
+	// the caller simply stopped wanting it, so it is not a capacity event.
+	WarwickSessionPoolExhaustedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "warwick_session_pool_exhausted_total",
+			Help: "Total session pool acquisition attempts rejected by tier capacity.",
+		},
+		[]string{"tier"},
+	)
+
 	// ReportRateLimitRetriesTotal counts bounded report retries after an
 	// upstream rate-limit response. It has no request-derived labels.
 	ReportRateLimitRetriesTotal = promauto.NewCounter(

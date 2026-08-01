@@ -278,6 +278,7 @@ func (p *SessionPool) Acquire(tier SessionTier) (*SessionRef, error) {
 	case index := <-available:
 		return p.acquireIndex(context.Background(), tier, available, index, acquireStart)
 	default:
+		metrics.WarwickSessionPoolExhaustedTotal.WithLabelValues(tier.String()).Inc()
 		return nil, fmt.Errorf("%w: tier %d (all %d in use)", ErrNoAvailableSessions, tier, size)
 	}
 }
@@ -303,6 +304,7 @@ func (p *SessionPool) AcquireWithTimeoutContext(ctx context.Context, tier Sessio
 		case index := <-available:
 			return p.acquireIndex(ctx, tier, available, index, acquireStart)
 		default:
+			metrics.WarwickSessionPoolExhaustedTotal.WithLabelValues(tier.String()).Inc()
 			return nil, fmt.Errorf("%w: tier %d (all %d in use, no wait requested)", ErrNoAvailableSessions, tier, size)
 		}
 	}
@@ -312,10 +314,13 @@ func (p *SessionPool) AcquireWithTimeoutContext(ctx context.Context, tier Sessio
 
 	select {
 	case <-ctx.Done():
+		// Caller cancellation is not a capacity event — the session remains
+		// available for someone else, so don't bump the exhaustion counter.
 		return nil, ctx.Err()
 	case index := <-available:
 		return p.acquireIndex(ctx, tier, available, index, acquireStart)
 	case <-timer.C:
+		metrics.WarwickSessionPoolExhaustedTotal.WithLabelValues(tier.String()).Inc()
 		return nil, fmt.Errorf("%w: tier %d (all %d in use, waited %v)",
 			ErrNoAvailableSessions, tier, size, timeout)
 	}

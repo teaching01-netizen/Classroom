@@ -14,7 +14,15 @@ import (
 	"qr-command-center/internal/domain"
 )
 
-const defaultQREndpoint = "https://warwick.humantix.cloud/admin/ClassAttendance/GetQRCode"
+const (
+	defaultQREndpoint = "https://warwick.humantix.cloud/admin/ClassAttendance/GetQRCode"
+
+	// qrAcquireBudget bounds how long a QR fetch queues for a pooled session
+	// before failing with ErrNoAvailableSessions. QR polling is steady traffic;
+	// a 1s queue smooths bursts without stalling a fetch for the full 5s
+	// interactive budget, while still surfacing pool exhaustion promptly.
+	qrAcquireBudget = time.Second
+)
 
 type WarwickQrClient struct {
 	auth       *WarwickAuth // kept for backward compatibility; nil when pool is used
@@ -89,7 +97,7 @@ func (c *WarwickQrClient) FetchQR(classID string) (domain.QrResponse, error) {
 
 func (c *WarwickQrClient) FetchQRContext(ctx context.Context, classID string) (domain.QrResponse, error) {
 	if c.pool != nil {
-		ref, err := c.pool.AcquireWithTimeoutContext(ctx, c.tier, 0)
+		ref, err := c.pool.AcquireWithTimeoutContext(ctx, c.tier, qrAcquireBudget)
 		if err != nil {
 			if ctx.Err() != nil {
 				return domain.QrResponse{}, ctx.Err()
@@ -124,7 +132,7 @@ func (c *WarwickQrClient) FetchQRWithFreshAuth(classID string) (domain.QrRespons
 
 func (c *WarwickQrClient) FetchQRWithFreshAuthContext(ctx context.Context, classID string) (domain.QrResponse, error) {
 	if c.pool != nil {
-		ref, err := c.pool.AcquireWithTimeoutContext(ctx, c.tier, 0)
+		ref, err := c.pool.AcquireWithTimeoutContext(ctx, c.tier, qrAcquireBudget)
 		if err != nil {
 			if ctx.Err() != nil {
 				return domain.QrResponse{}, ctx.Err()
