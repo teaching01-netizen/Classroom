@@ -165,6 +165,9 @@ export class RealtimeClient {
     const event = result.data
 
     if (event.FullStateSync !== undefined) {
+      // A full sync is authoritative; drop stale revision bookkeeping so a
+      // server restart (or reused room id) cannot suppress fresh events.
+      this.#roomRevisions.clear()
       this.#queryClient.setQueryData(roomKeys.all, event.FullStateSync)
     }
     if (event.RoomCreated !== undefined) {

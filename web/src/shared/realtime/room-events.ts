@@ -9,7 +9,7 @@ export const roomChangedSchema = z.object({
   status: z.string(),
   expires_at: z.string().nullish(),
   has_qr: z.boolean(),
-  revision: z.number(),
+  revision: z.number().int(),
 })
 
 export type RoomChanged = z.infer<typeof roomChangedSchema>

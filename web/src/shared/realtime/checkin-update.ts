@@ -1,5 +1,6 @@
 // Minimal structural shape of a session-detail cache entry. Kept local so
-// shared/realtime code never imports a feature.
+// this module stays feature-free (unlike room-events.ts, which is allowed to
+// import the rooms feature per the architecture carve-out).
 export type CheckinDetailShape = {
   readonly students: readonly { student_id: string; checked_in: boolean }[]
   readonly checked_in_count?: number
