@@ -385,4 +385,30 @@ var (
 		},
 		[]string{"kind"},
 	)
+
+	// ============================================================================
+	// Response egress observability
+	// ============================================================================
+
+	// HTTPResponseBytesTotal counts HTTP response body bytes written to admitted
+	// API routes. Label: route_class (bounded, low-cardinality path classifier).
+	// Never labeled with room IDs, course IDs, student IDs, or session IDs.
+	HTTPResponseBytesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_response_bytes_total",
+			Help: "Total HTTP response bytes written by bounded route class.",
+		},
+		[]string{"route_class"},
+	)
+
+	// WebsocketBytesSentTotal counts WebSocket frame bytes sent. Label:
+	// event_class (bounded, low-cardinality event classifier mirroring the
+	// event hub's buckets). Never labeled with per-event or request-derived IDs.
+	WebsocketBytesSentTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "websocket_bytes_sent_total",
+			Help: "Total WebSocket frame bytes sent by bounded event class.",
+		},
+		[]string{"event_class"},
+	)
 )

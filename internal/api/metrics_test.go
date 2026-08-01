@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -113,4 +114,55 @@ func TestMetricsEndpointExposesScraperStatusCollectionFailure(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, 1, statusReader.calls)
 	require.Contains(t, w.Body.String(), "warwick_scrape_status_collection_success 0")
+}
+
+func TestMetrics_HTTPResponseBytesRecordedByRouteClass(t *testing.T) {
+	hub := service.NewEventHub(16, 16)
+	defer hub.Close()
+	rm := service.NewRoomManagerWithEventHub(testQRClient{}, newTestRoomRepository(), hub)
+	require.NoError(t, rm.LoadRoomsFromDB())
+	cc := warwick.NewClassroomClient(nil)
+	ts := service.NewTeacherService(cc, &stubFetcher{}, 2)
+	router, rl := NewRouter(rm, ts, nil, nil, RouterOptions{
+		WSMaxConns:       100,
+		ActivityRecorder: &activityCounter{},
+	})
+	defer rl.Stop()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms?lite=true", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	mw := httptest.NewRecorder()
+	router.ServeHTTP(mw, metricsReq)
+	assert.Contains(t,
+		mw.Body.String(),
+		`http_response_bytes_total{route_class="rooms_list"}`,
+	)
+}
+
+func TestMetrics_WebsocketBytesSentRecorded(t *testing.T) {
+	conn, rm, ctx := connectWebSocketWithRoom(
+		t,
+		runningRoomWithQR("r1", "c1", "data:image/png;base64,QUJD"),
+		testQRClient{},
+	)
+	roomSync := readWebSocketEnvelope(t, ctx, conn)
+	require.Contains(t, roomSync, "FullStateSync")
+
+	cc := warwick.NewClassroomClient(nil)
+	ts := service.NewTeacherService(cc, &stubFetcher{}, 2)
+	router, rl := NewRouter(rm, ts, nil, nil, RouterOptions{WSMaxConns: 100})
+	defer rl.Stop()
+
+	// The frame counter is incremented on the connection's goroutine just
+	// after the write completes, so poll briefly for the metric to appear.
+	require.Eventually(t, func() bool {
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return strings.Contains(w.Body.String(), "websocket_bytes_sent_total")
+	}, 2*time.Second, 50*time.Millisecond)
 }

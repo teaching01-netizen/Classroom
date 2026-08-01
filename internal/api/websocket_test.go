@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -279,6 +280,34 @@ func TestWebSocketQRRefreshFrameUnder1KB(t *testing.T) {
 	assert.Less(t, len(payload), 1024)
 	assert.True(t, changed.HasQR)
 	require.NoError(t, rm.StopRoom("r1"))
+}
+
+func TestWebSocketFullStateSyncUnder64KBWith100Rooms(t *testing.T) {
+	wsConnCount.Store(0)
+	t.Cleanup(func() { wsConnCount.Store(0) })
+	hub := service.NewEventHub(16, 16)
+	t.Cleanup(hub.Close)
+	qr := strings.Repeat("K", 64*1024)
+	rooms := make([]domain.Room, 0, 100)
+	for i := 0; i < 100; i++ {
+		rooms = append(rooms, runningRoomWithQR(fmt.Sprintf("r%d", i), "c1", qr))
+	}
+	rm := service.NewRoomManagerWithEventHub(testQRClient{}, newTestRoomRepository(rooms...), hub)
+	require.NoError(t, rm.LoadRoomsFromDB())
+	server := httptest.NewServer(wsHandlerWithSnapshots(rm, hub, nil, 10, nil))
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	t.Cleanup(cancel)
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "test complete") })
+
+	_, payload, err := conn.Read(ctx)
+	require.NoError(t, err)
+	var envelope map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(payload, &envelope))
+	require.Contains(t, envelope, "FullStateSync")
+	assert.Less(t, len(payload), 64*1024)
 }
 
 func TestWebSocketRoomDetailStillReturnsQRURLAfterEvent(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"nhooyr.io/websocket"
 
 	"qr-command-center/internal/domain"
+	"qr-command-center/internal/metrics"
 	"qr-command-center/internal/service"
 )
 
@@ -98,7 +99,7 @@ func wsHandlerWithSnapshots(
 		}
 
 		syncData := marshalEvent(service.RoomManagerEvent{Type: "FullStateSync", Data: rooms})
-		if err := writeWebSocketEvent(ctx, conn, syncData); err != nil {
+		if err := writeWebSocketEvent(ctx, conn, "FullStateSync", syncData); err != nil {
 			logWebSocketWriteError(err)
 			return
 		}
@@ -108,7 +109,7 @@ func wsHandlerWithSnapshots(
 				Type: "SnapshotStateSync",
 				Data: snapshotMetadata,
 			})
-			if err := writeWebSocketEvent(ctx, conn, stateData); err != nil {
+			if err := writeWebSocketEvent(ctx, conn, "SnapshotStateSync", stateData); err != nil {
 				logWebSocketWriteError(err)
 				return
 			}
@@ -135,7 +136,7 @@ func wsHandlerWithSnapshots(
 					snapshotVersions[key] = metadata.Version
 				}
 				data := marshalEvent(event)
-				if err := writeWebSocketEvent(ctx, conn, data); err != nil {
+				if err := writeWebSocketEvent(ctx, conn, event.Type, data); err != nil {
 					logWebSocketWriteError(err)
 					return
 				}
@@ -147,11 +148,33 @@ func wsHandlerWithSnapshots(
 func writeWebSocketEvent(
 	ctx context.Context,
 	connection *websocket.Conn,
+	eventType string,
 	data []byte,
 ) error {
 	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return connection.Write(writeCtx, websocket.MessageText, data)
+	err := connection.Write(writeCtx, websocket.MessageText, data)
+	if err == nil {
+		metrics.WebsocketBytesSentTotal.
+			WithLabelValues(webSocketEventClass(eventType)).
+			Add(float64(len(data)))
+	}
+	return err
+}
+
+// webSocketEventClass maps an event type to the same bounded buckets used by
+// the service layer's event hub (service.eventHubEventClass) so labels stay
+// consistent. Room IDs and session IDs never appear in labels.
+func webSocketEventClass(eventType string) string {
+	switch eventType {
+	case "SnapshotCommitted", "SnapshotStateSync":
+		return "snapshot"
+	case "RoomCreated", "RoomUpdated", "RoomDeleted", "FullStateSync",
+		"ROOM_CHANGED", "CHECKIN_UPDATED", "CHECKINS_UPDATED", "SESSION_STATS_UPDATED":
+		return "room"
+	default:
+		return "application"
+	}
 }
 
 func logWebSocketWriteError(err error) {

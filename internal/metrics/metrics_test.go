@@ -102,3 +102,15 @@ func TestMetrics_ReportRetryCountersObservable(t *testing.T) {
 	assert.Equal(t, 1, testutil.CollectAndCount(ReportRateLimitRetriesTotal))
 	assert.Equal(t, 1, testutil.CollectAndCount(ReportRateLimitRetryExhaustedTotal))
 }
+
+// TestMetrics_ResponseEgressCountersRegistered verifies the response-size
+// counters exist with their bounded label dimensions.
+func TestMetrics_ResponseEgressCountersRegistered(t *testing.T) {
+	HTTPResponseBytesTotal.WithLabelValues("rooms_list").Add(1)
+	WebsocketBytesSentTotal.WithLabelValues("room").Add(1)
+
+	assert.GreaterOrEqual(t, testutil.CollectAndCount(HTTPResponseBytesTotal), 1,
+		"http_response_bytes_total should be registered")
+	assert.GreaterOrEqual(t, testutil.CollectAndCount(WebsocketBytesSentTotal), 1,
+		"websocket_bytes_sent_total should be registered")
+}

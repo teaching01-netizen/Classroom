@@ -1,7 +1,11 @@
 package api
 
 import (
+	"bufio"
+	"compress/gzip"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"qr-command-center/internal/domain"
+	"qr-command-center/internal/metrics"
 	"qr-command-center/internal/middleware"
 	"qr-command-center/internal/service"
 )
@@ -57,6 +62,7 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 	r.Use(redactInternalQueryBeforeLogging)
 	r.Use(chimiddleware.Logger)
 	r.Use(corsMiddleware(options.CORSOrigin))
+	r.Use(gzipMiddleware)
 
 	r.Get("/api", healthHandler())
 	r.Get("/api/", healthHandler())
@@ -174,6 +180,7 @@ func redactInternalQueryBeforeLogging(next http.Handler) http.Handler {
 type responseStatusRecorder struct {
 	http.ResponseWriter
 	status int
+	bytes  int64
 }
 
 func (w *responseStatusRecorder) WriteHeader(status int) {
@@ -185,21 +192,39 @@ func (w *responseStatusRecorder) Write(payload []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	return w.ResponseWriter.Write(payload)
+	n, err := w.ResponseWriter.Write(payload)
+	w.bytes += int64(n)
+	return n, err
+}
+
+// routeClass maps a request path to a bounded, low-cardinality metric label.
+// Room IDs, course IDs, student IDs, and session IDs never appear in labels.
+func routeClass(path string) string {
+	const roomsPrefix = "/api/rooms"
+	switch {
+	case path == roomsPrefix || path == roomsPrefix+"/":
+		return "rooms_list"
+	case strings.HasPrefix(path, roomsPrefix+"/"):
+		rest := strings.TrimPrefix(path, roomsPrefix+"/")
+		if !strings.Contains(rest, "/") {
+			return "room_detail"
+		}
+		return "rooms_other"
+	case strings.HasPrefix(path, "/api/teacher"):
+		return "teacher"
+	default:
+		return "other"
+	}
 }
 
 func admittedActivityMiddleware(recorder service.ActivityRecorder) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if recorder == nil {
-				next.ServeHTTP(w, r)
-				return
-			}
+			statusWriter := &responseStatusRecorder{ResponseWriter: w}
 			var lease service.ActivityLease
 			if tracker, ok := recorder.(service.ActivityTracker); ok {
 				lease = tracker.BeginActivity()
 			}
-			statusWriter := &responseStatusRecorder{ResponseWriter: w}
 			if lease != nil {
 				defer func() {
 					status := statusWriter.status
@@ -215,11 +240,154 @@ func admittedActivityMiddleware(recorder service.ActivityRecorder) func(http.Han
 				status = http.StatusOK
 			}
 			success := status >= 200 && status < 400
-			if lease == nil && success {
+			if recorder != nil && lease == nil && success {
 				recorder.RecordActivity()
 			}
+			metrics.HTTPResponseBytesTotal.
+				WithLabelValues(routeClass(r.URL.Path)).
+				Add(float64(statusWriter.bytes))
 		})
 	}
+}
+
+// gzipMiddleware compresses responses when the client advertises gzip support
+// and the response Content-Type is compressible. Compression starts lazily on
+// the first body write so handler-set headers are honored, and informational
+// statuses (incl. the 101 WebSocket upgrade), 204/304, existing
+// Content-Encoding, and empty responses pass through untouched.
+func gzipMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		gz := &gzipResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(gz, r)
+		gz.close()
+	})
+}
+
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gz          *gzip.Writer
+	status      int
+	headerSent  bool
+	passthrough bool
+}
+
+func (w *gzipResponseWriter) WriteHeader(status int) {
+	if w.headerSent {
+		return
+	}
+	w.status = status
+	// Informational (incl. 101 WebSocket upgrade), 204, and 304 responses
+	// never carry a compressible body; send them through untouched.
+	if status < http.StatusOK ||
+		status == http.StatusNoContent ||
+		status == http.StatusNotModified ||
+		w.Header().Get("Content-Encoding") != "" {
+		w.passthrough = true
+		w.forwardHeader()
+	}
+	// Body-producing statuses are staged until the first Write so empty-body
+	// responses are never wrapped in gzip.
+}
+
+func (w *gzipResponseWriter) forwardHeader() {
+	if w.headerSent {
+		return
+	}
+	w.headerSent = true
+	status := w.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *gzipResponseWriter) Write(payload []byte) (int, error) {
+	if w.passthrough {
+		return w.ResponseWriter.Write(payload)
+	}
+	if w.gz == nil {
+		w.startGzip(payload)
+	}
+	if w.passthrough {
+		return w.ResponseWriter.Write(payload)
+	}
+	return w.gz.Write(payload)
+}
+
+func (w *gzipResponseWriter) startGzip(payload []byte) {
+	contentType := w.Header().Get("Content-Type")
+	if contentType == "" {
+		contentType = http.DetectContentType(payload)
+	}
+	if !compressibleContentType(contentType) {
+		w.passthrough = true
+		w.forwardHeader()
+		return
+	}
+	w.Header().Del("Content-Length")
+	w.Header().Set("Content-Encoding", "gzip")
+	w.Header().Add("Vary", "Accept-Encoding")
+	w.gz = gzip.NewWriter(w.ResponseWriter)
+	w.forwardHeader()
+}
+
+// Flush forwards flushes through the gzip stream and the underlying writer so
+// streaming handlers keep working.
+func (w *gzipResponseWriter) Flush() {
+	if w.gz != nil {
+		w.gz.Flush()
+	} else if !w.passthrough && !w.headerSent {
+		// Headers are being flushed before any body bytes: compressing now
+		// would violate header ordering, so serve this response uncompressed.
+		w.passthrough = true
+		w.forwardHeader()
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// Hijack passes the connection through so WebSocket upgrades keep working.
+func (w *gzipResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("underlying ResponseWriter does not implement http.Hijacker")
+	}
+	return hj.Hijack()
+}
+
+func (w *gzipResponseWriter) close() {
+	if w.gz != nil {
+		_ = w.gz.Close()
+		return
+	}
+	if !w.headerSent {
+		w.forwardHeader()
+	}
+}
+
+// compressibleContentType reports whether a response Content-Type is worth
+// gzip compression.
+func compressibleContentType(contentType string) bool {
+	mimeType := contentType
+	if idx := strings.IndexByte(mimeType, ';'); idx != -1 {
+		mimeType = mimeType[:idx]
+	}
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	switch mimeType {
+	case "application/json",
+		"application/javascript",
+		"text/javascript",
+		"text/css",
+		"text/html",
+		"application/openmetrics-text":
+		return true
+	}
+	return strings.HasPrefix(mimeType, "text/")
 }
 
 func corsMiddleware(corsOrigin string) func(http.Handler) http.Handler {
