@@ -1,8 +1,8 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@/features/sessions'
-import { roomKeys, useStartRoomMutation } from './room.queries'
+import { roomKeys, useRoomQuery, useRoomsQuery, useStartRoomMutation } from './room.queries'
 
 function makeQueryClient() {
   return new QueryClient({
@@ -10,12 +10,16 @@ function makeQueryClient() {
   })
 }
 
-function renderMutation(queryClient: QueryClient) {
-  return renderHook(() => useStartRoomMutation(), {
+function renderQuery<TResult>(hook: () => TResult, queryClient: QueryClient) {
+  return renderHook(hook, {
     wrapper: ({ children }) => (
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     ),
   })
+}
+
+function renderMutation(queryClient: QueryClient) {
+  return renderQuery(() => useStartRoomMutation(), queryClient)
 }
 
 describe('useStartRoomMutation', () => {
@@ -82,4 +86,86 @@ describe('useStartRoomMutation', () => {
     const init = fetchMock.mock.calls[0]?.[1]
     expect(JSON.parse(String(init?.body))).toEqual({ session_id: 'session-1' })
   })
+})
+
+describe('useRoomsQuery', () => {
+  it('parses the list with the summary schema and strips qr_url', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({
+        success: true,
+        data: [
+          { room_id: 'room-1', status: 'Running', qr_url: 'data:image/png;base64,abc', name: 'Room A' },
+          { room_id: 'room-2', status: 'Ended', qr_url: 'data:image/png;base64,def' },
+        ],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    const queryClient = makeQueryClient()
+    const { result } = renderQuery(() => useRoomsQuery(), queryClient)
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/rooms?lite=true', expect.anything())
+    const rooms = result.current.data
+    expect(rooms).toHaveLength(2)
+    for (const room of rooms ?? []) {
+      expect(room).not.toHaveProperty('qr_url')
+    }
+  })
+})
+
+describe('useRoomQuery', () => {
+  it('parses qr_url from the detail response', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({
+        success: true,
+        data: {
+          room_id: 'room-1',
+          status: 'Running',
+          qr_url: 'data:image/png;base64,abc',
+          warning_message: 'expiring soon',
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    const queryClient = makeQueryClient()
+    const { result } = renderQuery(() => useRoomQuery('room-1', true), queryClient)
+
+    await waitFor(() => expect(result.current.data?.qr_url).toBe('data:image/png;base64,abc'))
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/rooms/room-1', expect.anything())
+    expect(result.current.data).toMatchObject({ warning_message: 'expiring soon' })
+  })
+
+  it('stops polling once qr_url arrives', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({
+        success: true,
+        data: { room_id: 'room-1', status: 'Running', qr_url: 'data:image/png;base64,abc' },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    const queryClient = makeQueryClient()
+    const { result } = renderQuery(() => useRoomQuery('room-1', true), queryClient)
+
+    // Flush the microtask chain that resolves the mocked fetch and setData.
+    await act(async () => {
+      for (let i = 0; i < 5; i++) {
+        await vi.advanceTimersByTimeAsync(0)
+      }
+    })
+
+    expect(result.current.data?.qr_url).toBe('data:image/png;base64,abc')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    act(() => {
+      vi.advanceTimersByTime(10_000)
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+afterEach(() => {
+  vi.useRealTimers()
 })

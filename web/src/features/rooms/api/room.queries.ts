@@ -3,10 +3,10 @@ import { apiClient } from '@/shared/api/api-client'
 import { endpoints } from '@/shared/api/endpoints'
 import type { SessionId } from '@/features/sessions'
 import {
-  roomSchema,
-  roomsSchema,
+  roomDetailSchema,
+  roomSummariesSchema,
   startSessionRoomSchema,
-  type Room,
+  type RoomDetail,
 } from './room.schemas'
 
 export const roomKeys = {
@@ -17,7 +17,7 @@ export const roomKeys = {
 export function useRoomsQuery() {
   return useQuery({
     queryKey: roomKeys.all,
-    queryFn: ({ signal }) => apiClient.get(endpoints.rooms, { schema: roomsSchema, signal }),
+    queryFn: ({ signal }) => apiClient.get(endpoints.rooms, { schema: roomSummariesSchema, signal }),
   })
 }
 
@@ -25,7 +25,7 @@ export function useRoomQuery(roomId: string | undefined, enabled: boolean) {
   return useQuery({
     queryKey: roomKeys.detail(roomId ?? ''),
     queryFn: ({ signal }) =>
-      apiClient.get(endpoints.room(roomId ?? ''), { schema: roomSchema, signal }),
+      apiClient.get(endpoints.room(roomId ?? ''), { schema: roomDetailSchema, signal }),
     enabled: enabled && roomId !== undefined,
     refetchInterval: (query) => {
       if (query.state.data?.qr_url) {
@@ -61,10 +61,10 @@ export function useStartRoomMutation() {
         schema: startSessionRoomSchema,
       })
       if ('qr_url' in result) {
-        queryClient.setQueryData<Room>(roomKeys.detail(result.room_id), result)
+        queryClient.setQueryData<RoomDetail>(roomKeys.detail(result.room_id), result)
         return { roomId: result.room_id, starting: false }
       }
-      queryClient.setQueryData<Room>(roomKeys.detail(result.room_id), {
+      queryClient.setQueryData<RoomDetail>(roomKeys.detail(result.room_id), {
         room_id: result.room_id,
         status: 'starting',
       })
