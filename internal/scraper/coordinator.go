@@ -186,11 +186,14 @@ func (c *Coordinator) RunClaimedWithRelease(
 		rawHashUnchanged := prevErr == nil &&
 			prev.RawBodyHash != "" &&
 			fetchResult.Metadata.RawBodyHash == prev.RawBodyHash &&
-			prev.ParserVersion == ParserVersion
+			prev.ParserVersion == ParserVersion &&
+			fetchResult.FetchedPages <= 1
 		if rawHashUnchanged {
 			// Byte-identical body with an unchanged parser: the canonical
 			// payload cannot have changed, so skip parse/validate/classify
-			// entirely and commit the unchanged outcome.
+			// entirely and commit the unchanged outcome. Single-page only:
+			// for multi-page fetches the raw hash covers just the first
+			// page, so later pages may still differ.
 			outcome = "unchanged"
 		} else {
 			var canonicalErr error
@@ -249,6 +252,7 @@ func (c *Coordinator) RunClaimedWithRelease(
 							contentHash,
 							recordsCount,
 							fetchResult.Metadata.RawBodyHash,
+							fetchResult.FetchedPages,
 						)
 						if !confirmed {
 							outcome = "quarantined"
@@ -787,13 +791,17 @@ func safeUpstreamError(err error) string {
 // evidence so the caller can persist both candidates under one group. When
 // the second fetch has the same raw body hash but canonicalizes differently,
 // the parser itself is nondeterministic and the mismatch is attributed to
-// that instead of a genuine upstream change.
+// that instead of a genuine upstream change. This attribution only holds for
+// single-page fetches: a multi-page fetch's raw hash covers just its first
+// page, so identical raw hashes with different canonical payloads can still
+// be a genuine change on a later page.
 func (c *Coordinator) confirmChange(
 	ctx context.Context,
 	target domain.ScrapeTarget,
 	firstHash [32]byte,
 	firstCount int,
 	firstRawHash string,
+	firstFetchedPages int,
 ) (bool, string, *domain.ScrapeCandidate) {
 	source, ok := c.source.(ConfirmationSource)
 	if !ok {
@@ -820,7 +828,9 @@ func (c *Coordinator) confirmChange(
 	message := "independent confirmation fetch did not match the original candidate"
 	if second.Metadata.RawBodyHash != "" &&
 		second.Metadata.RawBodyHash == firstRawHash &&
-		secondHash != firstHash {
+		secondHash != firstHash &&
+		firstFetchedPages <= 1 &&
+		second.FetchedPages <= 1 {
 		rejectionCode = "confirmation_parser_nondeterminism"
 		message = "confirmation fetch had identical raw bytes but canonicalized to a different hash"
 	}

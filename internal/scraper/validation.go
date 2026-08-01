@@ -330,6 +330,12 @@ func ClassifyChangeAgainst(
 
 	if previousCount >= policy.MinimumPreviousCount && len(previousIDs) > 0 {
 		currentIDs := validatedIDs(validated)
+		if currentIDs == nil {
+			// The candidate's ID set cannot be decoded (unrecognized shape
+			// or missing raw value): treat every previous ID as missing
+			// would be a false permanent suspicion, so skip the rule.
+			return result
+		}
 		missing := 0
 		for id := range previousIDs {
 			if _, present := currentIDs[id]; !present {

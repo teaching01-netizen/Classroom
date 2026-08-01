@@ -679,6 +679,46 @@ func TestCoordinatorRawHashFastPathSkipsParseAndCommitsUnchanged(t *testing.T) {
 	require.Equal(t, rawHash, candidate.RawBodyHash)
 }
 
+func TestCoordinatorRawHashFastPathSkipsMultiPageFetches(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	rawHash := strings.Repeat("ab", 32)
+	value := []domain.CourseSummary{{
+		CourseID: "a", Name: "Alpha", Status: domain.CourseStatusActive,
+	}}
+	source := &coordinatorSource{result: warwick.SnapshotFetchResult{
+		Value: value,
+		Metadata: warwick.ResponseMetadata{
+			StatusCode:  200,
+			RawBodyHash: rawHash,
+		},
+		BytesRead:    100,
+		FetchedPages: 2,
+	}}
+	store := &coordinatorStore{current: domain.Snapshot{
+		Version:       1,
+		ParserVersion: ParserVersion,
+		RawBodyHash:   rawHash,
+		Payload:       json.RawMessage(`[{"course_id":"a"}]`),
+	}}
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target.HasCurrentSnapshot = true
+	target.CurrentVersion = 1
+	target.ValidationSeq = 1
+	coordinator := newCoordinatorForTest(source, store, &coordinatorObserver{}, now)
+
+	// A multi-page fetch's raw hash covers only page 0, so equal raw hashes
+	// do not prove the whole dataset is unchanged: the run must take the
+	// normal parse path and detect the change.
+	result, err := coordinator.RunClaimed(context.Background(), target)
+	require.NoError(t, err)
+	require.Equal(t, "changed", result.Outcome)
+	require.True(t, result.Changed)
+	require.Len(t, store.inputs, 1)
+	require.True(t, store.inputs[0].Changed)
+	require.NotNil(t, store.inputs[0].Payload)
+	require.Equal(t, 1, store.inputs[0].RecordsCount)
+}
+
 func TestCoordinatorRawHashDiffersTakesNormalParsePath(t *testing.T) {
 	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
 	value := []domain.CourseSummary{{
@@ -808,6 +848,64 @@ func TestCoordinatorConfirmationSameRawDifferentCanonicalQuarantinesNondetermini
 		require.Len(t, candidate.CanonicalHash, 64)
 	}
 	require.Equal(t, "confirmation_parser_nondeterminism", store.inputs[0].LastRejectionCode)
+}
+
+func TestCoordinatorMultiPageConfirmationSameRawDifferentCanonicalIsMismatch(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	smallCatalog := []domain.CourseSummary{
+		{CourseID: "course-a", Name: "Course A", Status: domain.CourseStatusActive},
+		{CourseID: "course-b", Name: "Course B", Status: domain.CourseStatusActive},
+	}
+	differentCatalog := []domain.CourseSummary{
+		{CourseID: "course-x", Name: "Course X", Status: domain.CourseStatusActive},
+		{CourseID: "course-y", Name: "Course Y", Status: domain.CourseStatusActive},
+	}
+	rawHash := strings.Repeat("A", 64)
+	source := &coordinatorConfirmingSource{
+		coordinatorSource: coordinatorSource{result: warwick.SnapshotFetchResult{
+			Value: smallCatalog,
+			Metadata: warwick.ResponseMetadata{
+				StatusCode:  200,
+				RawBodyHash: rawHash,
+			},
+			BytesRead:    100,
+			FetchedPages: 2,
+		}},
+		confirmation: warwick.SnapshotFetchResult{
+			Value: differentCatalog,
+			Metadata: warwick.ResponseMetadata{
+				StatusCode:  200,
+				RawBodyHash: rawHash,
+			},
+			BytesRead:    100,
+			FetchedPages: 2,
+		},
+	}
+	store := &coordinatorStore{}
+	coordinator := newCoordinatorForTestAny(source, store, &coordinatorObserver{}, now)
+
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target.HasCurrentSnapshot = true
+	target.CurrentVersion = 1
+	target.ValidationSeq = 1
+	target.PreviousRecordCount = 50
+
+	// Multi-page fetches share only page-0 raw bytes, so equal raw hashes
+	// with different canonical payloads are a plain confirmation mismatch,
+	// not parser nondeterminism.
+	result, err := coordinator.RunClaimed(context.Background(), target)
+	require.NoError(t, err)
+	require.Equal(t, "quarantined", result.Outcome)
+	require.False(t, result.Changed)
+	require.Equal(t, 1, source.confirmCalls)
+	require.Len(t, store.inputs, 1)
+	require.Len(t, store.inputs[0].Candidates, 2)
+	for _, candidate := range store.inputs[0].Candidates {
+		require.Equal(t, domain.CandidateQuarantinedAnomaly, candidate.Disposition)
+		require.Equal(t, "confirmation_mismatch", candidate.RejectionCode)
+		require.Len(t, candidate.CanonicalHash, 64)
+	}
+	require.Equal(t, "confirmation_mismatch", store.inputs[0].LastRejectionCode)
 }
 
 func TestCoordinatorReconcileLifecycleCalledAfterSuccessfulCommit(t *testing.T) {

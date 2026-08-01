@@ -283,6 +283,25 @@ func TestClassifyChangeAgainstNilIDsBehavesLikeClassifyChange(t *testing.T) {
 	require.Equal(t, "suspicious", result.Status)
 }
 
+func TestClassifyChangeAgainstNilCurrentIDsSkipsMissingIDRule(t *testing.T) {
+	policy := DefaultChangeSafetyPolicy()
+	previousIDs := make(map[string]struct{})
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"} {
+		previousIDs[id] = struct{}{}
+	}
+	// The candidate's current ID set cannot be decoded (unrecognized shape),
+	// so the missing-ID rule must be skipped rather than report every
+	// previous ID as missing (ratio 1.0) and flag permanent suspicion.
+	validated := &ValidatedPayload{
+		Kind:        domain.SnapshotCourseCatalog,
+		RecordCount: 10,
+		Raw:         "unrecognized shape",
+	}
+	result := ClassifyChangeAgainst(policy, validated, 10, previousIDs)
+	require.Equal(t, "changed", result.Status)
+	require.InDelta(t, 0.0, result.DropRatio, 0.001)
+}
+
 func TestValidateUnsupportedKind(t *testing.T) {
 	_, err := ValidatePayload("unknown_kind", "data", "")
 	require.Error(t, err)
