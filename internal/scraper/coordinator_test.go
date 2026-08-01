@@ -52,6 +52,30 @@ func (s *coordinatorConfirmingSource) FetchConfirmation(
 	return s.confirmation, s.confirmErr
 }
 
+// eventRecordingSource wraps a confirming source and appends named events to
+// a shared slice so tests can assert cross-component ordering (first fetch,
+// confirmation fetch, permit release).
+type eventRecordingSource struct {
+	coordinatorConfirmingSource
+	events *[]string
+}
+
+func (s *eventRecordingSource) Fetch(
+	ctx context.Context,
+	target domain.ScrapeTarget,
+) (warwick.SnapshotFetchResult, error) {
+	*s.events = append(*s.events, "fetch")
+	return s.coordinatorConfirmingSource.Fetch(ctx, target)
+}
+
+func (s *eventRecordingSource) FetchConfirmation(
+	ctx context.Context,
+	target domain.ScrapeTarget,
+) (warwick.SnapshotFetchResult, error) {
+	*s.events = append(*s.events, "confirm-fetch")
+	return s.coordinatorConfirmingSource.FetchConfirmation(ctx, target)
+}
+
 type coordinatorStore struct {
 	inputs                []db.CommitInput
 	releases              []db.ReleaseLeaseRequest
@@ -294,7 +318,7 @@ func TestCoordinatorPropagatesLeaseLoss(t *testing.T) {
 	require.ErrorIs(t, err, domain.ErrLeaseLost)
 }
 
-func TestCoordinatorReleasesPermitHookBeforeCanonicalizationAndCommit(t *testing.T) {
+func TestCoordinatorReleasesPermitHookAtEndOfRun(t *testing.T) {
 	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
 	source := &coordinatorSource{result: warwick.SnapshotFetchResult{Value: "wrong type"}}
 	store := &coordinatorStore{}
@@ -311,6 +335,77 @@ func TestCoordinatorReleasesPermitHookBeforeCanonicalizationAndCommit(t *testing
 	require.True(t, released)
 	require.Len(t, store.inputs, 1)
 	require.Equal(t, "invalid_payload", store.inputs[0].Outcome)
+}
+
+func TestCoordinatorReleaseAfterFetchFiresAfterConfirmationFetch(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	smallCatalog := []domain.CourseSummary{
+		{CourseID: "course-a", Name: "Course A", Status: domain.CourseStatusActive},
+		{CourseID: "course-b", Name: "Course B", Status: domain.CourseStatusActive},
+	}
+	var events []string
+	source := &eventRecordingSource{
+		coordinatorConfirmingSource: coordinatorConfirmingSource{
+			coordinatorSource: coordinatorSource{result: warwick.SnapshotFetchResult{
+				Value: smallCatalog,
+				Metadata: warwick.ResponseMetadata{
+					StatusCode:  200,
+					RawBodyHash: strings.Repeat("A", 64),
+				},
+				BytesRead: 100,
+			}},
+			confirmation: warwick.SnapshotFetchResult{
+				Value: smallCatalog,
+				Metadata: warwick.ResponseMetadata{
+					StatusCode:  200,
+					RawBodyHash: strings.Repeat("A", 64),
+				},
+				BytesRead: 100,
+			},
+		},
+		events: &events,
+	}
+	store := &coordinatorStore{}
+	coordinator := newCoordinatorForTestAny(source, store, &coordinatorObserver{}, now)
+
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target.HasCurrentSnapshot = true
+	target.CurrentVersion = 1
+	target.ValidationSeq = 1
+	target.PreviousRecordCount = 50
+
+	// The permit hook must stay held through the independent confirmation
+	// fetch, so the release event lands last, after both fetches.
+	result, err := coordinator.RunClaimedWithRelease(
+		context.Background(),
+		target,
+		func() { events = append(events, "release") },
+	)
+	require.NoError(t, err)
+	require.Equal(t, "changed", result.Outcome)
+	require.Equal(t, 1, source.confirmCalls)
+	require.Equal(t, []string{"fetch", "confirm-fetch", "release"}, events)
+}
+
+func TestCoordinatorCanceledFetchReleasesPermitHook(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	source := &coordinatorSource{err: context.Canceled}
+	store := &coordinatorStore{}
+	coordinator := newCoordinatorForTest(source, store, &coordinatorObserver{}, now)
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	released := false
+
+	_, err := coordinator.RunClaimedWithRelease(
+		context.Background(),
+		target,
+		func() { released = true },
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, released)
+	require.Empty(t, store.inputs)
+	require.Equal(t, []db.ReleaseLeaseRequest{{
+		TargetID: target.ID, LeaseGeneration: target.LeaseGeneration,
+	}}, store.releases)
 }
 
 func TestCoordinatorCanceledFetchReleasesLeaseWithoutFailureRun(t *testing.T) {

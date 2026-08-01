@@ -136,13 +136,18 @@ func (c *Coordinator) RunClaimedWithRelease(
 	if err := target.Ref.Validate(); err != nil {
 		return RunResult{}, err
 	}
+	// Hold the host permit for the whole run: the independent confirmation
+	// fetch of a suspicious candidate must run under the same permit as the
+	// original fetch, so release only at exit instead of right after the
+	// first fetch. Deferring covers every return path, including the
+	// canceled-fetch early return.
+	if releaseAfterFetch != nil {
+		defer releaseAfterFetch()
+	}
 	startedAt := c.clock().UTC()
 	fetchCtx, cancel := context.WithTimeout(ctx, c.fetchTimeout)
 	fetchResult, fetchErr := c.source.Fetch(fetchCtx, target)
 	cancel()
-	if releaseAfterFetch != nil {
-		releaseAfterFetch()
-	}
 	finishedAt := c.clock().UTC()
 
 	if canceledFetch(ctx, fetchErr) {
