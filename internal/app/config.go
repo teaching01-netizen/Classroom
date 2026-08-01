@@ -66,6 +66,11 @@ type Config struct {
 	ServerlessEnabled   bool
 	ServerlessIdleGrace time.Duration
 
+	// --- Room retention ---
+	// RoomRetention bounds how long stopped room rows (and their QR records)
+	// are kept. 0 disables the startup retention sweep.
+	RoomRetention time.Duration
+
 	// --- Database ---
 	DatabaseURL string
 
@@ -90,6 +95,13 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	roomRetention, err := strictEnvDuration("ROOM_RETENTION", 168*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	if roomRetention < 0 || roomRetention > 8760*time.Hour {
+		return Config{}, fmt.Errorf("ROOM_RETENTION must be between 0h and 8760h")
+	}
 
 	cfg := Config{
 		Email:                   os.Getenv("WARWICK_EMAIL"),
@@ -105,6 +117,7 @@ func LoadConfig() (Config, error) {
 		CourseDetailConcurrency: getEnvInt("WARWICK_COURSE_DETAIL_CONCURRENCY", 2),
 		ServerlessEnabled:       serverlessEnabled,
 		ServerlessIdleGrace:     serverlessIdleGrace,
+		RoomRetention:           roomRetention,
 		DatabaseURL:             os.Getenv("DATABASE_URL"),
 		Port:                    resolvePort(),
 		WSMaxConns:              int64(getEnvInt("WARWICK_MAX_CONCURRENT_WS", 500)),

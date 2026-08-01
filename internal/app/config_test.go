@@ -25,6 +25,7 @@ var scraperEnvironmentKeys = []string{
 	"SCRAPER_RUN_RETENTION",
 	"SCRAPER_TRIGGER_TOKEN",
 	"SCRAPER_HTTPTRACE_SAMPLE_RATE",
+	"ROOM_RETENTION",
 }
 
 func clearScraperEnvironment(t *testing.T) {
@@ -131,6 +132,40 @@ func TestLoadConfigSnapshotReadsRequireScraper(t *testing.T) {
 	_, err := LoadConfig()
 
 	require.EqualError(t, err, "SNAPSHOT_READS_ENABLED requires SCRAPER_ENABLED")
+}
+
+func TestLoadConfig_RoomRetentionDefaults(t *testing.T) {
+	clearScraperEnvironment(t)
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, 168*time.Hour, cfg.RoomRetention)
+}
+
+func TestLoadConfig_RoomRetentionOverride(t *testing.T) {
+	clearScraperEnvironment(t)
+	t.Setenv("ROOM_RETENTION", "0h")
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, time.Duration(0), cfg.RoomRetention, "0h must disable the retention sweep")
+
+	clearScraperEnvironment(t)
+	t.Setenv("ROOM_RETENTION", "720h")
+	cfg, err = LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, 720*time.Hour, cfg.RoomRetention)
+}
+
+func TestLoadConfig_RoomRetentionRejectsBadValues(t *testing.T) {
+	for _, value := range []string{"later", "-1h", "8761h"} {
+		t.Run(value, func(t *testing.T) {
+			clearScraperEnvironment(t)
+			t.Setenv("ROOM_RETENTION", value)
+			_, err := LoadConfig()
+			require.ErrorContains(t, err, "ROOM_RETENTION")
+		})
+	}
 }
 
 func setServerlessConfigEnv(t *testing.T, enabled, railway, grace string) {

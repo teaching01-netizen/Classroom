@@ -287,7 +287,6 @@ func TestWebSocketRoomDetailStillReturnsQRURLAfterEvent(t *testing.T) {
 	readWebSocketEnvelope(t, ctx, conn) // consume FullStateSync
 	require.NoError(t, rm.StartRoom("r1"))
 	readRoomChangedFrame(t, ctx, conn) // consume the ROOM_CHANGED frame
-	require.NoError(t, rm.StopRoom("r1"))
 
 	cc := warwick.NewClassroomClient(nil)
 	ts := service.NewTeacherService(cc, &stubFetcher{}, 2)
@@ -306,4 +305,7 @@ func TestWebSocketRoomDetailStillReturnsQRURLAfterEvent(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &envelope))
 	require.NotNil(t, envelope.Data.QRURL)
 	assert.Equal(t, qr, *envelope.Data.QRURL)
+
+	// Stopping a room clears its QR payload, so detail no longer serves it.
+	require.NoError(t, rm.StopRoom("r1"))
 }

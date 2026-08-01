@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -16,6 +17,13 @@ type RoomRepository interface {
 	GetAllRooms() ([]domain.Room, error)
 	UpdateRoom(ctx context.Context, room domain.Room) (domain.Room, error)
 	DeleteRoom(roomID string) error
+	// ClearExpiredRoomQRs nulls QR-related fields on rooms whose QR has
+	// expired or that no longer serve one (stopped/idle). now is passed as a
+	// parameter so the behaviour is deterministic and testable.
+	ClearExpiredRoomQRs(ctx context.Context, now time.Time) (int64, error)
+	// DeleteStaleRooms removes stopped room rows that have not been updated
+	// since cutoff.
+	DeleteStaleRooms(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
 type PgRoomRepository struct {
@@ -101,6 +109,37 @@ func (r *PgRoomRepository) DeleteRoom(roomID string) error {
 		return fmt.Errorf("room not found: %s", roomID)
 	}
 	return nil
+}
+
+func (r *PgRoomRepository) ClearExpiredRoomQRs(ctx context.Context, now time.Time) (int64, error) {
+	result, err := r.pool.Exec(ctx,
+		`UPDATE rooms
+		 SET qr_url = NULL, expires_at = NULL
+		 WHERE qr_url IS NOT NULL
+		   AND (
+		       expires_at IS NULL
+		       OR expires_at < $1
+		       OR status IN ('stopped'::room_status, 'idle'::room_status)
+		   )`,
+		now,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("clear expired room QRs: %w", err)
+	}
+	return result.RowsAffected(), nil
+}
+
+func (r *PgRoomRepository) DeleteStaleRooms(ctx context.Context, cutoff time.Time) (int64, error) {
+	result, err := r.pool.Exec(ctx,
+		`DELETE FROM rooms
+		 WHERE status = 'stopped'::room_status
+		   AND last_updated_at < $1`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("delete stale rooms: %w", err)
+	}
+	return result.RowsAffected(), nil
 }
 
 func roomStatusToString(status domain.RoomStatus) string {

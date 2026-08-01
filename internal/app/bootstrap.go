@@ -87,6 +87,29 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 		dbPool.Close()
 		return nil, fmt.Errorf("load rooms from database: %w", err)
 	}
+	// Drop stale QR payloads from memory and storage right after load, in
+	// both serverless and always-on modes, so a cold start never serves (or
+	// re-emits) an expired or terminal room's QR.
+	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 10*time.Second)
+	if err := rm.ClearExpiredQRs(cleanupCtx, time.Now().UTC()); err != nil {
+		cleanupCancel()
+		eventHub.Close()
+		dbPool.Close()
+		return nil, fmt.Errorf("clear expired room QRs: %w", err)
+	}
+	cleanupCancel()
+	// A startup sweep of stopped rooms past the retention window is sufficient
+	// for this release; a periodic retention worker is out of scope.
+	if cfg.RoomRetention > 0 {
+		retentionCtx, retentionCancel := context.WithTimeout(ctx, 10*time.Second)
+		if _, err := rm.RetainRooms(retentionCtx, time.Now().UTC().Add(-cfg.RoomRetention)); err != nil {
+			retentionCancel()
+			eventHub.Close()
+			dbPool.Close()
+			return nil, fmt.Errorf("retain rooms: %w", err)
+		}
+		retentionCancel()
+	}
 	if cfg.ServerlessEnabled {
 		recoveryCtx, recoveryCancel := context.WithTimeout(ctx, 10*time.Second)
 		if err := rm.RecoverLoadedRooms(recoveryCtx); err != nil {

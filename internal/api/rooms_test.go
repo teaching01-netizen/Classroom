@@ -76,6 +76,38 @@ func (r *testRoomRepository) DeleteRoom(roomID string) error {
 	return nil
 }
 
+func (r *testRoomRepository) ClearExpiredRoomQRs(ctx context.Context, now time.Time) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var cleared int64
+	for id, room := range r.rooms {
+		if room.QRURL == nil {
+			continue
+		}
+		if room.ExpiresAt == nil || room.ExpiresAt.Before(now) ||
+			room.Status == domain.Stopped || room.Status == domain.Idle {
+			room.QRURL = nil
+			room.ExpiresAt = nil
+			r.rooms[id] = room
+			cleared++
+		}
+	}
+	return cleared, nil
+}
+
+func (r *testRoomRepository) DeleteStaleRooms(ctx context.Context, cutoff time.Time) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var deleted int64
+	for id, room := range r.rooms {
+		if room.Status == domain.Stopped && room.LastUpdatedAt != nil && room.LastUpdatedAt.Before(cutoff) {
+			delete(r.rooms, id)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
 type testQRClient struct{}
 
 func (testQRClient) FetchQRContext(context.Context, string) (domain.QrResponse, error) {

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -179,4 +180,102 @@ func TestRoomEventsUseSummaries(t *testing.T) {
 
 	// Stop the started room so its worker goroutine exits.
 	require.NoError(t, rm.StopRoom("room-3"))
+}
+
+func TestStopRoomClearsQRInMemoryAndPersistsClearedValues(t *testing.T) {
+	qr := "data:image/png;base64,QUJD"
+	expiresAt := time.Now().Add(time.Hour)
+	room := domain.Room{
+		RoomID:    "room-1",
+		ClassID:   "class-1",
+		Status:    domain.Running,
+		QRURL:     &qr,
+		ExpiresAt: &expiresAt,
+	}
+	repo := newIdleRoomRepository(room)
+	rm := NewRoomManager(idleQRClient{}, repo)
+	require.NoError(t, rm.LoadRoomsFromDB())
+
+	require.NoError(t, rm.StopRoom("room-1"))
+
+	inMemory := rm.GetRoom("room-1")
+	require.NotNil(t, inMemory)
+	require.Equal(t, domain.Stopped, inMemory.Status)
+	require.Nil(t, inMemory.QRURL, "stopping a room must clear QRURL in memory")
+	require.Nil(t, inMemory.ExpiresAt, "stopping a room must clear ExpiresAt in memory")
+
+	// persistRoomUpdate writes asynchronously; wait for the cleared values.
+	require.Eventually(t, func() bool {
+		persisted, err := repo.GetRoom("room-1")
+		return err == nil && persisted.QRURL == nil && persisted.ExpiresAt == nil
+	}, time.Second, 5*time.Millisecond)
+	persisted, err := repo.GetRoom("room-1")
+	require.NoError(t, err)
+	require.Nil(t, persisted.QRURL, "stopping a room must persist the cleared QRURL")
+	require.Nil(t, persisted.ExpiresAt, "stopping a room must persist the cleared ExpiresAt")
+}
+
+func TestClearExpiredQRsClearsOnlyMatchingRooms(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+	qr := "data:image/png;base64,QUJD"
+
+	repo := newIdleRoomRepository(
+		domain.Room{RoomID: "expired", ClassID: "c1", Status: domain.Running, QRURL: &qr, ExpiresAt: &past},
+		domain.Room{RoomID: "future", ClassID: "c1", Status: domain.Running, QRURL: &qr, ExpiresAt: &future},
+		domain.Room{RoomID: "stopped", ClassID: "c1", Status: domain.Stopped, QRURL: &qr, ExpiresAt: &future},
+		domain.Room{RoomID: "idle", ClassID: "c1", Status: domain.Idle, QRURL: &qr, ExpiresAt: &future},
+	)
+	rm := NewRoomManager(idleQRClient{}, repo)
+	require.NoError(t, rm.LoadRoomsFromDB())
+
+	require.NoError(t, rm.ClearExpiredQRs(context.Background(), now))
+
+	// Expired and terminal rooms are cleared; the future-QR room is untouched.
+	for _, id := range []string{"expired", "stopped", "idle"} {
+		room := rm.GetRoom(id)
+		require.NotNil(t, room)
+		assert.Nil(t, room.QRURL, "room %s QRURL must be cleared in memory", id)
+		assert.Nil(t, room.ExpiresAt, "room %s ExpiresAt must be cleared in memory", id)
+	}
+	futureRoom := rm.GetRoom("future")
+	require.NotNil(t, futureRoom.QRURL)
+	require.NotNil(t, futureRoom.ExpiresAt)
+
+	// The cleared state must have been persisted to the repository.
+	persistedExpired, err := repo.GetRoom("expired")
+	require.NoError(t, err)
+	require.Nil(t, persistedExpired.QRURL)
+	require.Nil(t, persistedExpired.ExpiresAt)
+	persistedFuture, err := repo.GetRoom("future")
+	require.NoError(t, err)
+	require.NotNil(t, persistedFuture.QRURL)
+	require.NotNil(t, persistedFuture.ExpiresAt)
+}
+
+func TestRetainRoomsDeletesOnlyStaleStoppedRooms(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-168 * time.Hour)
+	old := now.Add(-200 * time.Hour)
+	recent := now.Add(-time.Hour)
+
+	repo := newIdleRoomRepository(
+		domain.Room{RoomID: "old-stopped", ClassID: "c1", Status: domain.Stopped, LastUpdatedAt: &old},
+		domain.Room{RoomID: "recent-stopped", ClassID: "c1", Status: domain.Stopped, LastUpdatedAt: &recent},
+		domain.Room{RoomID: "old-running", ClassID: "c1", Status: domain.Running, LastUpdatedAt: &old},
+	)
+	rm := NewRoomManager(idleQRClient{}, repo)
+	require.NoError(t, rm.LoadRoomsFromDB())
+
+	deleted, err := rm.RetainRooms(context.Background(), cutoff)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), deleted)
+
+	_, err = repo.GetRoom("old-stopped")
+	require.Error(t, err, "stopped room older than the cutoff must be deleted")
+	_, err = repo.GetRoom("recent-stopped")
+	require.NoError(t, err, "recently updated stopped room must be kept")
+	_, err = repo.GetRoom("old-running")
+	require.NoError(t, err, "non-stopped room must be kept regardless of age")
 }
