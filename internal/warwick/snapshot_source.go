@@ -15,6 +15,7 @@ import (
 	"mime"
 	"net/http"
 	"net/http/httptrace"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,10 +25,11 @@ import (
 )
 
 const (
-	profilePageSize      = 500
-	maxProfileRecords    = 100_000
-	errorBodyDrainLimit  = 4 << 10
-	sessionAcquireBudget = 5 * time.Second
+	profilePageSize        = 500
+	profilePageConcurrency = 4
+	maxProfileRecords      = 100_000
+	errorBodyDrainLimit    = 4 << 10
+	sessionAcquireBudget   = 5 * time.Second
 )
 
 type ResponseMetadata struct {
@@ -602,100 +604,237 @@ func (s *SnapshotSource) fetchProfiles(
 	ctx context.Context,
 	cookie string,
 ) (SnapshotFetchResult, error) {
-	profiles := make([]domain.StudentProfile, 0)
-	seenStudentIDs := make(map[string]struct{})
-	seenStudentGUIDs := make(map[string]struct{})
-	var totalBytes int64
-	var firstMetadata ResponseMetadata
-	fetchedPages := 0
-	total := -1
-	for start := 0; total < 0 || start < total; start += profilePageSize {
-		fetchedPages++
+	fetchPage := func(callCtx context.Context, start int) (UserGroupSearchResponse, ResponseMetadata, int64, error) {
 		request := DefaultDataTablesRequest([]string{"StudentID", "StudentGuid", "FullName", "School"})
 		request.Start = start
 		request.Length = profilePageSize
 		body := EncodeDataTablesBody(request, map[string]string{"keyword": "", "IsActive": ""})
 		var response UserGroupSearchResponse
 		metadata, bytesRead, err := s.requestJSON(
-			ctx,
+			callCtx,
 			cookie,
 			"/admin/api/UserGroupSearch",
 			body,
 			nil,
 			&response,
 		)
-		totalBytes += bytesRead
-		if start == 0 {
-			firstMetadata = metadata
-			firstMetadata.ETag = ""
-			firstMetadata.LastModified = ""
-			firstMetadata.CacheControl = ""
+		return response, metadata, bytesRead, err
+	}
+
+	profiles := make([]domain.StudentProfile, 0)
+	seenStudentIDs := make(map[string]struct{})
+	seenStudentGUIDs := make(map[string]struct{})
+	var totalBytes int64
+	var firstMetadata ResponseMetadata
+
+	// Page 0 also reports the filtered total that sizes the rest of the set.
+	page, metadata, bytesRead, err := fetchPage(ctx, 0)
+	totalBytes += bytesRead
+	firstMetadata = metadata
+	firstMetadata.ETag = ""
+	firstMetadata.LastModified = ""
+	firstMetadata.CacheControl = ""
+	if err != nil {
+		return SnapshotFetchResult{Metadata: metadata, BytesRead: totalBytes}, err
+	}
+	if err := validateProfileRecordCounts(page); err != nil {
+		return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes}, err
+	}
+	total := page.RecordsFiltered
+	expectedPages := (total + profilePageSize - 1) / profilePageSize
+	firstPageFingerprint := profilePageFingerprint(page.Data)
+	if err := validateProfilePageRows(page, total, 0); err != nil {
+		return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes}, err
+	}
+	profiles, err = mergeProfileRows(profiles, seenStudentIDs, seenStudentGUIDs, page.Data)
+	if err != nil {
+		return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes}, err
+	}
+	fetchedPages := 1
+
+	if expectedPages > 1 {
+		// The rest of the set runs concurrently, then page 0 is refetched to
+		// prove the pagination set did not shift underneath us.
+		remaining := expectedPages - 1
+		fetchCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		starts := make(chan int, remaining)
+		for pageIndex := 1; pageIndex < expectedPages; pageIndex++ {
+			starts <- pageIndex * profilePageSize
 		}
+		close(starts)
+
+		type pageResult struct {
+			page     UserGroupSearchResponse
+			metadata ResponseMetadata
+			bytes    int64
+		}
+		results := make([]pageResult, remaining)
+		var resultMu sync.Mutex
+		var firstErr error
+		var firstErrMetadata ResponseMetadata
+		var pages sync.WaitGroup
+		workers := profilePageConcurrency
+		if workers > remaining {
+			workers = remaining
+		}
+		for range workers {
+			pages.Add(1)
+			go func() {
+				defer pages.Done()
+				for start := range starts {
+					if fetchCtx.Err() != nil {
+						return
+					}
+					page, metadata, bytesRead, err := fetchPage(fetchCtx, start)
+					resultMu.Lock()
+					results[start/profilePageSize-1] = pageResult{
+						page:     page,
+						metadata: metadata,
+						bytes:    bytesRead,
+					}
+					if firstErr == nil && err != nil {
+						firstErr = err
+						firstErrMetadata = metadata
+						cancel()
+					}
+					resultMu.Unlock()
+				}
+			}()
+		}
+		pages.Wait()
+		for _, result := range results {
+			totalBytes += result.bytes
+		}
+		if firstErr != nil {
+			return SnapshotFetchResult{Metadata: firstErrMetadata, BytesRead: totalBytes}, firstErr
+		}
+		for index, result := range results {
+			if err := validateProfileRecordCounts(result.page); err != nil {
+				return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes}, err
+			}
+			if result.page.RecordsFiltered != total {
+				return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes},
+					domain.NewInvalidPayloadError("UserGroupSearch record count changed during pagination")
+			}
+			start := (index + 1) * profilePageSize
+			if err := validateProfilePageRows(result.page, total, start); err != nil {
+				return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes}, err
+			}
+			profiles, err = mergeProfileRows(profiles, seenStudentIDs, seenStudentGUIDs, result.page.Data)
+			if err != nil {
+				return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes}, err
+			}
+		}
+		fetchedPages += remaining
+
+		// Refetch page 0: identical total plus an identical first-page
+		// fingerprint prove the set was stable across the parallel window.
+		refetch, refetchMetadata, refetchBytes, err := fetchPage(ctx, 0)
+		totalBytes += refetchBytes
 		if err != nil {
-			return SnapshotFetchResult{Metadata: metadata, BytesRead: totalBytes}, err
+			return SnapshotFetchResult{Metadata: refetchMetadata, BytesRead: totalBytes}, err
 		}
-		if response.RecordsTotal < 0 ||
-			response.RecordsFiltered < 0 ||
-			response.RecordsFiltered > response.RecordsTotal ||
-			response.RecordsFiltered > maxProfileRecords {
+		if err := validateProfileRecordCounts(refetch); err != nil {
+			return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes}, err
+		}
+		if refetch.RecordsFiltered != total ||
+			len(refetch.Data) != expectedProfilePageRows(total, 0) ||
+			profilePageFingerprint(refetch.Data) != firstPageFingerprint {
 			return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes},
-				domain.NewInvalidPayloadError("UserGroupSearch record count outside supported range")
+				domain.NewInvalidPayloadError("UserGroupSearch pagination set was unstable")
 		}
-		if total < 0 {
-			total = response.RecordsFiltered
-		} else if response.RecordsFiltered != total {
-			return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes},
-				domain.NewInvalidPayloadError("UserGroupSearch record count changed during pagination")
-		}
-		expectedRows := total - start
-		if expectedRows > profilePageSize {
-			expectedRows = profilePageSize
-		}
-		if expectedRows < 0 || len(response.Data) != expectedRows {
-			return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes},
-				domain.NewInvalidPayloadError("UserGroupSearch returned an incomplete page")
-		}
-		for _, row := range response.Data {
-			studentID := strings.TrimSpace(row.StudentID)
-			if err := recordUniqueIdentifier(
-				seenStudentIDs,
-				studentID,
-				"UserGroupSearch",
-				"student",
-			); err != nil {
-				return SnapshotFetchResult{
-					Metadata:  firstMetadata,
-					BytesRead: totalBytes,
-				}, err
-			}
-			studentGUID := strings.TrimSpace(row.StudentGuid)
-			if err := recordUniqueIdentifier(
-				seenStudentGUIDs,
-				studentGUID,
-				"UserGroupSearch",
-				"student GUID",
-			); err != nil {
-				return SnapshotFetchResult{
-					Metadata:  firstMetadata,
-					BytesRead: totalBytes,
-				}, err
-			}
-			profiles = append(profiles, domain.StudentProfile{
-				StudentID:   studentID,
-				StudentGuid: studentGUID,
-				FullName:    row.FullName,
-				School:      row.School,
-			})
-		}
+		fetchedPages++
+	}
+
+	if len(profiles) != total {
+		return SnapshotFetchResult{Metadata: firstMetadata, BytesRead: totalBytes},
+			domain.NewInvalidPayloadError("UserGroupSearch parsed count differs from reported count")
 	}
 	return SnapshotFetchResult{
 		Value:         profiles,
 		Metadata:      firstMetadata,
 		BytesRead:     totalBytes,
 		ReportedCount: total,
-		ExpectedPages: (total + profilePageSize - 1) / profilePageSize,
+		ExpectedPages: expectedPages,
 		FetchedPages:  fetchedPages,
 	}, nil
+}
+
+func expectedProfilePageRows(total int, start int) int {
+	expectedRows := total - start
+	if expectedRows > profilePageSize {
+		expectedRows = profilePageSize
+	}
+	return expectedRows
+}
+
+func validateProfileRecordCounts(response UserGroupSearchResponse) error {
+	if response.RecordsTotal < 0 ||
+		response.RecordsFiltered < 0 ||
+		response.RecordsFiltered > response.RecordsTotal ||
+		response.RecordsFiltered > maxProfileRecords {
+		return domain.NewInvalidPayloadError("UserGroupSearch record count outside supported range")
+	}
+	return nil
+}
+
+func validateProfilePageRows(response UserGroupSearchResponse, total int, start int) error {
+	if expected := expectedProfilePageRows(total, start); expected < 0 || len(response.Data) != expected {
+		return domain.NewInvalidPayloadError("UserGroupSearch returned an incomplete page")
+	}
+	return nil
+}
+
+// mergeProfileRows appends rows to profiles while enforcing the stable-key
+// uniqueness contract (StudentID and StudentGuid) across the whole set.
+func mergeProfileRows(
+	profiles []domain.StudentProfile,
+	seenStudentIDs map[string]struct{},
+	seenStudentGUIDs map[string]struct{},
+	rows []UserGroupRow,
+) ([]domain.StudentProfile, error) {
+	for _, row := range rows {
+		studentID := strings.TrimSpace(row.StudentID)
+		if err := recordUniqueIdentifier(
+			seenStudentIDs,
+			studentID,
+			"UserGroupSearch",
+			"student",
+		); err != nil {
+			return profiles, err
+		}
+		studentGUID := strings.TrimSpace(row.StudentGuid)
+		if err := recordUniqueIdentifier(
+			seenStudentGUIDs,
+			studentGUID,
+			"UserGroupSearch",
+			"student GUID",
+		); err != nil {
+			return profiles, err
+		}
+		profiles = append(profiles, domain.StudentProfile{
+			StudentID:   studentID,
+			StudentGuid: studentGUID,
+			FullName:    row.FullName,
+			School:      row.School,
+		})
+	}
+	return profiles, nil
+}
+
+// profilePageFingerprint hashes the page's identity pairs so a refetch of
+// page 0 can prove the same rows came back, independent of row ordering.
+func profilePageFingerprint(rows []UserGroupRow) string {
+	identities := make([]string, 0, len(rows))
+	for _, row := range rows {
+		identities = append(identities,
+			strings.TrimSpace(row.StudentID)+"|"+strings.TrimSpace(row.StudentGuid))
+	}
+	sort.Strings(identities)
+	sum := sha256.Sum256([]byte(strings.Join(identities, "\n")))
+	return hex.EncodeToString(sum[:])
 }
 
 func requiredDataTableIdentifier(value any, endpoint string, field string) (string, error) {

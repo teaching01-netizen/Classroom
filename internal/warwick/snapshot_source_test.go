@@ -429,7 +429,8 @@ func TestSnapshotSourceProfilesRequireCompleteConsistentPagination(t *testing.T)
 		result, err := source.Fetch(context.Background(), target)
 		require.NoError(t, err)
 		require.Len(t, result.Value.([]domain.StudentProfile), 501)
-		require.Equal(t, int32(2), calls.Load())
+		// Page 0, the parallel page 1, and the page-0 stability refetch.
+		require.Equal(t, int32(3), calls.Load())
 	})
 
 	t.Run("short non-final page", func(t *testing.T) {
@@ -458,6 +459,200 @@ func TestSnapshotSourceProfilesRequireCompleteConsistentPagination(t *testing.T)
 		require.ErrorAs(t, err, &fetchErr)
 		require.Equal(t, domain.ErrKindInvalidPayload, fetchErr.Kind)
 	})
+}
+
+func profilesTarget() domain.ScrapeTarget {
+	return domain.ScrapeTarget{
+		ID: 1,
+		Ref: domain.TargetRef{
+			Host:        "warwick.humantix.cloud",
+			Kind:        domain.SnapshotStudentProfiles,
+			ResourceKey: "profiles",
+		},
+	}
+}
+
+func profileRowsFrom(start, count int) []UserGroupRow {
+	rows := make([]UserGroupRow, count)
+	for index := range rows {
+		id := strconv.Itoa(start + index)
+		rows[index] = UserGroupRow{
+			StudentID:   id,
+			StudentGuid: "guid-" + id,
+			FullName:    "Student",
+			School:      "School",
+		}
+	}
+	return rows
+}
+
+func TestSnapshotSourceProfilesFetchRemainingPagesConcurrently(t *testing.T) {
+	const total = 1500
+	var seenStartsMu sync.Mutex
+	seenStarts := make(map[string]int)
+	nonFirstArrived := make(chan struct{})
+	var arrivedOnce sync.Once
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		start := r.Form.Get("start")
+		seenStartsMu.Lock()
+		seenStarts[start]++
+		seenStartsMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if start != "0" {
+			// Hold every non-first page until both are in flight: a
+			// sequential fetcher can never reach this rendezvous.
+			seenStartsMu.Lock()
+			distinct := 0
+			for seen := range seenStarts {
+				if seen != "0" {
+					distinct++
+				}
+			}
+			seenStartsMu.Unlock()
+			if distinct >= 2 {
+				arrivedOnce.Do(func() { close(nonFirstArrived) })
+			}
+			<-release
+		}
+		startValue, err := strconv.Atoi(start)
+		require.NoError(t, err)
+		count := total - startValue
+		if count > profilePageSize {
+			count = profilePageSize
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(UserGroupSearchResponse{
+			Draw:            1,
+			RecordsTotal:    total,
+			RecordsFiltered: total,
+			Data:            profileRowsFrom(startValue, count),
+		}))
+	}))
+	defer server.Close()
+	source := snapshotTestClient(server, 1<<20)
+
+	concurrent := make(chan bool, 1)
+	go func() {
+		select {
+		case <-nonFirstArrived:
+			concurrent <- true
+		case <-time.After(5 * time.Second):
+			concurrent <- false
+		}
+		releaseOnce.Do(func() { close(release) })
+	}()
+
+	result, err := source.Fetch(context.Background(), profilesTarget())
+	require.NoError(t, err)
+	profiles := result.Value.([]domain.StudentProfile)
+	require.Len(t, profiles, total)
+	require.True(t, <-concurrent, "non-first pages were not fetched concurrently")
+
+	seenStartsMu.Lock()
+	defer seenStartsMu.Unlock()
+	require.Equal(t, 2, seenStarts["0"], "page 0 is fetched once and then refetched for stability")
+	require.Equal(t, 1, seenStarts["500"])
+	require.Equal(t, 1, seenStarts["1000"])
+	require.Equal(t, total, result.ReportedCount)
+	require.Equal(t, 3, result.ExpectedPages)
+	require.Equal(t, 4, result.FetchedPages)
+	require.Equal(t, "0", profiles[0].StudentID)
+	require.Equal(t, "1499", profiles[len(profiles)-1].StudentID)
+}
+
+func TestSnapshotSourceProfilesRejectWrongStartPage(t *testing.T) {
+	// The response shape has no start/length echo, so a page served from the
+	// wrong offset is caught by the cross-page uniqueness contract: the
+	// start=500 request wrongly returns page-0 rows, and merging them into
+	// the set duplicates StudentIDs/GUIDs already seen on page 0.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		start := r.Form.Get("start")
+		w.Header().Set("Content-Type", "application/json")
+		rowStart := 0
+		if start == "500" {
+			rowStart = 0 // wrong: must serve rows [500, 1000)
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(UserGroupSearchResponse{
+			Draw:            1,
+			RecordsTotal:    1000,
+			RecordsFiltered: 1000,
+			Data:            profileRowsFrom(rowStart, profilePageSize),
+		}))
+	}))
+	defer server.Close()
+	source := snapshotTestClient(server, 1<<20)
+
+	_, err := source.Fetch(context.Background(), profilesTarget())
+	var fetchErr *domain.FetchError
+	require.ErrorAs(t, err, &fetchErr)
+	require.Equal(t, domain.ErrKindInvalidPayload, fetchErr.Kind)
+	require.Contains(t, err.Error(), "duplicate student")
+}
+
+func TestSnapshotSourceProfilesRejectTotalChangeOnRefetch(t *testing.T) {
+	var page0Requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		start := r.Form.Get("start")
+		w.Header().Set("Content-Type", "application/json")
+		total := 1000
+		if start == "0" && page0Requests.Add(1) > 1 {
+			total = 1001 // the stability refetch observes a larger set
+		}
+		startValue, err := strconv.Atoi(start)
+		require.NoError(t, err)
+		count := total - startValue
+		if count > profilePageSize {
+			count = profilePageSize
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(UserGroupSearchResponse{
+			Draw:            1,
+			RecordsTotal:    total,
+			RecordsFiltered: total,
+			Data:            profileRowsFrom(startValue, count),
+		}))
+	}))
+	defer server.Close()
+	source := snapshotTestClient(server, 1<<20)
+
+	_, err := source.Fetch(context.Background(), profilesTarget())
+	var fetchErr *domain.FetchError
+	require.ErrorAs(t, err, &fetchErr)
+	require.Equal(t, domain.ErrKindInvalidPayload, fetchErr.Kind)
+	require.Contains(t, err.Error(), "pagination set was unstable")
+}
+
+func TestSnapshotSourceProfilesRejectChangedFirstPageOnRefetch(t *testing.T) {
+	var page0Requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		start := r.Form.Get("start")
+		w.Header().Set("Content-Type", "application/json")
+		startValue, err := strconv.Atoi(start)
+		require.NoError(t, err)
+		if start == "0" && page0Requests.Add(1) > 1 {
+			startValue = 10_000 // same total, different page-0 rows
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(UserGroupSearchResponse{
+			Draw:            1,
+			RecordsTotal:    1000,
+			RecordsFiltered: 1000,
+			Data:            profileRowsFrom(startValue, profilePageSize),
+		}))
+	}))
+	defer server.Close()
+	source := snapshotTestClient(server, 1<<20)
+
+	_, err := source.Fetch(context.Background(), profilesTarget())
+	var fetchErr *domain.FetchError
+	require.ErrorAs(t, err, &fetchErr)
+	require.Equal(t, domain.ErrKindInvalidPayload, fetchErr.Kind)
+	require.Contains(t, err.Error(), "pagination set was unstable")
 }
 
 func TestSnapshotSourceRenewsAuthenticationOnce(t *testing.T) {
