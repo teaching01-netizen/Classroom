@@ -141,14 +141,36 @@ type Room struct {
 
 // RoomLite is a stripped-down version of Room returned when the `lite` query
 // parameter is set. It contains only the fields the frontend needs for
-// auto-start room existence checks, keeping the payload small.
+// auto-start room existence checks, keeping the payload small. QR payloads are
+// intentionally excluded: they are large (base64 PNGs) and only the detail
+// endpoint serves them.
 type RoomLite struct {
 	RoomID    string     `json:"room_id"`
 	ClassID   string     `json:"class_id"`
 	Name      *string    `json:"name"`
 	Status    RoomStatus `json:"status"`
-	QRURL     *string    `json:"qr_url"`
-	ExpiresAt *time.Time `json:"expires_at"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+// NewRoomLite converts a Room into its metadata-only summary.
+func NewRoomLite(room Room) RoomLite {
+	return RoomLite{
+		RoomID:    room.RoomID,
+		ClassID:   room.ClassID,
+		Name:      room.Name,
+		Status:    room.Status,
+		ExpiresAt: room.ExpiresAt,
+	}
+}
+
+// RoomsToLite converts a collection of rooms into summaries without copying
+// any QR payload.
+func RoomsToLite(rooms []Room) []RoomLite {
+	lite := make([]RoomLite, 0, len(rooms))
+	for _, room := range rooms {
+		lite = append(lite, NewRoomLite(room))
+	}
+	return lite
 }
 
 func NewRoom(roomID string, classID string, name *string) Room {

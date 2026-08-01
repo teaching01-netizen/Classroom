@@ -1,9 +1,12 @@
 package domain
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCalculateNextFetchDelay(t *testing.T) {
@@ -91,4 +94,54 @@ func TestRoomTransitionToInvalid(t *testing.T) {
 
 func TestCalculateNextFetchDelayZero(t *testing.T) {
 	assert.Equal(t, uint64(0), CalculateNextFetchDelay(0))
+}
+
+func TestRoomLiteJSONOmitsQRURL(t *testing.T) {
+	qr := strings.Repeat("A", 64*1024)
+	name := "room"
+	room := Room{
+		RoomID:  "r1",
+		ClassID: "c1",
+		Name:    &name,
+		Status:  Running,
+		QRURL:   &qr,
+	}
+	data, err := json.Marshal(NewRoomLite(room))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "qr_url")
+	assert.NotContains(t, string(data), qr)
+}
+
+func TestRoomsToLiteDoesNotCopyQRValues(t *testing.T) {
+	qr := strings.Repeat("B", 64*1024)
+	name := "room"
+	room := Room{
+		RoomID:  "r1",
+		ClassID: "c1",
+		Name:    &name,
+		Status:  Running,
+		QRURL:   &qr,
+	}
+	lite := RoomsToLite([]Room{room})
+	require.Len(t, lite, 1)
+	assert.Equal(t, "r1", lite[0].RoomID)
+	assert.Equal(t, Running, lite[0].Status)
+	require.NotNil(t, room.QRURL, "source room keeps its QR payload")
+
+	data, err := json.Marshal(lite)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), qr)
+}
+
+func TestRoomLiteSummarySmallWithLargeQR(t *testing.T) {
+	qr := strings.Repeat("C", 64*1024)
+	room := Room{
+		RoomID:  "r1",
+		ClassID: "c1",
+		Status:  Running,
+		QRURL:   &qr,
+	}
+	data, err := json.Marshal(RoomsToLite([]Room{room}))
+	require.NoError(t, err)
+	assert.Less(t, len(data), 512)
 }

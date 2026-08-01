@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -172,4 +173,87 @@ func TestStartSessionRoom_RouteDoesNotCollideWithStartRoom(t *testing.T) {
 	// id="from-session" (which would 500 "room not found").
 	require.Equal(t, http.StatusAccepted, w.Code)
 	require.NoError(t, rm.StopRoom("session-1"))
+}
+
+func TestGetRoomsLiteOmitsQRURL(t *testing.T) {
+	hub := service.NewEventHub(16, 16)
+	defer hub.Close()
+	qr := strings.Repeat("D", 64*1024)
+	name := "room"
+	rm := service.NewRoomManagerWithEventHub(testQRClient{}, newTestRoomRepository(domain.Room{
+		RoomID:  "r1",
+		ClassID: "c1",
+		Name:    &name,
+		Status:  domain.Running,
+		QRURL:   &qr,
+	}), hub)
+	require.NoError(t, rm.LoadRoomsFromDB())
+
+	handler := getRoomsHandler(rm)
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms?lite=true", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.NotContains(t, body, "qr_url")
+	assert.NotContains(t, body, qr)
+}
+
+func TestGetRoomsLiteStaysUnder64KBWith100Rooms(t *testing.T) {
+	hub := service.NewEventHub(16, 16)
+	defer hub.Close()
+	qr := strings.Repeat("E", 64*1024)
+	rooms := make([]domain.Room, 0, 100)
+	for i := 0; i < 100; i++ {
+		name := fmt.Sprintf("room-%d", i)
+		rooms = append(rooms, domain.Room{
+			RoomID:  fmt.Sprintf("r%d", i),
+			ClassID: "c1",
+			Name:    &name,
+			Status:  domain.Running,
+			QRURL:   &qr,
+		})
+	}
+	rm := service.NewRoomManagerWithEventHub(testQRClient{}, newTestRoomRepository(rooms...), hub)
+	require.NoError(t, rm.LoadRoomsFromDB())
+
+	handler := getRoomsHandler(rm)
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms?lite=true", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Less(t, w.Body.Len(), 64*1024)
+}
+
+func TestGetRoomDetailStillReturnsQRURL(t *testing.T) {
+	hub := service.NewEventHub(16, 16)
+	defer hub.Close()
+	qr := "data:image/png;base64,QUJD"
+	rm := service.NewRoomManagerWithEventHub(testQRClient{}, newTestRoomRepository(domain.Room{
+		RoomID:  "r1",
+		ClassID: "c1",
+		Status:  domain.Running,
+		QRURL:   &qr,
+	}), hub)
+	require.NoError(t, rm.LoadRoomsFromDB())
+
+	cc := warwick.NewClassroomClient(nil)
+	ts := service.NewTeacherService(cc, &stubFetcher{}, 2)
+	router, rl := NewRouter(rm, ts, nil, nil, RouterOptions{WSMaxConns: 100})
+	defer rl.Stop()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms/r1", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var envelope struct {
+		Success bool        `json:"success"`
+		Data    domain.Room `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &envelope))
+	require.NotNil(t, envelope.Data.QRURL)
+	assert.Equal(t, qr, *envelope.Data.QRURL)
 }

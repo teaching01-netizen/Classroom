@@ -311,18 +311,7 @@ func getRoomsHandler(rm *service.RoomManager) http.HandlerFunc {
 		rooms := rm.GetAllRooms()
 
 		if lite == "true" || lite == "1" {
-			liteRooms := make([]domain.RoomLite, 0, len(rooms))
-			for _, room := range rooms {
-				liteRooms = append(liteRooms, domain.RoomLite{
-					RoomID:    room.RoomID,
-					ClassID:   room.ClassID,
-					Name:      room.Name,
-					Status:    room.Status,
-					QRURL:     room.QRURL,
-					ExpiresAt: room.ExpiresAt,
-				})
-			}
-			writeJSON(w, http.StatusOK, successResponse(liteRooms))
+			writeJSON(w, http.StatusOK, successResponse(domain.RoomsToLite(rooms)))
 			return
 		}
 		writeJSON(w, http.StatusOK, successResponse(rooms))
