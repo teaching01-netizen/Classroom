@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { courseIdSchema } from '@/features/courses'
 import { sessionIdSchema, useCourseSessionsQuery } from '@/features/sessions'
 import { useCheckinsQuery, useToggleCheckinMutation } from '../api/checkin.queries'
 import type { StudentCheckin, StudentId } from '../api/checkin.schemas'
-import { useRoomQuery, useRoomsQuery, useStartRoomMutation } from '@/features/rooms'
+import { useSessionQr } from '../hooks/useSessionQr'
 import { checkinsToCsv, downloadCsv } from '../lib/csv'
 import { QrDialog } from '../components/QrDialog'
 import { AsyncPage } from '@/shared/ui/AsyncPage'
@@ -41,14 +41,9 @@ export function Component() {
   const courseId = courseIdResult.data
   const sessionId = sessionIdResult.data
   const [params, setParams] = useSearchParams()
-  const [qrOpen, setQrOpen] = useState(false)
-  const [activeRoomId, setActiveRoomId] = useState<string>()
-  const initializedRoom = useRef(false)
   const checkinsQuery = useCheckinsQuery(courseId, sessionId)
   const courseQuery = useCourseSessionsQuery(courseId)
-  const roomsQuery = useRoomsQuery()
-  const startRoom = useStartRoomMutation()
-  const roomQuery = useRoomQuery(activeRoomId, activeRoomId !== undefined)
+  const qr = useSessionQr(courseId, sessionId)
   const toggleCheckin = useToggleCheckinMutation(courseId, sessionId)
   const { announce } = useToast()
 
@@ -61,35 +56,6 @@ export function Component() {
   const filter: CheckinFilter = isCheckinFilter(rawFilter) ? rawFilter : 'all'
   const rawPage = Number(params.get('page') ?? 1)
   const page = Number.isSafeInteger(rawPage) && rawPage > 0 ? rawPage : 1
-
-  useEffect(() => {
-    if (roomsQuery.data === undefined || initializedRoom.current) {
-      return
-    }
-    initializedRoom.current = true
-    const existing = roomsQuery.data.find((room) => room.room_id === sessionId)
-    if (existing !== undefined) {
-      setActiveRoomId(existing.room_id)
-      setQrOpen(true)
-      if (existing.status !== 'Running' && existing.status !== 'Fetching') {
-        startRoom.mutate(
-          { sessionId, roomId: existing.room_id },
-          { onError: (error) => announce(getErrorMessage(error), 'error') },
-        )
-      }
-      return
-    }
-    startRoom.mutate(
-      { sessionId },
-      {
-        onSuccess: (room) => {
-          setActiveRoomId(room.room_id)
-          setQrOpen(true)
-        },
-        onError: (error) => announce(getErrorMessage(error), 'error'),
-      },
-    )
-  }, [announce, roomsQuery.data, sessionId, startRoom])
 
   const filteredStudents = useMemo(() => {
     const normalizedSearch = search.toLowerCase()
@@ -132,7 +98,6 @@ export function Component() {
       },
     )
   }
-  const activeRoom = roomQuery.data ?? roomsQuery.data?.find((room) => room.room_id === activeRoomId)
   const queryError = checkinsQuery.error ?? courseQuery.error
 
   return (
@@ -144,24 +109,7 @@ export function Component() {
         description={courseQuery.data?.name ?? 'Manage student attendance and the session QR code.'}
         actions={
           <>
-            <Button
-              loading={startRoom.isPending}
-              onClick={() => {
-                if (activeRoomId === undefined) {
-                  startRoom.mutate(
-                    { sessionId },
-                    {
-                      onSuccess: (room) => {
-                        setActiveRoomId(room.room_id)
-                        setQrOpen(true)
-                      },
-                    },
-                  )
-                } else {
-                  setQrOpen(true)
-                }
-              }}
-            >
+            <Button loading={qr.refreshing} onClick={qr.openQr}>
               View QR code
             </Button>
             <Button
@@ -235,24 +183,13 @@ export function Component() {
       </AsyncPage>
       <QrDialog
         checkedCount={checkedCount}
-        courseName={courseQuery.data?.name ?? 'Course'}
-        onClose={() => setQrOpen(false)}
-        onRefresh={() => {
-          startRoom.mutate(
-            activeRoomId === undefined ? { sessionId } : { sessionId, roomId: activeRoomId },
-            {
-              onSuccess: (room) => {
-                setActiveRoomId(room.room_id)
-                void roomQuery.refetch()
-              },
-              onError: (error) => announce(getErrorMessage(error), 'error'),
-            },
-          )
-        }}
-        open={qrOpen}
-        qrUrl={activeRoom?.qr_url ?? checkinsQuery.data?.qr_url}
-        refreshing={startRoom.isPending || roomQuery.isFetching}
-        sessionName={checkinsQuery.data?.name ?? 'Session'}
+        courseName={courseQuery.data?.name ?? undefined}
+        onClose={qr.closeQr}
+        onRefresh={qr.refresh}
+        open={qr.open}
+        qrUrl={qr.qrUrl}
+        refreshing={qr.refreshing}
+        sessionName={checkinsQuery.data?.name}
         totalCount={students.length}
       />
     </section>

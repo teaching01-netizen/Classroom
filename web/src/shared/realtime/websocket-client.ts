@@ -6,11 +6,22 @@ import {
   applySnapshotStateSync,
   snapshotMetadataSchema,
 } from './snapshot-events'
+import { applyCheckinDelta, isSessionDetailLike } from './checkin-update'
 import { useConnectionStore } from './connection-store'
 
 const checkinUpdateSchema = z.object({
   student_id: z.string(),
   checked_in: z.boolean(),
+  course_id: z.string().optional(),
+  session_id: z.string().optional(),
+  observed_at: z.string().optional(),
+})
+
+const checkinsUpdateSchema = z.object({
+  course_id: z.string().optional(),
+  session_id: z.string(),
+  observed_at: z.string().optional(),
+  updates: z.array(checkinUpdateSchema),
 })
 
 const eventSchema = z.looseObject({
@@ -19,6 +30,7 @@ const eventSchema = z.looseObject({
   RoomUpdated: z.unknown().optional(),
   RoomDeleted: z.string().optional(),
   CHECKIN_UPDATED: checkinUpdateSchema.optional(),
+  CHECKINS_UPDATED: checkinsUpdateSchema.optional(),
   SESSION_STATS_UPDATED: z.unknown().optional(),
   SnapshotStateSync: z.array(snapshotMetadataSchema).optional(),
   SnapshotCommitted: snapshotMetadataSchema.optional(),
@@ -122,7 +134,24 @@ export class RealtimeClient {
       void this.#queryClient.invalidateQueries({ queryKey: ['rooms'] })
     }
     if (event.CHECKIN_UPDATED !== undefined) {
-      void this.#queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      const update = event.CHECKIN_UPDATED
+      // Apply the delta to any cached session detail in place instead of
+      // refetching the whole roster.
+      this.#queryClient.setQueriesData({ queryKey: ['sessions'] }, (current: unknown) =>
+        isSessionDetailLike(current) ? applyCheckinDelta(current, update.student_id, update.checked_in) : current,
+      )
+    }
+    if (event.CHECKINS_UPDATED !== undefined) {
+      const updates = event.CHECKINS_UPDATED.updates
+      this.#queryClient.setQueriesData({ queryKey: ['sessions'] }, (current: unknown) => {
+        if (!isSessionDetailLike(current)) {
+          return current
+        }
+        return updates.reduce(
+          (detail, update) => applyCheckinDelta(detail, update.student_id, update.checked_in),
+          current,
+        )
+      })
     }
     if (event.SESSION_STATS_UPDATED !== undefined) {
       void this.#queryClient.invalidateQueries({ queryKey: ['sessions'] })

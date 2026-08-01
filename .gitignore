@@ -3,8 +3,8 @@
 .env.*
 !.env.example
 
-# go build output
-server
+# go build output (root-anchored so cmd/server/ source is never shadowed)
+/server
 
 # rust build output (docker context)
 target/

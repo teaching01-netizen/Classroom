@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiClient } from '@/shared/api/api-client'
 import { endpoints } from '@/shared/api/endpoints'
 import { useConnectionStore } from '@/shared/realtime/connection-store'
+import { applyCheckinDelta } from '@/shared/realtime/checkin-update'
 import type { CourseId } from '@/features/courses'
 import { sessionKeys, type SessionId } from '@/features/sessions'
 import {
@@ -42,16 +43,7 @@ export function useToggleCheckinMutation(courseId: CourseId, sessionId: SessionI
       await queryClient.cancelQueries({ queryKey })
       const previous = queryClient.getQueryData<SessionDetail>(queryKey)
       queryClient.setQueryData<SessionDetail>(queryKey, (current) =>
-        current === undefined
-          ? current
-          : {
-              ...current,
-              students: current.students.map((student) =>
-                student.student_id === studentId
-                  ? { ...student, checked_in: checked }
-                  : student,
-              ),
-            },
+        current === undefined ? current : applyCheckinDelta(current, studentId, checked),
       )
       return { previous }
     },

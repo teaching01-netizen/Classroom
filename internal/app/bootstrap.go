@@ -78,7 +78,7 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 	}
 	slog.Info("Connected to database")
 
-	eventHub := service.NewEventHub(256, 256)
+	eventHub := service.NewEventHub(512, 1024)
 	repository := db.NewPgRoomRepository(dbPool)
 	rm := service.NewRoomManagerWithEventHub(qrClient, repository, eventHub)
 
@@ -191,6 +191,16 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 			cfg.Scraper.Host,
 			time.Now,
 		)
+		// Active-room check-in sync: fetches check-ins via the snapshot source
+		// and reconciles the session snapshot asynchronously. In serverless
+		// mode the driver falls back to an inline RefreshNow because no
+		// background scheduler drains due targets there.
+		rm.SetSessionSync(service.NewSessionSyncDriver(
+			source,
+			snapshotProvider.SessionRef,
+			scheduler,
+			cfg.ServerlessEnabled,
+		))
 		listener := service.NewSnapshotNotificationListener(
 			cfg.DatabaseURL,
 			snapshotRepository,

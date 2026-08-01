@@ -192,7 +192,7 @@ func eventHubEventClass(eventType string) string {
 	case "SnapshotCommitted", "SnapshotStateSync":
 		return "snapshot"
 	case "RoomCreated", "RoomUpdated", "RoomDeleted", "FullStateSync",
-		"CHECKIN_UPDATED", "SESSION_STATS_UPDATED":
+		"CHECKIN_UPDATED", "CHECKINS_UPDATED", "SESSION_STATS_UPDATED":
 		return "room"
 	default:
 		return "application"

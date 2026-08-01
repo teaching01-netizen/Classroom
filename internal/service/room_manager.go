@@ -29,6 +29,13 @@ type RoomState struct {
 	persistWG          sync.WaitGroup
 	stopPersistPending bool
 	lastQrTime         uint64 // actual QrTime from last successful fetch (seconds)
+
+	// Active-room check-in sync state. courseID gates the sync loop; the rest
+	// is guarded by checkinMu.
+	courseID     string
+	checkinMu    sync.Mutex
+	lastCheckins map[string]bool
+	lastSetDueAt time.Time
 }
 
 type RoomManager struct {
@@ -40,6 +47,7 @@ type RoomManager struct {
 	repository    db.RoomRepository
 	emitMu        sync.Mutex
 	lastEmittedAt map[string]time.Time // roomID → last emit time (rate limiting)
+	syncDriver    SessionSyncDriver
 }
 
 func NewRoomManager(qrClient domain.QrClient, repository db.RoomRepository) *RoomManager {
@@ -70,6 +78,15 @@ func (rm *RoomManager) Subscribe() (<-chan RoomManagerEvent, func()) {
 
 func (rm *RoomManager) EventHub() *EventHub {
 	return rm.eventHub
+}
+
+// SetSessionSync wires the active-room check-in sync driver. A nil driver
+// disables the sync loop (live mode, or tests that do not exercise it). It
+// must be called before any StartRoom that should sync.
+func (rm *RoomManager) SetSessionSync(driver SessionSyncDriver) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	rm.syncDriver = driver
 }
 
 func (rm *RoomManager) LoadRoomsFromDB() error {
@@ -120,10 +137,18 @@ func (rm *RoomManager) RecoverLoadedRooms(ctx context.Context) error {
 }
 
 func (rm *RoomManager) CreateRoom(roomID string, classID string, name *string) (domain.Room, error) {
-	// Check for existing room first (dedup)
+	// Check for existing room first (dedup). A row that already exists but is
+	// absent from the in-memory map (cross-instance creation, or a persisted
+	// room from a previous process) must still be registered so StartRoom can
+	// find it.
 	existing, err := rm.repository.GetRoom(roomID)
 	if err == nil && existing.RoomID != "" {
-		return existing, nil // Return existing room
+		rm.mu.Lock()
+		if _, ok := rm.rooms[roomID]; !ok {
+			rm.rooms[roomID] = &RoomState{room: existing}
+		}
+		rm.mu.Unlock()
+		return existing, nil
 	}
 
 	room := domain.NewRoom(roomID, classID, name)
@@ -139,6 +164,37 @@ func (rm *RoomManager) CreateRoom(roomID string, classID string, name *string) (
 
 	rm.emit(RoomManagerEvent{Type: "RoomCreated", Data: saved})
 	return saved, nil
+}
+
+// EnsureSessionRoom finds or creates the QR room for a session (room_id ==
+// session_id), registers it in-memory if it was persisted by another process,
+// starts it when it is not already running, and records the course id that
+// gates the active-room check-in sync loop. It is the backend half of the
+// combined POST /api/rooms/from-session/start flow.
+func (rm *RoomManager) EnsureSessionRoom(sessionID string, courseID string) (domain.Room, error) {
+	if sessionID == "" {
+		return domain.Room{}, errors.New("session id is required")
+	}
+	room, err := rm.CreateRoom(sessionID, sessionID, nil)
+	if err != nil {
+		return domain.Room{}, err
+	}
+	rm.mu.Lock()
+	if state, ok := rm.rooms[sessionID]; ok && state.courseID == "" && courseID != "" {
+		state.courseID = courseID
+	}
+	rm.mu.Unlock()
+
+	if room.Status != domain.Running && room.Status != domain.Fetching {
+		if err := rm.StartRoom(sessionID); err != nil {
+			return domain.Room{}, err
+		}
+		started := rm.GetRoom(sessionID)
+		if started != nil {
+			room = *started
+		}
+	}
+	return room, nil
 }
 
 func (rm *RoomManager) DeleteRoom(roomID string) error {
@@ -219,9 +275,24 @@ func (rm *RoomManager) StartRoom(roomID string) error {
 
 	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: state.room})
 
+	driver := rm.syncDriver
+	courseID := state.courseID
 	go func() {
 		defer close(done)
-		rm.runRoomWorker(ctx, state)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rm.runRoomWorker(ctx, state)
+		}()
+		if driver != nil && courseID != "" {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				rm.runSessionSyncLoop(ctx, state, driver)
+			}()
+		}
+		wg.Wait()
 	}()
 	return nil
 }
@@ -517,69 +588,81 @@ func (rm *RoomManager) runRoomWorker(ctx context.Context, state *RoomState) {
 		return
 	}
 
+	// Fetch immediately on start so a fresh room's QR is requested without
+	// waiting for the first jittered wake.
+	if !rm.roomWorkerTick(ctx, state) {
+		return
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Duration(500+rand.Intn(1000)) * time.Millisecond):
-			now := time.Now()
-			rm.mu.RLock()
-			expiresAt := state.room.ExpiresAt
-			classID := state.room.ClassID
-			rm.mu.RUnlock()
-
-			if !shouldFetchQR(expiresAt, state.lastQrTime, now) {
-				continue
-			}
-
-			rm.mu.Lock()
-			if err := state.room.TransitionTo(domain.Fetching); err != nil {
-				slog.Warn("invalid transition", "error", err)
-			}
-			fetchingRoom := state.room
-			rm.mu.Unlock()
-			rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: fetchingRoom})
-
-			resp, err := rm.qrClient.FetchQRContext(ctx, classID)
-			select {
-			case <-ctx.Done():
+			if !rm.roomWorkerTick(ctx, state) {
 				return
-			default:
 			}
-			if err != nil {
-				rm.mu.Lock()
-				var fetchErr *domain.FetchError
-				if errors.As(err, &fetchErr) {
-					if err := state.room.TransitionTo(fetchErr.ToRoomStatus()); err != nil {
-						slog.Warn("invalid transition", "error", err)
-					}
-				} else {
-					if err := state.room.TransitionTo(domain.Warning); err != nil {
-						slog.Warn("invalid transition", "error", err)
-					}
-				}
-				if state.room.Status == domain.AuthExpired {
-					msg := "Session expired, retrying..."
-					state.room.WarningMessage = &msg
-					state.room.ErrorMessage = nil
-					roomCopy := state.room
-					rm.mu.Unlock()
-					rm.persistRoomUpdate(state, roomCopy)
-					rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
-
-					if rm.recoveryLoop(ctx, state, classID) {
-						continue
-					}
-					return
-				}
-				rm.mu.Unlock()
-				rm.handleNonRecoverableError(state, err)
-				continue
-			}
-
-			rm.handleRoomFetchSuccess(state, &resp, now)
 		}
 	}
+}
+
+// roomWorkerTick runs one QR-fetch cycle. It reports whether the worker should
+// keep running.
+func (rm *RoomManager) roomWorkerTick(ctx context.Context, state *RoomState) bool {
+	now := time.Now()
+	rm.mu.RLock()
+	expiresAt := state.room.ExpiresAt
+	classID := state.room.ClassID
+	rm.mu.RUnlock()
+
+	if !shouldFetchQR(expiresAt, state.lastQrTime, now) {
+		return true
+	}
+
+	rm.mu.Lock()
+	if err := state.room.TransitionTo(domain.Fetching); err != nil {
+		slog.Warn("invalid transition", "error", err)
+	}
+	fetchingRoom := state.room
+	rm.mu.Unlock()
+	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: fetchingRoom})
+
+	resp, err := rm.qrClient.FetchQRContext(ctx, classID)
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
+	if err != nil {
+		rm.mu.Lock()
+		var fetchErr *domain.FetchError
+		if errors.As(err, &fetchErr) {
+			if err := state.room.TransitionTo(fetchErr.ToRoomStatus()); err != nil {
+				slog.Warn("invalid transition", "error", err)
+			}
+		} else {
+			if err := state.room.TransitionTo(domain.Warning); err != nil {
+				slog.Warn("invalid transition", "error", err)
+			}
+		}
+		if state.room.Status == domain.AuthExpired {
+			msg := "Session expired, retrying..."
+			state.room.WarningMessage = &msg
+			state.room.ErrorMessage = nil
+			roomCopy := state.room
+			rm.mu.Unlock()
+			rm.persistRoomUpdate(state, roomCopy)
+			rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: roomCopy})
+
+			return rm.recoveryLoop(ctx, state, classID)
+		}
+		rm.mu.Unlock()
+		rm.handleNonRecoverableError(state, err)
+		return true
+	}
+
+	rm.handleRoomFetchSuccess(state, &resp, now)
+	return true
 }
 
 func strPtr(s string) *string { return &s }

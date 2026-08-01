@@ -21,4 +21,5 @@ export const endpoints = {
   room: (roomId: string) => `/api/rooms/${encode(roomId)}`,
   startRoom: (roomId: string) => `/api/rooms/${encode(roomId)}/start`,
   roomFromSession: '/api/rooms/from-session',
+  roomFromSessionStart: '/api/rooms/from-session/start',
 } as const

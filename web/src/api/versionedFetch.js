@@ -13,7 +13,7 @@ const REPLICA_LAG_MAX_RETRIES = 2;
  * @returns {Promise<{ response: Response, retryCount: number } | null>}
  */
 export async function fetchVersioned(url, init, versions) {
-  let lastVersion = 0;
+  let _lastVersion = 0;
 
   for (let attempt = 0; attempt <= REPLICA_LAG_MAX_RETRIES; attempt++) {
     const response = await fetch(url, { ...init, cache: 'no-store' });
@@ -30,12 +30,12 @@ export async function fetchVersioned(url, init, versions) {
         // Retry briefly for read replica lag
         if (attempt < REPLICA_LAG_MAX_RETRIES) {
           await new Promise(resolve => setTimeout(resolve, REPLICA_LAG_RETRY_MS));
-          lastVersion = responseVersion;
+          _lastVersion = responseVersion;
           continue;
         }
         return null;
       }
-      lastVersion = responseVersion;
+      _lastVersion = responseVersion;
     }
 
     return { response, retryCount: attempt };

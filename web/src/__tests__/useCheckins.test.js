@@ -150,6 +150,9 @@ describe('useCheckins - toggleCheckin', () => {
       if (String(url).endsWith('/sessions/s1')) {
         sessionReads += 1;
         return {
+          // fetchVersioned reads X-Snapshot-Version from response headers; a
+          // plain object without headers crashes it.
+          headers: new Headers(),
           json: async () => ({
             success: true,
             data: {

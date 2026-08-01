@@ -30,6 +30,11 @@ const (
 	maxProfileRecords      = 100_000
 	errorBodyDrainLimit    = 4 << 10
 	sessionAcquireBudget   = 5 * time.Second
+	// roomSyncAcquireBudget bounds the session-pool wait for the active-room
+	// check-in sync loop. It shares the teacher tier with the scraper and
+	// toggles, so it must not hold a slot for long; on exhaustion the loop
+	// simply skips the cycle.
+	roomSyncAcquireBudget = time.Second
 )
 
 type ResponseMetadata struct {
@@ -226,7 +231,15 @@ func (s *SnapshotSource) fetchWithPool(
 	ctx context.Context,
 	target domain.ScrapeTarget,
 ) (SnapshotFetchResult, error) {
-	ref, err := s.client.pool.AcquireWithTimeoutContext(ctx, s.client.tier, sessionAcquireBudget)
+	return s.fetchWithPoolBudget(ctx, target, sessionAcquireBudget)
+}
+
+func (s *SnapshotSource) fetchWithPoolBudget(
+	ctx context.Context,
+	target domain.ScrapeTarget,
+	acquireBudget time.Duration,
+) (SnapshotFetchResult, error) {
+	ref, err := s.client.pool.AcquireWithTimeoutContext(ctx, s.client.tier, acquireBudget)
 	if err != nil {
 		if errors.Is(err, ErrAuthConflict) {
 			return SnapshotFetchResult{}, domain.ErrAuthConflict
@@ -599,6 +612,39 @@ func (s *SnapshotSource) fetchSession(
 	}
 	return result, nil
 }
+
+// FetchSessionCheckins returns the current per-student check-in state for a
+// session, fetched unconditionally (no conditional headers) so the active-room
+// sync loop can diff it against the previous observation. It uses the short
+// room-sync acquire budget so a contended pool skips rather than queues.
+func (s *SnapshotSource) FetchSessionCheckins(
+	ctx context.Context,
+	courseID, sessionID string,
+) ([]domain.StudentCheckin, error) {
+	if sessionID == "" {
+		return nil, errors.New("snapshot source: session id is required")
+	}
+	if s.client.pool == nil {
+		return nil, errors.New("snapshot source: session check-ins require a session pool")
+	}
+	target := domain.ScrapeTarget{
+		Ref: domain.TargetRef{
+			Kind:        domain.SnapshotSessionDetail,
+			ResourceKey: sessionID,
+			ParentKey:   courseID,
+		},
+	}
+	result, err := s.fetchWithPoolBudget(ctx, target, roomSyncAcquireBudget)
+	if err != nil {
+		return nil, err
+	}
+	detail, ok := result.Value.(*domain.SessionDetail)
+	if !ok || detail == nil {
+		return nil, domain.NewInvalidPayloadError("snapshot source: unexpected session check-in payload")
+	}
+	return detail.Students, nil
+}
+
 
 func (s *SnapshotSource) fetchProfiles(
 	ctx context.Context,

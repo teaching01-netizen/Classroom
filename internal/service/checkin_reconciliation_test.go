@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 )
 
 type checkinWriterFake struct {
+	mu    sync.Mutex
 	err   error
 	calls int
 }
@@ -23,7 +25,9 @@ func (w *checkinWriterFake) ToggleCheckin(
 	string,
 	bool,
 ) error {
+	w.mu.Lock()
 	w.calls++
+	w.mu.Unlock()
 	return w.err
 }
 

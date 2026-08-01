@@ -53,6 +53,7 @@ func (r *snapshotReaderFake) AnyOverdue(context.Context, []domain.TargetRef, tim
 }
 
 type snapshotRefresherFake struct {
+	mu        sync.Mutex
 	refreshes []domain.TargetRef
 	due       []domain.TargetRef
 	err       error
@@ -61,7 +62,9 @@ type snapshotRefresherFake struct {
 }
 
 func (r *snapshotRefresherFake) RefreshNow(ctx context.Context, ref domain.TargetRef) error {
+	r.mu.Lock()
 	r.refreshes = append(r.refreshes, ref)
+	r.mu.Unlock()
 	if r.block != nil {
 		select {
 		case <-r.block:
@@ -76,7 +79,9 @@ func (r *snapshotRefresherFake) RefreshNow(ctx context.Context, ref domain.Targe
 }
 
 func (r *snapshotRefresherFake) SetDueNow(_ context.Context, ref domain.TargetRef) error {
+	r.mu.Lock()
 	r.due = append(r.due, ref)
+	r.mu.Unlock()
 	return nil
 }
 

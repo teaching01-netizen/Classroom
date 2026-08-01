@@ -129,6 +129,7 @@ func (m *checkinMutatorFake) AdvisoryLockCheckin(_ context.Context, sessionID, s
 // updateSnapshot updates the snapshot in the fake reader to reflect a desired state.
 func updateSnapshot(reader *snapshotReaderFake, provider *SnapshotProvider, courseID, sessionID string, students []domain.StudentCheckin, checkedInCount int) {
 	sessionRef := provider.SessionRef(courseID, sessionID)
+	reader.mu.Lock()
 	reader.snapshots[sessionRef.IdentityKey()] = providerSnapshot(
 		sessionRef,
 		domain.SessionDetail{
@@ -141,6 +142,7 @@ func updateSnapshot(reader *snapshotReaderFake, provider *SnapshotProvider, cour
 		time.Now().UTC(),
 		time.Now().UTC().Add(time.Hour),
 	)
+	reader.mu.Unlock()
 }
 
 // checkinTestSetup creates a service with snapshot mode, a session with one

@@ -80,6 +80,7 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 		r.Get("/", getRoomsHandler(rm))
 		r.Post("/", createRoomHandler(rm))
 		r.Post("/from-session", createRoomFromSessionHandler(rm))
+		r.Post("/from-session/start", startSessionRoomHandler(rm))
 		r.Get("/{id}", getRoomHandler(rm))
 		r.Delete("/{id}", deleteRoomHandler(rm))
 		r.Post("/{id}/start", startRoomHandler(rm))
@@ -150,7 +151,7 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 	r.Get("/ws", websocketHandler)
 	r.Get("/ws/", websocketHandler)
 
-	r.Handle("/*", spaFallbackHandler())
+	r.Handle("/*", spaFallbackHandler(filepath.Join("web", "dist")))
 
 	return r, rl
 }
@@ -267,14 +268,40 @@ func healthHandler() http.HandlerFunc {
 	}
 }
 
-func spaFallbackHandler() http.Handler {
+func spaFallbackHandler(distDir string) http.Handler {
+	indexFile := filepath.Join(distDir, "index.html")
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := filepath.Join("web", "dist", r.URL.Path)
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			http.ServeFile(w, r, filepath.Join("web", "dist", "index.html"))
+		cleanPath := filepath.Clean(r.URL.Path)
+
+		// Vite emits content-hashed build assets: safe to cache forever as
+		// immutable. A missing asset means a stale index.html referenced a chunk
+		// from an older deploy — return a real 404 instead of SPA-fallback HTML,
+		// which would be served as text/html and MIME-block the module script.
+		if strings.HasPrefix(cleanPath, "/assets/") {
+			if _, err := os.Stat(filepath.Join(distDir, cleanPath)); os.IsNotExist(err) {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			http.FileServer(http.Dir(distDir)).ServeHTTP(w, r)
 			return
 		}
-		http.FileServer(http.Dir(filepath.Join("web", "dist"))).ServeHTTP(w, r)
+
+		// App shell (root or a client-side route): never cache, so a deploy
+		// always reaches users with the newest asset manifest. Heuristic caching
+		// of index.html is what left browsers on stale bundles.
+		if cleanPath == "/" {
+			w.Header().Set("Cache-Control", "no-cache")
+			http.ServeFile(w, r, indexFile)
+			return
+		}
+		if _, err := os.Stat(filepath.Join(distDir, cleanPath)); os.IsNotExist(err) {
+			w.Header().Set("Cache-Control", "no-cache")
+			http.ServeFile(w, r, indexFile)
+			return
+		}
+		http.FileServer(http.Dir(distDir)).ServeHTTP(w, r)
 	})
 }
 
@@ -389,5 +416,41 @@ func createRoomFromSessionHandler(rm *service.RoomManager) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, successResponse(room))
+	}
+}
+
+// startSessionRoomHandler combines find-or-create, start, and first QR fetch
+// into one idempotent operation. It returns the full room with a valid QR URL
+// when available, or 202 Accepted with a retry hint while the QR is being
+// generated.
+func startSessionRoomHandler(rm *service.RoomManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			SessionID string `json:"session_id"`
+			CourseID  string `json:"course_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))
+			return
+		}
+		if req.SessionID == "" {
+			writeJSON(w, http.StatusBadRequest, errorResponse("session_id is required"))
+			return
+		}
+		room, err := rm.EnsureSessionRoom(req.SessionID, req.CourseID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
+			return
+		}
+		if room.QRURL != nil && *room.QRURL != "" &&
+			room.ExpiresAt != nil && room.ExpiresAt.After(time.Now()) {
+			writeJSON(w, http.StatusOK, successResponse(room))
+			return
+		}
+		writeJSON(w, http.StatusAccepted, successResponse(map[string]any{
+			"status":         "starting",
+			"room_id":        room.RoomID,
+			"retry_after_ms": 500,
+		}))
 	}
 }

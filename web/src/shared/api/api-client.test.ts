@@ -4,7 +4,9 @@ import { apiClient } from './api-client'
 import { ApiError } from './api-error'
 
 describe('api client', () => {
-  afterEach(() => vi.restoreAllMocks())
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
 
   it('parses a successful response through the provided schema', async () => {
     // Given

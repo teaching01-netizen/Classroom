@@ -1,0 +1,36 @@
+// Minimal structural shape of a session-detail cache entry. Kept local so
+// shared/realtime code never imports a feature.
+export type CheckinDetailShape = {
+  readonly students: readonly { student_id: string; checked_in: boolean }[]
+  readonly checked_in_count?: number
+}
+
+// isSessionDetailLike narrows a cached query entry to a session detail before
+// an in-place check-in delta is applied. The ['sessions'] query prefix covers
+// both course details (no students array) and session details.
+export function isSessionDetailLike(value: unknown): value is CheckinDetailShape {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  return Array.isArray((value as CheckinDetailShape).students)
+}
+
+// applyCheckinDelta returns a new session-detail cache entry with the
+// student's check-in state flipped and the derived checked-in count refreshed.
+// It is the single source of truth shared by the optimistic toggle mutation
+// and the CHECKIN_UPDATED / CHECKINS_UPDATED WebSocket handlers, so a delta
+// event and a local toggle never diverge in cache shape.
+export function applyCheckinDelta<T extends CheckinDetailShape>(
+  detail: T,
+  studentId: string,
+  checkedIn: boolean,
+): T {
+  const students = detail.students.map((student) =>
+    student.student_id === studentId ? { ...student, checked_in: checkedIn } : student,
+  )
+  return {
+    ...detail,
+    students,
+    checked_in_count: students.filter((student) => student.checked_in).length,
+  }
+}

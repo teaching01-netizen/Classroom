@@ -207,7 +207,10 @@ func TestRoomManager_StopAllActiveRoomsSerializesAConcurrentRestart(t *testing.T
 	close(repo.releaseUpdate)
 	require.NoError(t, <-idleDone)
 	require.NoError(t, <-restartDone)
-	require.Equal(t, domain.Running, manager.GetRoom("room-1").Status)
+	// The restart must have taken effect (not left Stopped). The QR worker
+	// fetches immediately on start, so the status may already have moved on
+	// from Running to Fetching/Warning.
+	require.NotEqual(t, domain.Stopped, manager.GetRoom("room-1").Status)
 	require.NoError(t, manager.StopAllActiveRooms(context.Background()))
 }
 
