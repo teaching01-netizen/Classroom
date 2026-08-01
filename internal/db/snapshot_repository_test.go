@@ -1172,6 +1172,39 @@ func TestSnapshotRepositorySeedBatchesChildrenIdempotently(t *testing.T) {
 	require.JSONEq(t, `{"course_index":3,"updated":true}`, string(attrs))
 }
 
+func TestSnapshotRepositorySeedBatchDedupesDuplicateConflictKeys(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	first := catalogSeed(now)
+	first.Ref.Kind = domain.SnapshotCourseDetail
+	first.Ref.ParentKey = "dedupe-parent"
+	first.Ref.ResourceKey = "dup-course"
+	first.Attributes = json.RawMessage(`{"dup":false}`)
+	first.MaxInterval = 4 * time.Hour
+	second := first
+	second.Attributes = json.RawMessage(`{"dup":true,"updated":true}`)
+	second.MaxInterval = 8 * time.Hour
+	second.NextRunAt = now.Add(time.Hour)
+
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{first, second}),
+		"duplicate conflict keys in one batch must not abort the whole statement")
+
+	var count int
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT count(*) FROM scrape_targets WHERE host=$1 AND kind=$2 AND parent_key=$3 AND resource_key=$4`,
+		first.Ref.Host, first.Ref.Kind, first.Ref.ParentKey, first.Ref.ResourceKey,
+	).Scan(&count))
+	require.Equal(t, 1, count,
+		"the duplicate batch must leave exactly one row for the shared conflict key")
+
+	stored, err := repo.Target(ctx, first.Ref)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"dup":true,"updated":true}`, string(stored.Attributes),
+		"the last seed in the batch must win (last-write-wins)")
+	require.Equal(t, 8*time.Hour, stored.MaxInterval,
+		"the last seed's policy must win (last-write-wins)")
+}
+
 func TestSnapshotRepositoryCurrentNotFoundBeforeSuccess(t *testing.T) {
 	repo, ctx := newSnapshotRepositoryTest(t)
 	now := time.Now().UTC()

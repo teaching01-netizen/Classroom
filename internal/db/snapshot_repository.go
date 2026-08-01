@@ -278,29 +278,34 @@ type dbExecutor interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
 
+// targetConflictKey mirrors the ON CONFLICT (host, kind, parent_key,
+// resource_key) target of the batch upsert in upsertSeeds. Two seeds sharing a
+// key in one batch would otherwise abort the whole statement with "ON CONFLICT
+// DO UPDATE command cannot affect row a second time"; dedup keeps the last
+// occurrence so the batch matches the old per-seed loop's last-write-wins.
+type targetConflictKey struct {
+	Host        string
+	Kind        string
+	ParentKey   string
+	ResourceKey string
+}
+
 // upsertSeeds validates every seed up front, then upserts all of them in a
 // single INSERT ... SELECT FROM unnest statement. Validation happens before
 // any insert, so one invalid seed aborts the whole batch (the caller's
 // transaction rolls back), matching the previous per-seed transactional loop.
-// Every column travels as a text array and is cast in SQL so encoding stays
-// clean under QueryExecModeSimpleProtocol (jsonb/arrays from Go can otherwise
-// be encoded as bytea hex).
+// Duplicate conflict keys are collapsed to their last occurrence before the
+// arrays are built. Every column travels as a text array and is cast in SQL so
+// encoding stays clean under QueryExecModeSimpleProtocol (jsonb/arrays from Go
+// can otherwise be encoded as bytea hex).
 func upsertSeeds(ctx context.Context, executor dbExecutor, seeds []domain.TargetSeed) error {
 	if len(seeds) == 0 {
 		return nil
 	}
-	hosts := make([]string, 0, len(seeds))
-	kinds := make([]string, 0, len(seeds))
-	resourceKeys := make([]string, 0, len(seeds))
-	parentKeys := make([]string, 0, len(seeds))
-	attributes := make([]string, 0, len(seeds))
-	priorities := make([]string, 0, len(seeds))
-	currentIntervals := make([]string, 0, len(seeds))
-	minIntervals := make([]string, 0, len(seeds))
-	maxIntervals := make([]string, 0, len(seeds))
-	maxServeAges := make([]string, 0, len(seeds))
-	nextRunAts := make([]string, 0, len(seeds))
-	for _, seed := range seeds {
+	// Validate every seed up front — duplicates included — so an invalid seed
+	// fails the batch exactly like the previous per-seed transactional loop.
+	lastIndex := make(map[targetConflictKey]int, len(seeds))
+	for index, seed := range seeds {
 		if err := seed.Ref.Validate(); err != nil {
 			return err
 		}
@@ -317,6 +322,43 @@ func upsertSeeds(ctx context.Context, executor dbExecutor, seeds []domain.Target
 		}
 		if !json.Valid(attrs) {
 			return fmt.Errorf("target %s attributes are invalid JSON", seed.Ref.IdentityKey())
+		}
+		lastIndex[targetConflictKey{
+			Host:        seed.Ref.Host,
+			Kind:        string(seed.Ref.Kind),
+			ParentKey:   seed.Ref.ParentKey,
+			ResourceKey: seed.Ref.ResourceKey,
+		}] = index
+	}
+	// Drop every seed whose conflict key occurs again later in the batch; the
+	// surviving last occurrence is the row the upsert sees.
+	deduped := make([]domain.TargetSeed, 0, len(seeds))
+	for index, seed := range seeds {
+		if lastIndex[targetConflictKey{
+			Host:        seed.Ref.Host,
+			Kind:        string(seed.Ref.Kind),
+			ParentKey:   seed.Ref.ParentKey,
+			ResourceKey: seed.Ref.ResourceKey,
+		}] != index {
+			continue
+		}
+		deduped = append(deduped, seed)
+	}
+	hosts := make([]string, 0, len(deduped))
+	kinds := make([]string, 0, len(deduped))
+	resourceKeys := make([]string, 0, len(deduped))
+	parentKeys := make([]string, 0, len(deduped))
+	attributes := make([]string, 0, len(deduped))
+	priorities := make([]string, 0, len(deduped))
+	currentIntervals := make([]string, 0, len(deduped))
+	minIntervals := make([]string, 0, len(deduped))
+	maxIntervals := make([]string, 0, len(deduped))
+	maxServeAges := make([]string, 0, len(deduped))
+	nextRunAts := make([]string, 0, len(deduped))
+	for _, seed := range deduped {
+		attrs := seed.Attributes
+		if len(attrs) == 0 {
+			attrs = json.RawMessage(`{}`)
 		}
 		priority := seed.Priority
 		if priority <= 0 {
