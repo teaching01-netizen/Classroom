@@ -1295,3 +1295,90 @@ func TestSnapshotRepositoryFailedCommitDegradesQualityState(t *testing.T) {
 	require.NotNil(t, rejectionCode)
 	require.Equal(t, "network", *rejectionCode)
 }
+
+func TestSnapshotRepositoryRejectedCommitPersistsCandidateWithoutPublishing(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+
+	// Establish a last-known-good snapshot so the rejected commit has a
+	// current_snapshot_id that must stay untouched.
+	target := claimOneTestTarget(t, ctx, repo, now, "reject-worker")
+	_, err := repo.Commit(ctx, changedCommit(target, "reject-worker", now, json.RawMessage(`{"ok":true}`)))
+	require.NoError(t, err)
+	var snapshotID int64
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT current_snapshot_id FROM scrape_targets WHERE id=$1`, target.ID,
+	).Scan(&snapshotID))
+	require.Greater(t, snapshotID, int64(0))
+	var eventsBefore int64
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT count(*) FROM snapshot_commit_events WHERE target_id=$1`, target.ID,
+	).Scan(&eventsBefore))
+	require.Equal(t, int64(1), eventsBefore)
+
+	// Re-claim and commit a transport rejection carrying an evidence-only
+	// candidate row. The body was never fetched, so payload and raw_body_hash
+	// stay NULL and the CHECK constraint must still accept the row.
+	rejectAt := now.Add(time.Minute)
+	require.NoError(t, repo.SetDueNow(ctx, seed.Ref, rejectAt))
+	rejected, err := repo.ClaimDue(ctx, ClaimRequest{
+		Now: rejectAt, Limit: 1, WorkerID: "reject-worker-2", LeaseDuration: 2 * time.Minute,
+	})
+	require.NoError(t, err)
+	require.Len(t, rejected, 1)
+	rejectInput := changedCommit(rejected[0], "reject-worker-2", rejectAt, json.RawMessage(`{"ok":true}`))
+	rejectInput.Outcome = "transient_error"
+	rejectInput.Changed = false
+	rejectInput.ValidationSeqAfter = nil
+	rejectInput.ContentHash = [32]byte{}
+	rejectInput.Payload = nil
+	rejectInput.LastRejectionCode = "network"
+	rejectInput.Candidates = []domain.ScrapeCandidate{{
+		TargetID:             rejected[0].ID,
+		LeaseGeneration:      rejected[0].LeaseGeneration,
+		AttemptNumber:        1,
+		FetchedAt:            rejectAt,
+		RequestID:            "reject-1",
+		ParserVersion:        "warwick-v1",
+		SchemaVersion:        "schema-v1",
+		CanonicalizerVersion: "canonical-v1",
+		Disposition:          domain.CandidateRejectedTransport,
+		RejectionCode:        "network",
+	}}
+	_, err = repo.Commit(ctx, rejectInput)
+	require.NoError(t, err)
+
+	// The rejected candidate row persists with the evidence columns and
+	// NULL payload/raw_body_hash/canonical_hash.
+	var disposition string
+	var payload, rawHash, canonicalHash, persistedRejection *string
+	require.NoError(t, repo.pool.QueryRow(ctx, `
+		SELECT disposition, payload, raw_body_hash, canonical_hash, rejection_code
+		FROM scrape_candidates WHERE target_id=$1`,
+		rejected[0].ID,
+	).Scan(&disposition, &payload, &rawHash, &canonicalHash, &persistedRejection))
+	require.Equal(t, string(domain.CandidateRejectedTransport), disposition)
+	require.Nil(t, payload)
+	require.Nil(t, rawHash)
+	require.Nil(t, canonicalHash)
+	require.NotNil(t, persistedRejection)
+	require.Equal(t, "network", *persistedRejection)
+
+	// The rejection did not publish: current_snapshot_id and the outbox are
+	// untouched, and the target degrades because a last-known-good exists.
+	var snapshotIDAfter int64
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT current_snapshot_id FROM scrape_targets WHERE id=$1`, rejected[0].ID,
+	).Scan(&snapshotIDAfter))
+	require.Equal(t, snapshotID, snapshotIDAfter)
+	var eventsAfter int64
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT count(*) FROM snapshot_commit_events WHERE target_id=$1`, rejected[0].ID,
+	).Scan(&eventsAfter))
+	require.Equal(t, eventsBefore, eventsAfter)
+	metadata, err := repo.Metadata(ctx, seed.Ref, rejectAt.Add(time.Minute))
+	require.NoError(t, err)
+	require.Equal(t, domain.DataQualityDegraded, metadata.QualityState)
+}

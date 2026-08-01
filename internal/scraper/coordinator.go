@@ -336,6 +336,31 @@ func (c *Coordinator) RunClaimedWithRelease(
 			RejectionCode:         rejectionCode,
 			ConfirmationGroupUUID: confirmationGroup,
 		})
+	case "rate_limited", "auth_error", "not_found",
+		"permanent_error", "transient_error", "invalid_payload":
+		// Rejected runs still record the fetch evidence available at that
+		// point (status, content type, bytes, raw-body hash, ETag) so every
+		// rejection is diagnosable. The payload stays NULL: the body was
+		// either never obtained or never parsed, so the evidence is metadata
+		// plus the raw hash, not the body.
+		candidates = append(candidates, domain.ScrapeCandidate{
+			TargetID:             target.ID,
+			LeaseGeneration:      target.LeaseGeneration,
+			AttemptNumber:        1,
+			FetchedAt:            finishedAt,
+			RequestID:            newRequestID(),
+			HTTPStatus:           statusCodeValue(statusCode),
+			ContentType:          fetchResult.Metadata.ContentType,
+			ContentLength:        fetchResult.BytesRead,
+			ETag:                 fetchResult.Metadata.ETag,
+			LastModified:         fetchResult.Metadata.LastModified,
+			RawBodyHash:          fetchResult.Metadata.RawBodyHash,
+			ParserVersion:        ParserVersion,
+			SchemaVersion:        SchemaVersion,
+			CanonicalizerVersion: CanonicalizerVersion,
+			Disposition:          rejectionDisposition(outcome),
+			RejectionCode:        errorKind,
+		})
 	}
 	if outcome == "quarantined" {
 		// Candidate rows carry the full evidence; the run commit itself
@@ -637,6 +662,25 @@ func statusCodeValue(status *int) int {
 
 func isSuccessfulOutcome(outcome string) bool {
 	return outcome == "changed" || outcome == "unchanged" || outcome == "not_modified"
+}
+
+// rejectionDisposition maps a rejected run outcome to the disposition of its
+// candidate evidence row. The outcome is the run's stable rejection class:
+// any transport-level failure (rate limited, not found, permanent or
+// transient upstream error) is rejected_transport — the body was never
+// obtained; an expired or conflicting session is rejected_authentication;
+// and a fetched-but-unparseable body is rejected_parse. errorKind only
+// carries finer transport detail (network/timeout/upstream_status) that
+// never changes the class, so it is recorded as the rejection code instead.
+func rejectionDisposition(outcome string) domain.CandidateDisposition {
+	switch outcome {
+	case "auth_error":
+		return domain.CandidateRejectedAuthentication
+	case "invalid_payload":
+		return domain.CandidateRejectedParse
+	default:
+		return domain.CandidateRejectedTransport
+	}
 }
 
 func policyForTarget(target domain.ScrapeTarget) Policy {

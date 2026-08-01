@@ -992,3 +992,155 @@ func TestCoordinatorReconcileLifecycleErrorDoesNotFailRun(t *testing.T) {
 	require.Equal(t, "changed", result.Outcome)
 	require.Len(t, store.lifecycleInputs, 1)
 }
+
+func TestCoordinatorRejectedOutcomesPersistCandidateEvidence(t *testing.T) {
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	rawHash := strings.Repeat("ab", 32)
+	cases := []struct {
+		name          string
+		result        warwick.SnapshotFetchResult
+		err           error
+		outcome       string
+		errorKind     string
+		disposition   domain.CandidateDisposition
+		expectRawHash string
+	}{
+		{
+			name: "rate limited",
+			result: warwick.SnapshotFetchResult{Metadata: warwick.ResponseMetadata{
+				StatusCode: 429, ETag: `"v1"`, ContentType: "text/html",
+			}},
+			err: &domain.UpstreamStatusError{
+				StatusCode: 429, RetryAfter: 30 * time.Minute,
+			},
+			outcome:     "rate_limited",
+			errorKind:   "rate_limited",
+			disposition: domain.CandidateRejectedTransport,
+		},
+		{
+			name: "authentication",
+			result: warwick.SnapshotFetchResult{Metadata: warwick.ResponseMetadata{
+				StatusCode: 401, ETag: `"v1"`, ContentType: "text/html",
+			}},
+			err:         domain.ErrAuthExpired,
+			outcome:     "auth_error",
+			errorKind:   "authentication",
+			disposition: domain.CandidateRejectedAuthentication,
+		},
+		{
+			name: "not found",
+			result: warwick.SnapshotFetchResult{Metadata: warwick.ResponseMetadata{
+				StatusCode: 404, ETag: `"v1"`, ContentType: "text/html",
+			}},
+			err:         &domain.UpstreamStatusError{StatusCode: 404},
+			outcome:     "not_found",
+			errorKind:   "not_found",
+			disposition: domain.CandidateRejectedTransport,
+		},
+		{
+			name: "permanent upstream error",
+			result: warwick.SnapshotFetchResult{Metadata: warwick.ResponseMetadata{
+				StatusCode: 403, ETag: `"v1"`, ContentType: "text/html",
+			}},
+			err:         &domain.UpstreamStatusError{StatusCode: 403},
+			outcome:     "permanent_error",
+			errorKind:   "upstream_status",
+			disposition: domain.CandidateRejectedTransport,
+		},
+		{
+			name: "transient upstream error",
+			result: warwick.SnapshotFetchResult{Metadata: warwick.ResponseMetadata{
+				StatusCode: 503, ETag: `"v1"`, ContentType: "text/html",
+			}},
+			err: &domain.UpstreamStatusError{
+				StatusCode: 503, RetryAfter: 20 * time.Minute,
+			},
+			outcome:     "transient_error",
+			errorKind:   "upstream_status",
+			disposition: domain.CandidateRejectedTransport,
+		},
+		{
+			name: "transient network error",
+			result: warwick.SnapshotFetchResult{
+				Metadata: warwick.ResponseMetadata{ETag: `"v1"`},
+			},
+			err:         errors.New("connection refused"),
+			outcome:     "transient_error",
+			errorKind:   "network",
+			disposition: domain.CandidateRejectedTransport,
+		},
+		{
+			name: "canonicalization failure",
+			result: warwick.SnapshotFetchResult{
+				Value:     "wrong type",
+				Metadata:  warwick.ResponseMetadata{StatusCode: 200, RawBodyHash: rawHash},
+				BytesRead: 100,
+			},
+			outcome:       "invalid_payload",
+			errorKind:     "canonicalization",
+			disposition:   domain.CandidateRejectedParse,
+			expectRawHash: rawHash,
+		},
+		{
+			name: "validation failure",
+			result: warwick.SnapshotFetchResult{
+				Value:     []domain.CourseSummary{{CourseID: ""}},
+				Metadata:  warwick.ResponseMetadata{StatusCode: 200, RawBodyHash: rawHash},
+				BytesRead: 100,
+			},
+			outcome:       "invalid_payload",
+			errorKind:     "validation",
+			disposition:   domain.CandidateRejectedParse,
+			expectRawHash: rawHash,
+		},
+		{
+			name: "not modified without snapshot",
+			result: warwick.SnapshotFetchResult{Metadata: warwick.ResponseMetadata{
+				StatusCode: 304, ETag: `"v1"`,
+			}},
+			err:         domain.ErrNotModified,
+			outcome:     "invalid_payload",
+			errorKind:   "not_modified_without_snapshot",
+			disposition: domain.CandidateRejectedParse,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source := &coordinatorSource{result: tc.result, err: tc.err}
+			store := &coordinatorStore{}
+			coordinator := newCoordinatorForTest(source, store, &coordinatorObserver{}, now)
+			target := coordinatorTarget(domain.SnapshotCourseCatalog)
+
+			result, err := coordinator.RunClaimed(context.Background(), target)
+			require.NoError(t, err)
+			require.Equal(t, tc.outcome, result.Outcome)
+			require.False(t, result.Succeeded)
+			require.False(t, result.Changed)
+			require.Len(t, store.inputs, 1)
+			input := store.inputs[0]
+			require.False(t, input.Changed)
+			require.Nil(t, input.Payload)
+			require.Nil(t, input.ValidationSeqAfter)
+			require.Equal(t, tc.errorKind, input.LastRejectionCode)
+
+			// A rejected run persists exactly one evidence-only candidate
+			// row: metadata + raw hash, never the body.
+			require.Len(t, input.Candidates, 1)
+			candidate := input.Candidates[0]
+			require.Equal(t, int64(1), candidate.TargetID)
+			require.Equal(t, int64(1), candidate.LeaseGeneration)
+			require.Equal(t, 1, candidate.AttemptNumber)
+			require.Equal(t, tc.disposition, candidate.Disposition)
+			require.Equal(t, tc.errorKind, candidate.RejectionCode)
+			require.Nil(t, candidate.Payload)
+			require.Empty(t, candidate.CanonicalHash)
+			require.Equal(t, tc.result.Metadata.StatusCode, candidate.HTTPStatus)
+			require.Equal(t, tc.result.Metadata.ContentType, candidate.ContentType)
+			require.Equal(t, tc.result.Metadata.ETag, candidate.ETag)
+			require.Equal(t, tc.result.BytesRead, candidate.ContentLength)
+			require.Equal(t, tc.result.Metadata.RawBodyHash, candidate.RawBodyHash)
+			require.Equal(t, tc.expectRawHash, candidate.RawBodyHash)
+			require.Empty(t, candidate.ConfirmationGroupUUID)
+		})
+	}
+}
