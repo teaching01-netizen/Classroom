@@ -107,6 +107,30 @@ describe('websocket room events', () => {
     expect(queryClient.getQueryData<RoomSummary[]>(roomKeys.all)).toEqual([seedRooms[1]])
   })
 
+  it('RoomDeleted clears the per-room revision entry for a reused room id', () => {
+    const { queryClient, socket } = makeClient()
+    queryClient.setQueryData(roomKeys.all, seedRooms)
+
+    // Prime a high revision, delete the room, then recreate it. A reused
+    // room id restarts revisions at 1; the stale entry (rev 2) must not
+    // dedupe the fresh rev 1 away.
+    send(socket, {
+      ROOM_CHANGED: { room_id: 'room-1', status: 'Running', has_qr: false, revision: 2 },
+    })
+    send(socket, { RoomDeleted: 'room-1' })
+    send(socket, { RoomCreated: { room_id: 'room-1', name: 'Room A', status: 'Starting' } })
+    send(socket, {
+      ROOM_CHANGED: { room_id: 'room-1', status: 'Running', has_qr: false, revision: 1 },
+    })
+
+    const rooms = queryClient.getQueryData<RoomSummary[]>(roomKeys.all)
+    expect(rooms).toHaveLength(2)
+    expect(rooms?.find((room) => room.room_id === 'room-1')).toMatchObject({
+      name: 'Room A',
+      status: 'Running',
+    })
+  })
+
   it('duplicate ROOM_CHANGED revisions are ignored and higher revisions apply', () => {
     const { queryClient, invalidateSpy, socket } = makeClient()
     queryClient.setQueryData(roomKeys.all, seedRooms)

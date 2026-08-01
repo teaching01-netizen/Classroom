@@ -184,6 +184,9 @@ export class RealtimeClient {
     }
     if (event.RoomDeleted !== undefined) {
       const deletedRoomId = event.RoomDeleted
+      // Drop per-room revision bookkeeping so a reused room id (revisions
+      // restart at 1) is not deduped away by the stale entry.
+      this.#roomRevisions.delete(deletedRoomId)
       this.#queryClient.setQueryData<RoomSummary[]>(roomKeys.all, (rooms) =>
         applyRoomDeleted(rooms, deletedRoomId),
       )

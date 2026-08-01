@@ -105,10 +105,9 @@ func TestRoomEventsUseSummaries(t *testing.T) {
 		QRURL:         &qr,
 		LastUpdatedAt: &lastUpdated,
 	}
-	roomToStop := domain.Room{RoomID: "room-2", ClassID: "class-2", Status: domain.Idle}
 	hub := NewEventHub(32, 32)
 	defer hub.Close()
-	repo := newIdleRoomRepository(roomWithQR, roomToStop)
+	repo := newIdleRoomRepository(roomWithQR)
 	rm := NewRoomManagerWithEventHub(idleQRClient{}, repo, hub)
 	require.NoError(t, rm.LoadRoomsFromDB())
 
@@ -144,8 +143,30 @@ func TestRoomEventsUseSummaries(t *testing.T) {
 	assert.False(t, roomChanged.HasQR)
 	assert.Greater(t, roomChanged.Revision, int64(0))
 
-	// Starting a room that already carries a QR propagates HasQR and the
-	// deterministic LastUpdatedAt revision without leaking the QR string.
+	// A second emit for the same room (< 5s after the create) must carry a
+	// strictly higher revision: revisions are per-room monotonic sequence
+	// numbers, not LastUpdatedAt timestamps.
+	require.NoError(t, rm.StopRoom("room-1"))
+	stoppedUpdated, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "RoomUpdated", stoppedUpdated.Type)
+	stoppedLite, ok := stoppedUpdated.Data.(domain.RoomLite)
+	require.True(t, ok, "RoomUpdated payload must be RoomLite, not full Room")
+	assert.Equal(t, domain.Stopped, stoppedLite.Status)
+	stoppedChanged, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "ROOM_CHANGED", stoppedChanged.Type)
+	stoppedRoomChanged, ok := stoppedChanged.Data.(domain.RoomChanged)
+	require.True(t, ok)
+	assert.Equal(t, "room-1", stoppedRoomChanged.RoomID)
+	assert.Equal(t, domain.Stopped, stoppedRoomChanged.Status)
+	assert.False(t, stoppedRoomChanged.HasQR)
+	assert.Greater(t, stoppedRoomChanged.Revision, roomChanged.Revision)
+
+	// Starting a room that already carries a QR propagates HasQR with the
+	// per-room monotonic revision without leaking the QR string. StartRoom
+	// emits synchronously before its QR worker goroutine starts, so the
+	// worker's own later emits do not precede this pair.
 	require.NoError(t, rm.StartRoom("room-3"))
 	startedUpdated, ok := receiveEvent(t, events)
 	require.True(t, ok)
@@ -159,27 +180,84 @@ func TestRoomEventsUseSummaries(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "room-3", startedRoomChanged.RoomID)
 	assert.True(t, startedRoomChanged.HasQR)
-	assert.Equal(t, lastUpdated.UnixNano(), startedRoomChanged.Revision)
-
-	// Stopping a room emits RoomUpdated(RoomLite, Stopped) + ROOM_CHANGED.
-	// The stopped room was never emitted before, so the per-room 5s gate
-	// does not swallow the pair.
-	require.NoError(t, rm.StopRoom("room-2"))
-	stoppedUpdated, ok := receiveEvent(t, events)
-	require.True(t, ok)
-	require.Equal(t, "RoomUpdated", stoppedUpdated.Type)
-	stoppedLite, ok := stoppedUpdated.Data.(domain.RoomLite)
-	require.True(t, ok, "RoomUpdated payload must be RoomLite, not full Room")
-	assert.Equal(t, domain.Stopped, stoppedLite.Status)
-	stoppedChanged, ok := receiveEvent(t, events)
-	require.True(t, ok)
-	require.Equal(t, "ROOM_CHANGED", stoppedChanged.Type)
-	stoppedRoomChanged, ok := stoppedChanged.Data.(domain.RoomChanged)
-	require.True(t, ok)
-	assert.Equal(t, domain.Stopped, stoppedRoomChanged.Status)
+	assert.Greater(t, startedRoomChanged.Revision, int64(0))
 
 	// Stop the started room so its worker goroutine exits.
 	require.NoError(t, rm.StopRoom("room-3"))
+}
+
+func TestEmitRoomEvents_QRBearingRoomEmitsWithinGateWindow(t *testing.T) {
+	qr := "data:image/png;base64,QUJD"
+	room := domain.Room{RoomID: "qr-room", ClassID: "class-1", Status: domain.Running, QRURL: &qr}
+	hub := NewEventHub(32, 32)
+	defer hub.Close()
+	rm := NewRoomManagerWithEventHub(idleQRClient{}, newIdleRoomRepository(), hub)
+	events, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+
+	// Two emits for the same QR-carrying room, the second well inside the 5s
+	// gate window. Both pairs must be delivered so QR refreshes arrive at
+	// fetch cadence instead of a full cycle late.
+	rm.emitRoomEvents(room)
+	rm.emitRoomEvents(room)
+
+	revisions := make([]int64, 0, 2)
+	for range 2 {
+		updated, ok := receiveEvent(t, events)
+		require.True(t, ok)
+		require.Equal(t, "RoomUpdated", updated.Type)
+		changed, ok := receiveEvent(t, events)
+		require.True(t, ok)
+		require.Equal(t, "ROOM_CHANGED", changed.Type)
+		roomChanged, ok := changed.Data.(domain.RoomChanged)
+		require.True(t, ok)
+		assert.Equal(t, "qr-room", roomChanged.RoomID)
+		assert.True(t, roomChanged.HasQR)
+		revisions = append(revisions, roomChanged.Revision)
+	}
+	assert.Greater(t, revisions[0], int64(0))
+	assert.Greater(t, revisions[1], revisions[0], "revisions must be strictly increasing")
+}
+
+func TestEmitRoomEvents_StopWithinGateWindowStillDelivers(t *testing.T) {
+	room := domain.Room{RoomID: "stop-room", ClassID: "class-1", Status: domain.Running}
+	repo := newIdleRoomRepository(room)
+	hub := NewEventHub(32, 32)
+	defer hub.Close()
+	rm := NewRoomManagerWithEventHub(idleQRClient{}, repo, hub)
+	require.NoError(t, rm.LoadRoomsFromDB())
+	events, unsubscribe := hub.Subscribe()
+	defer unsubscribe()
+
+	// Prime the 5s gate with a QR-less Running emit, then stop the room
+	// immediately: the stop pair must still be delivered so the client clears
+	// its QR view, with a revision newer than the primed one.
+	rm.emitRoomEvents(room)
+
+	firstUpdated, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "RoomUpdated", firstUpdated.Type)
+	firstChanged, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "ROOM_CHANGED", firstChanged.Type)
+	first, ok := firstChanged.Data.(domain.RoomChanged)
+	require.True(t, ok)
+	assert.Equal(t, "stop-room", first.RoomID)
+
+	require.NoError(t, rm.StopRoom("stop-room"))
+
+	stoppedUpdated, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "RoomUpdated", stoppedUpdated.Type)
+	stoppedChanged, ok := receiveEvent(t, events)
+	require.True(t, ok)
+	require.Equal(t, "ROOM_CHANGED", stoppedChanged.Type)
+	stopped, ok := stoppedChanged.Data.(domain.RoomChanged)
+	require.True(t, ok)
+	assert.Equal(t, "stop-room", stopped.RoomID)
+	assert.Equal(t, domain.Stopped, stopped.Status)
+	assert.False(t, stopped.HasQR)
+	assert.Greater(t, stopped.Revision, first.Revision, "stop must carry a newer revision")
 }
 
 func TestStopRoomClearsQRInMemoryAndPersistsClearedValues(t *testing.T) {

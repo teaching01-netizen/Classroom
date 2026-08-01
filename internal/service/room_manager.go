@@ -47,6 +47,7 @@ type RoomManager struct {
 	repository    db.RoomRepository
 	emitMu        sync.Mutex
 	lastEmittedAt map[string]time.Time // roomID → last emit time (rate limiting)
+	emitSeqs      map[string]int64     // roomID → per-room monotonic ROOM_CHANGED revision
 	syncDriver    SessionSyncDriver
 }
 
@@ -68,6 +69,7 @@ func NewRoomManagerWithEventHub(
 		qrClient:      qrClient,
 		repository:    repository,
 		lastEmittedAt: make(map[string]time.Time),
+		emitSeqs:      make(map[string]int64),
 	}
 	return rm
 }
@@ -186,6 +188,7 @@ func (rm *RoomManager) RetainRooms(ctx context.Context, cutoff time.Time) (int64
 	rm.emitMu.Lock()
 	for _, roomID := range deleted {
 		delete(rm.lastEmittedAt, roomID)
+		delete(rm.emitSeqs, roomID)
 	}
 	rm.emitMu.Unlock()
 	slog.Info("retained stale stopped rooms", "deleted", len(deleted))
@@ -273,6 +276,7 @@ func (rm *RoomManager) DeleteRoom(roomID string) error {
 
 	rm.emitMu.Lock()
 	delete(rm.lastEmittedAt, roomID)
+	delete(rm.emitSeqs, roomID)
 	rm.emitMu.Unlock()
 
 	rm.emit(RoomManagerEvent{Type: "RoomDeleted", Data: roomID})
@@ -393,19 +397,25 @@ func (rm *RoomManager) emit(event RoomManagerEvent) {
 }
 
 // emitRoomEvents publishes the RoomUpdated (summary) and ROOM_CHANGED pair for
-// a room state change. Both events share the per-room 5s rate-limit gate, so a
-// skipped pair skips both. A dropped ROOM_CHANGED is recovered by the frontend
-// polling the room detail query until qr_url arrives, so has_qr needs no
-// special-casing here.
+// a room state change. Each delivered pair carries a strictly increasing
+// per-room sequence revision, so the frontend can always order events for a
+// room. The 5s gate coalesces churn only for rooms that are neither carrying a
+// QR nor stopping: a QR-bearing room must deliver QR refreshes at fetch
+// cadence, and a stop must always be delivered so clients clear their QR view.
+// Rooms without a QR (initial-poll Fetching/Running churn) stay coalesced at
+// 5s.
 func (rm *RoomManager) emitRoomEvents(room domain.Room) {
 	rm.emitMu.Lock()
-	last, exists := rm.lastEmittedAt[room.RoomID]
 	now := time.Now()
-	if exists && now.Sub(last) < minEmitInterval {
+	timeCritical := room.QRURL != nil || room.Status == domain.Stopped
+	last, exists := rm.lastEmittedAt[room.RoomID]
+	if !timeCritical && exists && now.Sub(last) < minEmitInterval {
 		rm.emitMu.Unlock()
 		return
 	}
 	rm.lastEmittedAt[room.RoomID] = now
+	rm.emitSeqs[room.RoomID]++
+	revision := rm.emitSeqs[room.RoomID]
 	rm.emitMu.Unlock()
 
 	rm.emit(RoomManagerEvent{Type: "RoomUpdated", Data: domain.NewRoomLite(room)})
@@ -415,15 +425,8 @@ func (rm *RoomManager) emitRoomEvents(room domain.Room) {
 		Status:    room.Status,
 		ExpiresAt: room.ExpiresAt,
 		HasQR:     room.QRURL != nil,
-		Revision:  roomRevision(room),
+		Revision:  revision,
 	}})
-}
-
-func roomRevision(room domain.Room) int64 {
-	if room.LastUpdatedAt != nil {
-		return room.LastUpdatedAt.UnixNano()
-	}
-	return time.Now().UnixNano()
 }
 
 func (rm *RoomManager) handleNoQRClient(state *RoomState) {
