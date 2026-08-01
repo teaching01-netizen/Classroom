@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -264,10 +265,8 @@ func (r *SnapshotRepository) Seed(ctx context.Context, seeds []domain.TargetSeed
 		return fmt.Errorf("seed targets: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	for _, seed := range seeds {
-		if err := upsertSeed(ctx, tx, seed); err != nil {
-			return err
-		}
+	if err := upsertSeeds(ctx, tx, seeds); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("seed targets: commit: %w", err)
@@ -279,27 +278,61 @@ type dbExecutor interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
 
-func upsertSeed(ctx context.Context, executor dbExecutor, seed domain.TargetSeed) error {
-	if err := seed.Ref.Validate(); err != nil {
-		return err
+// upsertSeeds validates every seed up front, then upserts all of them in a
+// single INSERT ... SELECT FROM unnest statement. Validation happens before
+// any insert, so one invalid seed aborts the whole batch (the caller's
+// transaction rolls back), matching the previous per-seed transactional loop.
+// Every column travels as a text array and is cast in SQL so encoding stays
+// clean under QueryExecModeSimpleProtocol (jsonb/arrays from Go can otherwise
+// be encoded as bytea hex).
+func upsertSeeds(ctx context.Context, executor dbExecutor, seeds []domain.TargetSeed) error {
+	if len(seeds) == 0 {
+		return nil
 	}
-	if seed.InitialInterval <= 0 || seed.MinInterval <= 0 ||
-		seed.MaxInterval < seed.MinInterval || seed.MaxServeAge < seed.MaxInterval {
-		return fmt.Errorf("invalid policy for target %s", seed.Ref.IdentityKey())
-	}
-	if seed.NextRunAt.IsZero() {
-		return fmt.Errorf("target %s next run is required", seed.Ref.IdentityKey())
-	}
-	attributes := seed.Attributes
-	if len(attributes) == 0 {
-		attributes = json.RawMessage(`{}`)
-	}
-	if !json.Valid(attributes) {
-		return fmt.Errorf("target %s attributes are invalid JSON", seed.Ref.IdentityKey())
-	}
-	priority := seed.Priority
-	if priority <= 0 {
-		priority = 50
+	hosts := make([]string, 0, len(seeds))
+	kinds := make([]string, 0, len(seeds))
+	resourceKeys := make([]string, 0, len(seeds))
+	parentKeys := make([]string, 0, len(seeds))
+	attributes := make([]string, 0, len(seeds))
+	priorities := make([]string, 0, len(seeds))
+	currentIntervals := make([]string, 0, len(seeds))
+	minIntervals := make([]string, 0, len(seeds))
+	maxIntervals := make([]string, 0, len(seeds))
+	maxServeAges := make([]string, 0, len(seeds))
+	nextRunAts := make([]string, 0, len(seeds))
+	for _, seed := range seeds {
+		if err := seed.Ref.Validate(); err != nil {
+			return err
+		}
+		if seed.InitialInterval <= 0 || seed.MinInterval <= 0 ||
+			seed.MaxInterval < seed.MinInterval || seed.MaxServeAge < seed.MaxInterval {
+			return fmt.Errorf("invalid policy for target %s", seed.Ref.IdentityKey())
+		}
+		if seed.NextRunAt.IsZero() {
+			return fmt.Errorf("target %s next run is required", seed.Ref.IdentityKey())
+		}
+		attrs := seed.Attributes
+		if len(attrs) == 0 {
+			attrs = json.RawMessage(`{}`)
+		}
+		if !json.Valid(attrs) {
+			return fmt.Errorf("target %s attributes are invalid JSON", seed.Ref.IdentityKey())
+		}
+		priority := seed.Priority
+		if priority <= 0 {
+			priority = 50
+		}
+		hosts = append(hosts, seed.Ref.Host)
+		kinds = append(kinds, string(seed.Ref.Kind))
+		resourceKeys = append(resourceKeys, seed.Ref.ResourceKey)
+		parentKeys = append(parentKeys, seed.Ref.ParentKey)
+		attributes = append(attributes, string(attrs))
+		priorities = append(priorities, strconv.Itoa(priority))
+		currentIntervals = append(currentIntervals, strconv.FormatInt(durationSeconds(seed.InitialInterval), 10))
+		minIntervals = append(minIntervals, strconv.FormatInt(durationSeconds(seed.MinInterval), 10))
+		maxIntervals = append(maxIntervals, strconv.FormatInt(durationSeconds(seed.MaxInterval), 10))
+		maxServeAges = append(maxServeAges, strconv.FormatInt(durationSeconds(seed.MaxServeAge), 10))
+		nextRunAts = append(nextRunAts, seed.NextRunAt.UTC().Format(time.RFC3339Nano))
 	}
 	_, err := executor.Exec(ctx, `
 		INSERT INTO scrape_targets (
@@ -308,8 +341,20 @@ func upsertSeed(ctx context.Context, executor dbExecutor, seed domain.TargetSeed
 			current_interval_seconds, min_interval_seconds,
 			max_interval_seconds, max_serve_age_seconds, next_run_at
 		)
-		VALUES ($1, $2, $3, $4, $5,
-			$6, $7, $8, $9, $10, $11)
+		SELECT
+			host, kind, resource_key, parent_key, attributes::jsonb,
+			priority::integer,
+			current_interval_seconds::integer, min_interval_seconds::integer,
+			max_interval_seconds::integer, max_serve_age_seconds::integer,
+			next_run_at::timestamptz
+		FROM unnest(
+			$1::text[], $2::text[], $3::text[], $4::text[], $5::text[],
+			$6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[]
+		) AS t(
+			host, kind, resource_key, parent_key, attributes,
+			priority, current_interval_seconds, min_interval_seconds,
+			max_interval_seconds, max_serve_age_seconds, next_run_at
+		)
 		ON CONFLICT (host, kind, parent_key, resource_key) DO UPDATE
 		SET attributes = EXCLUDED.attributes,
 			priority = LEAST(scrape_targets.priority, EXCLUDED.priority),
@@ -327,20 +372,11 @@ func upsertSeed(ctx context.Context, executor dbExecutor, seed domain.TargetSeed
 			missing_count = 0,
 			enabled = TRUE,
 			updated_at = NOW()`,
-		seed.Ref.Host,
-		seed.Ref.Kind,
-		seed.Ref.ResourceKey,
-		seed.Ref.ParentKey,
-		attributes,
-		priority,
-		durationSeconds(seed.InitialInterval),
-		durationSeconds(seed.MinInterval),
-		durationSeconds(seed.MaxInterval),
-		durationSeconds(seed.MaxServeAge),
-		seed.NextRunAt,
+		hosts, kinds, resourceKeys, parentKeys, attributes,
+		priorities, currentIntervals, minIntervals, maxIntervals, maxServeAges, nextRunAts,
 	)
 	if err != nil {
-		return fmt.Errorf("seed target %s: %w", seed.Ref.IdentityKey(), err)
+		return fmt.Errorf("seed %d targets: %w", len(seeds), err)
 	}
 	return nil
 }
@@ -989,10 +1025,8 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 		}
 	}
 
-	for _, seed := range input.Discovered {
-		if err := upsertSeed(ctx, tx, seed); err != nil {
-			return CommitResult{}, err
-		}
+	if err := upsertSeeds(ctx, tx, input.Discovered); err != nil {
+		return CommitResult{}, err
 	}
 	for index := range input.Candidates {
 		if err := insertCandidate(ctx, tx, input.Candidates[index]); err != nil {
@@ -1112,10 +1146,8 @@ func (r *SnapshotRepository) ReconcileLifecycle(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	for _, seed := range input.DiscoveredSeeds {
-		if err := upsertSeed(ctx, tx, seed); err != nil {
-			return err
-		}
+	if err := upsertSeeds(ctx, tx, input.DiscoveredSeeds); err != nil {
+		return err
 	}
 
 	seenKeys := make([]string, 0, len(input.SeenChildRefs))

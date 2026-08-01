@@ -1121,6 +1121,57 @@ func TestSnapshotRepositorySeedPreservesAdaptiveIntervalWithinNewPolicy(t *testi
 	require.Equal(t, 4*time.Hour, stored.CurrentInterval)
 }
 
+func TestSnapshotRepositorySeedBatchesChildrenIdempotently(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	parent := catalogSeed(now)
+	parent.Ref.ResourceKey = "batch-parent"
+	children := make([]domain.TargetSeed, 0, 100)
+	for i := range 100 {
+		children = append(children, domain.TargetSeed{
+			Ref: domain.TargetRef{
+				Host: testSnapshotHost, Kind: domain.SnapshotCourseDetail,
+				ParentKey: parent.Ref.ResourceKey, ResourceKey: fmt.Sprintf("course-%03d", i),
+			},
+			Attributes:      json.RawMessage(fmt.Sprintf(`{"course_index":%d}`, i)),
+			InitialInterval: time.Hour,
+			MinInterval:     15 * time.Minute,
+			MaxInterval:     4 * time.Hour,
+			MaxServeAge:     8 * time.Hour,
+			NextRunAt:       now,
+		})
+	}
+	require.NoError(t, repo.Seed(ctx, append([]domain.TargetSeed{parent}, children...)))
+
+	countChildren := func() int {
+		var count int
+		require.NoError(t, repo.pool.QueryRow(ctx,
+			`SELECT count(*) FROM scrape_targets WHERE host=$1 AND kind=$2 AND parent_key=$3`,
+			testSnapshotHost, domain.SnapshotCourseDetail, parent.Ref.ResourceKey,
+		).Scan(&count))
+		return count
+	}
+	require.Equal(t, 100, countChildren())
+
+	// Re-seeding the same children must not duplicate, and the conflict-update
+	// branch must apply changed attributes to the existing rows.
+	reSeeded := make([]domain.TargetSeed, 0, len(children))
+	for i, child := range children {
+		updated := child
+		updated.Attributes = json.RawMessage(fmt.Sprintf(`{"course_index":%d,"updated":true}`, i))
+		reSeeded = append(reSeeded, updated)
+	}
+	require.NoError(t, repo.Seed(ctx, reSeeded))
+	require.Equal(t, 100, countChildren())
+
+	var attrs []byte
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT attributes FROM scrape_targets WHERE host=$1 AND kind=$2 AND parent_key=$3 AND resource_key=$4`,
+		testSnapshotHost, domain.SnapshotCourseDetail, parent.Ref.ResourceKey, "course-003",
+	).Scan(&attrs))
+	require.JSONEq(t, `{"course_index":3,"updated":true}`, string(attrs))
+}
+
 func TestSnapshotRepositoryCurrentNotFoundBeforeSuccess(t *testing.T) {
 	repo, ctx := newSnapshotRepositoryTest(t)
 	now := time.Now().UTC()
