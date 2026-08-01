@@ -655,6 +655,226 @@ func TestSnapshotSourceProfilesRejectChangedFirstPageOnRefetch(t *testing.T) {
 	require.Contains(t, err.Error(), "pagination set was unstable")
 }
 
+// snapshotOrderedRoundTripper serializes the failing start=500 request behind
+// its start=1000 sibling's fully-read body. fetchProfiles cancels the parallel
+// phase on the first transport error, which would otherwise race the sibling's
+// body read and make its byte count nondeterministic.
+type snapshotOrderedRoundTripper struct {
+	base          http.RoundTripper
+	page1000Done  chan struct{}
+	page1000Close sync.Once
+}
+
+func (tr *snapshotOrderedRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Path != "/admin/api/UserGroupSearch" {
+		return tr.base.RoundTrip(req)
+	}
+	payload, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	req.Body = io.NopCloser(bytes.NewReader(payload))
+	_ = req.ParseForm()
+	req.Body = io.NopCloser(bytes.NewReader(payload))
+	start := req.Form.Get("start")
+	if start == "1000" {
+		response, err := tr.base.RoundTrip(req)
+		if err == nil {
+			response.Body = &signalCloseBody{
+				ReadCloser: response.Body,
+				close:      func() { tr.page1000Close.Do(func() { close(tr.page1000Done) }) },
+			}
+		}
+		return response, err
+	}
+	if start == "500" {
+		<-tr.page1000Done
+	}
+	return tr.base.RoundTrip(req)
+}
+
+type signalCloseBody struct {
+	io.ReadCloser
+	close func()
+}
+
+func (body *signalCloseBody) Close() error {
+	body.close()
+	return body.ReadCloser.Close()
+}
+
+func TestSnapshotSourceProfilesRejectParallelPageFailure(t *testing.T) {
+	type parallelFailureCase struct {
+		name string
+		// total drives expectedPages: 1000 exercises one parallel page, 1500
+		// exercises two so the failure path also carries a successful page's bytes.
+		total int
+		// serve returns the HTTP status and payload for a page start.
+		serve func(t *testing.T, start int) (int, []byte)
+		// orderedTransport serializes the failing page behind its sibling's
+		// fully-read body so cancel() cannot truncate the byte count.
+		orderedTransport bool
+		// wantStatus > 0 asserts *domain.UpstreamStatusError; otherwise a
+		// *domain.FetchError with wantKind and wantMessage.
+		wantStatus            int
+		wantKind              domain.FetchErrorKind
+		wantMessage           string
+		wantErrMetadataStatus int
+	}
+
+	cases := []parallelFailureCase{
+		{
+			name:             "transport error on second page",
+			total:            1500,
+			orderedTransport: true,
+			serve: func(t *testing.T, start int) (int, []byte) {
+				if start == 500 {
+					return http.StatusInternalServerError, []byte("boom")
+				}
+				payload, err := json.Marshal(UserGroupSearchResponse{
+					Draw:            1,
+					RecordsTotal:    1500,
+					RecordsFiltered: 1500,
+					Data:            profileRowsFrom(start, profilePageSize),
+				})
+				require.NoError(t, err)
+				return http.StatusOK, payload
+			},
+			wantStatus:            http.StatusInternalServerError,
+			wantErrMetadataStatus: http.StatusInternalServerError,
+		},
+		{
+			name:  "record count changed on second page",
+			total: 1000,
+			serve: func(t *testing.T, start int) (int, []byte) {
+				filtered := 1000
+				if start == 500 {
+					filtered = 900 // page 0 reported 1000
+				}
+				payload, err := json.Marshal(UserGroupSearchResponse{
+					Draw:            1,
+					RecordsTotal:    1000,
+					RecordsFiltered: filtered,
+					Data:            profileRowsFrom(start, profilePageSize),
+				})
+				require.NoError(t, err)
+				return http.StatusOK, payload
+			},
+			wantKind:              domain.ErrKindInvalidPayload,
+			wantMessage:           "record count changed during pagination",
+			wantErrMetadataStatus: http.StatusOK,
+		},
+		{
+			name:  "short second page",
+			total: 1000,
+			serve: func(t *testing.T, start int) (int, []byte) {
+				count := profilePageSize
+				if start == 500 {
+					count = 100 // expected 500 rows at start=500
+				}
+				payload, err := json.Marshal(UserGroupSearchResponse{
+					Draw:            1,
+					RecordsTotal:    1000,
+					RecordsFiltered: 1000,
+					Data:            profileRowsFrom(start, count),
+				})
+				require.NoError(t, err)
+				return http.StatusOK, payload
+			},
+			wantKind:              domain.ErrKindInvalidPayload,
+			wantMessage:           "incomplete page",
+			wantErrMetadataStatus: http.StatusOK,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var bytesMu sync.Mutex
+			bytesByStart := make(map[int]int64)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.NoError(t, r.ParseForm())
+				startValue, err := strconv.Atoi(r.Form.Get("start"))
+				require.NoError(t, err)
+				status, payload := tc.serve(t, startValue)
+				if status == http.StatusOK {
+					bytesMu.Lock()
+					bytesByStart[startValue] += int64(len(payload))
+					bytesMu.Unlock()
+				}
+				if status != http.StatusOK {
+					w.WriteHeader(status)
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+				}
+				_, _ = w.Write(payload)
+			}))
+			defer server.Close()
+			source := snapshotTestClient(server, 1<<20)
+			if tc.orderedTransport {
+				source.client.SetTransport(&snapshotOrderedRoundTripper{
+					base:         server.Client().Transport,
+					page1000Done: make(chan struct{}),
+				})
+			}
+
+			result, err := source.Fetch(context.Background(), profilesTarget())
+			require.Error(t, err)
+			if tc.wantStatus > 0 {
+				var statusErr *domain.UpstreamStatusError
+				require.ErrorAs(t, err, &statusErr)
+				require.Equal(t, tc.wantStatus, statusErr.StatusCode)
+				require.Contains(t, err.Error(), "upstream returned HTTP 500")
+			} else {
+				var fetchErr *domain.FetchError
+				require.ErrorAs(t, err, &fetchErr)
+				require.Equal(t, tc.wantKind, fetchErr.Kind)
+				require.Contains(t, err.Error(), tc.wantMessage)
+			}
+			// Transport failures surface the failing page's own metadata;
+			// validation failures surface the first (page-0) metadata.
+			require.Equal(t, tc.wantErrMetadataStatus, result.Metadata.StatusCode)
+
+			bytesMu.Lock()
+			var expectedBytes int64
+			for _, size := range bytesByStart {
+				expectedBytes += size
+			}
+			page0Bytes := bytesByStart[0]
+			bytesMu.Unlock()
+			require.Equal(t, expectedBytes, result.BytesRead,
+				"error-path BytesRead must total every completed page")
+			require.Greater(t, result.BytesRead, page0Bytes,
+				"error-path BytesRead must include the parallel page's bytes")
+		})
+	}
+}
+
+func TestSnapshotSourceProfilesZeroRecordsSinglePage(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		require.NoError(t, r.ParseForm())
+		require.Equal(t, "0", r.Form.Get("start"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"draw":1,"recordsTotal":0,"recordsFiltered":0,"data":[]}`))
+	}))
+	defer server.Close()
+	source := snapshotTestClient(server, 1<<20)
+
+	result, err := source.Fetch(context.Background(), profilesTarget())
+	require.NoError(t, err)
+	profiles, ok := result.Value.([]domain.StudentProfile)
+	require.True(t, ok)
+	require.Empty(t, profiles)
+	require.Equal(t, 1, result.FetchedPages)
+	require.Equal(t, 0, result.ExpectedPages)
+	require.Equal(t, 0, result.ReportedCount)
+	// The single-request behavior is load-bearing: single-page fetches never
+	// run the page-0 stability refetch (coordinator gates on FetchedPages <= 1).
+	require.Equal(t, int32(1), calls.Load())
+}
+
 func TestSnapshotSourceRenewsAuthenticationOnce(t *testing.T) {
 	var loginCalls atomic.Int32
 	var fetchCalls atomic.Int32
