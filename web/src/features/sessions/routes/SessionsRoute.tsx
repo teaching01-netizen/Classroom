@@ -1,4 +1,4 @@
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { courseIdSchema } from '@/features/courses'
 import { useCourseSessionsQuery } from '../api/session.queries'
 import { AsyncPage } from '@/shared/ui/AsyncPage'
@@ -25,6 +25,7 @@ export function Component() {
     throw new Response('Course not found', { status: 404 })
   }
   const courseId = courseIdResult.data
+  const navigate = useNavigate()
   const query = useCourseSessionsQuery(courseId)
   const sessions = query.data?.sessions ?? []
   const stats = [
@@ -69,7 +70,16 @@ export function Component() {
             </thead>
             <tbody>
               {sessions.map((session) => (
-                <tr className="session-row" key={session.session_id}>
+                <tr
+                  className="session-row"
+                  key={session.session_id}
+                  onClick={(event) => {
+                    // Let clicks on the session-name link handle themselves;
+                    // everything else on the row navigates to the session.
+                    if ((event.target as HTMLElement).closest('a') !== null) return
+                    navigate(`/courses/${courseId}/sessions/${session.session_id}`)
+                  }}
+                >
                   <td>
                     <Link
                       className="session-card-link"

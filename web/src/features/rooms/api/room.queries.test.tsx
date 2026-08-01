@@ -164,6 +164,34 @@ describe('useRoomQuery', () => {
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
+
+  it('resumes polling while the room is still starting (no qr_url yet)', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({
+        success: true,
+        data: { room_id: 'room-1', status: 'starting' },
+      }),
+      { status: 202, headers: { 'Content-Type': 'application/json' } },
+    ))
+    const queryClient = makeQueryClient()
+    const { result } = renderQuery(() => useRoomQuery('room-1', true), queryClient)
+
+    await act(async () => {
+      for (let i = 0; i < 5; i++) {
+        await vi.advanceTimersByTimeAsync(0)
+      }
+    })
+
+    expect(result.current.data?.qr_url).toBeUndefined()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    // Fast-poll phase (first 3s at 500ms) keeps fetching until qr_url arrives.
+    act(() => {
+      vi.advanceTimersByTime(500)
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
 })
 
 afterEach(() => {

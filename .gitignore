@@ -3,6 +3,14 @@
 .env.*
 !.env.example
 
+# local tooling / agent state
+.codegraph
+.swarm/
+.mimocode/
+.opencode/
+.worktrees/
+.issues/
+
 # go build output (root-anchored so cmd/server/ source is never shadowed)
 /server
 

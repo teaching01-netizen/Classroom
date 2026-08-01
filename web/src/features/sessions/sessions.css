@@ -1,5 +1,6 @@
 .session-row {
   position: relative;
+  cursor: pointer;
 }
 
 .session-card-link {

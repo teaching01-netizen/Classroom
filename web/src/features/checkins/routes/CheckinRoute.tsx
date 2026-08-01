@@ -184,6 +184,7 @@ export function Component() {
       <QrDialog
         checkedCount={checkedCount}
         courseName={courseQuery.data?.name ?? undefined}
+        expiresAt={qr.expiresAt}
         onClose={qr.closeQr}
         onRefresh={qr.refresh}
         open={qr.open}
