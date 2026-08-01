@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,6 +93,69 @@ func TestEnsureSessionRoom_RegistersAndStartsPersistedRoom(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, domain.Idle, room.Status)
 	assert.NotEqual(t, domain.Stopped, room.Status)
+	require.NoError(t, rm.StopRoom("session-1"))
+}
+
+// recordingQRClient records every QR fetch it receives so tests can assert
+// that a room's worker actually runs.
+type recordingQRClient struct {
+	mu      sync.Mutex
+	fetches []string
+}
+
+func (c *recordingQRClient) FetchQRContext(_ context.Context, classID string) (domain.QrResponse, error) {
+	c.mu.Lock()
+	c.fetches = append(c.fetches, classID)
+	c.mu.Unlock()
+	return domain.QrResponse{
+		QrURL:  "data:image/png;base64,QUJD",
+		QrTime: domain.QrTime(60),
+	}, nil
+}
+
+func (c *recordingQRClient) FetchQRWithFreshAuthContext(ctx context.Context, classID string) (domain.QrResponse, error) {
+	return c.FetchQRContext(ctx, classID)
+}
+
+func (c *recordingQRClient) Fetches() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.fetches...)
+}
+
+func TestEnsureSessionRoom_StartsWorkerForPersistedRunningRoom(t *testing.T) {
+	// A room persisted as Running by a previous process has no in-process
+	// worker after a cold start. EnsureSessionRoom must not trust the
+	// persisted status: it has to start a live worker so the QR is fetched.
+	// This mirrors the production failure where a restarted serverless
+	// instance served a stale "Running" room whose QR was never generated.
+	persisted := domain.Room{
+		RoomID:  "session-1",
+		ClassID: "session-1",
+		Status:  domain.Running,
+	}
+	repo := newIdleRoomRepository(persisted)
+	hub := NewEventHub(16, 16)
+	defer hub.Close()
+	qr := &recordingQRClient{}
+	rm := NewRoomManagerWithEventHub(qr, repo, hub)
+	require.NoError(t, rm.LoadRoomsFromDB())
+
+	room, err := rm.EnsureSessionRoom("session-1", "course-1")
+	require.NoError(t, err)
+	assert.Equal(t, "session-1", room.RoomID)
+
+	rm.mu.RLock()
+	state := rm.rooms["session-1"]
+	rm.mu.RUnlock()
+	require.NotNil(t, state)
+	require.NotNil(t, state.cancel, "persisted Running room must get a live QR worker")
+
+	require.Eventually(t, func() bool {
+		return len(qr.Fetches()) >= 1
+	}, 2*time.Second, 10*time.Millisecond)
+	assert.Equal(t, []string{"session-1"}, qr.Fetches())
+
 	require.NoError(t, rm.StopRoom("session-1"))
 }
 

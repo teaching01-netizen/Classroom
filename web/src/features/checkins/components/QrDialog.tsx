@@ -7,6 +7,10 @@ type QrDialogProps = {
   readonly open: boolean
   readonly qrUrl?: string | undefined
   readonly expiresAt?: string | undefined
+  // Backend room state surfaced so a failed QR fetch is not an eternal
+  // "Generating…" spinner: error/warning messages explain why no QR exists.
+  readonly errorMessage?: string | undefined
+  readonly warningMessage?: string | undefined
   // Roster-derived labels are optional so the QR renders independently of
   // roster loading.
   readonly courseName?: string | undefined
@@ -37,6 +41,8 @@ export function QrDialog({
   open,
   qrUrl,
   expiresAt,
+  errorMessage,
+  warningMessage,
   courseName,
   sessionName,
   checkedCount,
@@ -50,6 +56,7 @@ export function QrDialog({
   // A QR whose expiry is missing or already past may be rejected when scanned.
   // Suppress the warning while a refresh is in flight so it does not flash.
   const showStaleWarning = hasQr && (secondsLeft === null || secondsLeft === 0) && !refreshing
+  const blockerMessage = errorMessage ?? warningMessage
 
   return (
     <Dialog
@@ -61,7 +68,12 @@ export function QrDialog({
       title="Student check-in QR code"
     >
       <div className="qr-dialog">
-        {!hasQr ? (
+        {!hasQr && blockerMessage !== undefined ? (
+          <div className="qr-dialog__blocked" role="alert">
+            <p>{blockerMessage}</p>
+            <p>Refresh to try again once the session recovers.</p>
+          </div>
+        ) : !hasQr ? (
           <div className="qr-dialog__pending" role="status">
             <Spinner size="lg" />
             <p>Generating a fresh QR code…</p>

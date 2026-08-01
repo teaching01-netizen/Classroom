@@ -228,9 +228,15 @@ func (rm *RoomManager) CreateRoom(roomID string, classID string, name *string) (
 
 // EnsureSessionRoom finds or creates the QR room for a session (room_id ==
 // session_id), registers it in-memory if it was persisted by another process,
-// starts it when it is not already running, and records the course id that
-// gates the active-room check-in sync loop. It is the backend half of the
-// combined POST /api/rooms/from-session/start flow.
+// starts a live QR worker when none is running, and records the course id
+// that gates the active-room check-in sync loop. It is the backend half of
+// the combined POST /api/rooms/from-session/start flow.
+//
+// A room persisted as Running (or Fetching) by a previous process or
+// deployment has no in-process worker after a restart, so the persisted
+// status cannot be trusted: only a live worker (cancel != nil) proves the QR
+// loop is running. Relying on the status left restarted serverless instances
+// serving stale "Running" rooms whose QR was never fetched.
 func (rm *RoomManager) EnsureSessionRoom(sessionID string, courseID string) (domain.Room, error) {
 	if sessionID == "" {
 		return domain.Room{}, errors.New("session id is required")
@@ -240,20 +246,26 @@ func (rm *RoomManager) EnsureSessionRoom(sessionID string, courseID string) (dom
 		return domain.Room{}, err
 	}
 	rm.mu.Lock()
-	if state, ok := rm.rooms[sessionID]; ok && state.courseID == "" && courseID != "" {
-		state.courseID = courseID
+	state, ok := rm.rooms[sessionID]
+	if ok {
+		if state.courseID == "" && courseID != "" {
+			state.courseID = courseID
+		}
+		needsStart := state.cancel == nil
+		rm.mu.Unlock()
+		if needsStart {
+			if err := rm.StartRoom(sessionID); err != nil {
+				return domain.Room{}, err
+			}
+		}
+		// Return the live in-memory room, not the repository copy that
+		// CreateRoom's dedup may return (it can lag behind in-process state).
+		if started := rm.GetRoom(sessionID); started != nil {
+			return *started, nil
+		}
+		return room, nil
 	}
 	rm.mu.Unlock()
-
-	if room.Status != domain.Running && room.Status != domain.Fetching {
-		if err := rm.StartRoom(sessionID); err != nil {
-			return domain.Room{}, err
-		}
-		started := rm.GetRoom(sessionID)
-		if started != nil {
-			room = *started
-		}
-	}
 	return room, nil
 }
 

@@ -101,4 +101,20 @@ describe('QrDialog', () => {
     )
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
+
+  it('shows the backend error instead of the spinner when the QR cannot be generated', () => {
+    render(
+      <QrDialog {...baseProps} errorMessage="Session recovery failed after 10 attempts" />,
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent('Session recovery failed after 10 attempts')
+    expect(screen.queryByText('Generating a fresh QR code…')).not.toBeInTheDocument()
+  })
+
+  it('shows the backend warning instead of the spinner while recovery is in progress', () => {
+    render(
+      <QrDialog {...baseProps} warningMessage="Session expired, retrying..." />,
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent('Session expired, retrying...')
+    expect(screen.queryByText('Generating a fresh QR code…')).not.toBeInTheDocument()
+  })
 })

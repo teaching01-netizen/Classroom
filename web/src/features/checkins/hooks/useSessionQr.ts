@@ -72,6 +72,8 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
 
   const qrUrl = roomQuery.data?.qr_url ?? undefined
   const expiresAt = roomQuery.data?.expires_at ?? undefined
+  const errorMessage = roomQuery.data?.error_message ?? undefined
+  const warningMessage = roomQuery.data?.warning_message ?? undefined
 
   useEffect(() => {
     if (!open) {
@@ -97,6 +99,8 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
   return {
     qrUrl,
     expiresAt,
+    errorMessage,
+    warningMessage,
     open,
     refreshing: startRoom.isPending || roomQuery.isFetching,
     openQr,
