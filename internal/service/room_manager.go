@@ -526,7 +526,13 @@ func (rm *RoomManager) StopAllActiveRooms(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// shouldFetchQR determines if the QR code needs refreshing.
+// shouldFetchQR determines if the QR code needs refreshing. The next fetch is
+// due once 75% of the token lifetime has elapsed: the current token was issued
+// at expiresAt-ttl, so fetch when now passes issue-time + 75% of the TTL,
+// leaving a 25%-TTL safety margin before expiry. (CalculateNextFetchDelay is
+// the period between fetches, ttl*3/4.) Treating 75% as the margin instead —
+// the previous behavior — made the period only 25% of the TTL and quadrupled
+// upstream GetQRCode traffic.
 func shouldFetchQR(expiresAt *time.Time, lastQrTime uint64, now time.Time) bool {
 	if expiresAt == nil {
 		return true
@@ -535,7 +541,9 @@ func shouldFetchQR(expiresAt *time.Time, lastQrTime uint64, now time.Time) bool 
 	if ttl == 0 {
 		ttl = 60
 	}
-	return now.After(expiresAt.Add(-time.Duration(domain.CalculateNextFetchDelay(ttl)) * time.Second))
+	issuedAt := expiresAt.Add(-time.Duration(ttl) * time.Second)
+	nextFetchAt := issuedAt.Add(time.Duration(domain.CalculateNextFetchDelay(ttl)) * time.Second)
+	return now.After(nextFetchAt)
 }
 
 // handleRoomFetchSuccess updates room state after a successful QR fetch.

@@ -6,7 +6,8 @@
 #
 # Usage:
 #   scripts/verify-scan-flow.sh [session_id] [base_url]
-#   scripts/verify-scan-flow.sh [session_id] [base_url] --rotate   # also proves the QR rotates
+#   scripts/verify-scan-flow.sh [session_id] [base_url] --rotate   # proves the QR rotates
+#   scripts/verify-scan-flow.sh [session_id] [base_url] --timing   # measures token TTL vs refresh cadence
 #
 # Defaults: session_id=18898, base_url=https://classroom-warwick.up.railway.app
 #
@@ -91,6 +92,63 @@ if [ "$ROTATE" = "--rotate" ]; then
   else
     fail "QR did not rotate after 65s (still showing the old code)"
   fi
+fi
+
+if [ "$ROTATE" = "--timing" ]; then
+  echo "==> Measuring token TTL and actual refresh cadence (up to 90s)..."
+  python3 - "$BASE" "$SESSION" <<'PY'
+import json, sys, time, urllib.request
+
+base, session = sys.argv[1], sys.argv[2]
+
+def room():
+    with urllib.request.urlopen(f"{base}/api/rooms/{session}", timeout=30) as r:
+        return json.load(r)["data"]
+
+def parse(ts):
+    return time.mktime(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")) + float("." + (ts.split(".")[1][:6] if "." in ts else "0"))
+
+d = room()
+fetched, expires = d.get("last_fetch_at"), d.get("expires_at")
+if not fetched or not expires:
+    print("FAIL: room has no last_fetch_at/expires_at"); sys.exit(1)
+ttl = parse(expires) - parse(fetched)
+print(f"    token TTL (expires_at - last_fetch_at) = {ttl:.0f}s")
+
+start = time.time()
+last_fetch = fetched
+rotations = []
+while time.time() - start < 90:
+    d = room()
+    if d.get("last_fetch_at") and d["last_fetch_at"] != last_fetch:
+        interval = parse(d["last_fetch_at"]) - parse(last_fetch)
+        rotations.append(interval)
+        print(f"    rotation at +{time.time()-start:.0f}s: refresh interval = {interval:.1f}s")
+        last_fetch = d["last_fetch_at"]
+        if len(rotations) >= 2:
+            break
+    time.sleep(2)
+
+if not rotations:
+    print("FAIL: no QR refresh observed within 90s (worker not refreshing?)")
+    sys.exit(1)
+
+interval = sum(rotations) / len(rotations)
+expected = ttl * 0.75
+print(f"    observed refresh interval = {interval:.1f}s, expected 75% of TTL = {expected:.1f}s")
+lo, hi = ttl * 0.5, ttl
+if lo <= interval <= hi:
+    print(f"PASS: refresh interval ({interval:.1f}s) is near the documented 75%-of-TTL cadence "
+          f"and within the token lifetime ({ttl:.0f}s) — the room always holds a valid token")
+elif interval < lo:
+    print(f"WARN: refresh interval ({interval:.1f}s) is only {interval/ttl:.0%} of the TTL — "
+          f"too aggressive (old shouldFetchQR treated 75% as the expiry margin, "
+          f"making the period 25% of TTL). Redeploy the worker fix.")
+else:
+    print(f"FAIL: refresh interval ({interval:.1f}s) exceeds the token TTL ({ttl:.0f}s) — "
+          f"stale-token risk")
+    sys.exit(1)
+PY
 fi
 
 echo

@@ -97,19 +97,25 @@ func TestEnsureSessionRoom_RegistersAndStartsPersistedRoom(t *testing.T) {
 }
 
 // recordingQRClient records every QR fetch it receives so tests can assert
-// that a room's worker actually runs.
+// that a room's worker actually runs and that it refetches on the QR-time
+// schedule. qrTime is the token lifetime the fake hands back (default 60s).
 type recordingQRClient struct {
 	mu      sync.Mutex
 	fetches []string
+	qrTime  domain.QrTime
 }
 
 func (c *recordingQRClient) FetchQRContext(_ context.Context, classID string) (domain.QrResponse, error) {
 	c.mu.Lock()
 	c.fetches = append(c.fetches, classID)
 	c.mu.Unlock()
+	ttl := c.qrTime
+	if ttl == 0 {
+		ttl = 60
+	}
 	return domain.QrResponse{
 		QrURL:  "data:image/png;base64,QUJD",
-		QrTime: domain.QrTime(60),
+		QrTime: ttl,
 	}, nil
 }
 
@@ -155,6 +161,75 @@ func TestEnsureSessionRoom_StartsWorkerForPersistedRunningRoom(t *testing.T) {
 		return len(qr.Fetches()) >= 1
 	}, 2*time.Second, 10*time.Millisecond)
 	assert.Equal(t, []string{"session-1"}, qr.Fetches())
+
+	require.NoError(t, rm.StopRoom("session-1"))
+}
+
+// TestShouldFetchQR pins the refresh boundary: with a 60s token the next
+// fetch is due once 75% of the token lifetime (45s) has elapsed, i.e. with
+// 25% (15s) still remaining — the documented cadence. Refreshing more often
+// than that would quadruple upstream GetQRCode traffic for no benefit.
+func TestShouldFetchQR(t *testing.T) {
+	expiresAt := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	// No known expiry: always fetch.
+	assert.True(t, shouldFetchQR(nil, 60, time.Now()))
+
+	// Freshly fetched (now == expiry-60): nothing due.
+	assert.False(t, shouldFetchQR(&expiresAt, 60, expiresAt.Add(-60*time.Second)))
+
+	// 16s before expiry: 75% of the TTL has elapsed at expiry-15; not yet.
+	assert.False(t, shouldFetchQR(&expiresAt, 60, expiresAt.Add(-16*time.Second)))
+
+	// Exactly at the 75%-elapsed point (expiry-15): not strictly after → no fetch.
+	assert.False(t, shouldFetchQR(&expiresAt, 60, expiresAt.Add(-15*time.Second)))
+
+	// A nanosecond past it → fetch.
+	assert.True(t, shouldFetchQR(&expiresAt, 60, expiresAt.Add(-15*time.Second).Add(time.Nanosecond)))
+
+	// 10s before expiry → fetch (well past the point).
+	assert.True(t, shouldFetchQR(&expiresAt, 60, expiresAt.Add(-10*time.Second)))
+
+	// At and after expiry → fetch.
+	assert.True(t, shouldFetchQR(&expiresAt, 60, expiresAt))
+	assert.True(t, shouldFetchQR(&expiresAt, 60, expiresAt.Add(time.Second)))
+
+	// lastQrTime == 0 falls back to a 60s TTL (fetch at 75% elapsed).
+	zeroExp := time.Date(2026, 8, 1, 12, 1, 0, 0, time.UTC)
+	assert.False(t, shouldFetchQR(&zeroExp, 0, zeroExp.Add(-16*time.Second)))
+	assert.True(t, shouldFetchQR(&zeroExp, 0, zeroExp.Add(-14*time.Second)))
+
+	// A 120s token refreshes at 75% elapsed = 90s (30s remaining).
+	longExp := time.Date(2026, 8, 1, 12, 2, 0, 0, time.UTC)
+	assert.False(t, shouldFetchQR(&longExp, 120, longExp.Add(-31*time.Second)))
+	assert.True(t, shouldFetchQR(&longExp, 120, longExp.Add(-29*time.Second)))
+}
+
+// TestRoomWorkerRefetchesPerQrTimeSchedule proves the running worker honors
+// the 75%-of-TTL cadence, not just the pure shouldFetchQR function: with a 4s
+// token the next refresh is due 3s after the previous one (75% of the TTL),
+// so the worker must not refetch during the first ~1.2s, then must refetch.
+func TestRoomWorkerRefetchesPerQrTimeSchedule(t *testing.T) {
+	repo := newIdleRoomRepository()
+	hub := NewEventHub(16, 16)
+	defer hub.Close()
+	qr := &recordingQRClient{qrTime: 4}
+	rm := NewRoomManagerWithEventHub(qr, repo, hub)
+
+	_, err := rm.EnsureSessionRoom("session-1", "course-1")
+	require.NoError(t, err)
+
+	// The first fetch fires immediately on start.
+	require.Eventually(t, func() bool { return len(qr.Fetches()) >= 1 }, 2*time.Second, 10*time.Millisecond)
+	first := len(qr.Fetches())
+
+	// With a 4s TTL the refresh is due at 3s (75%). A mis-tuned worker that
+	// treated 75% as the expiry margin would refetch after ~1s — catch that.
+	time.Sleep(1200 * time.Millisecond)
+	assert.Equal(t, first, len(qr.Fetches()), "worker must not refetch before 75% of the TTL elapses")
+
+	// Once the point passes the worker fetches again.
+	require.Eventually(t, func() bool { return len(qr.Fetches()) >= first+1 }, 5*time.Second, 50*time.Millisecond)
 
 	require.NoError(t, rm.StopRoom("session-1"))
 }
