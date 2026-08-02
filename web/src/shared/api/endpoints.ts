@@ -9,6 +9,8 @@ export const endpoints = {
     `/api/teacher/courses/${encode(courseId)}/sessions/${encode(sessionId)}/toggle-checkin`,
   attendance: (courseId: string, threshold: number) =>
     `/api/teacher/courses/${encode(courseId)}/attendance-report?threshold=${threshold}`,
+  attendanceExport: (courseId: string) =>
+    `/api/teacher/courses/${encode(courseId)}/attendance-report/export`,
   batchAttendance: '/api/teacher/courses/attendance-batch',
   absenceDashboard: (filters: string) =>
     `/api/teacher/absence-dashboard?filters=${encode(filters)}`,

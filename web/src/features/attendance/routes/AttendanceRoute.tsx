@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { courseIdSchema } from '@/features/courses'
 import { useAttendanceQuery } from '../api/attendance.queries'
+import { downloadAttendanceReport, type AttendanceExportFormat } from '../api/attendance.exports'
 import { attendancePercent } from '../lib/attendance'
 import { AsyncPage } from '@/shared/ui/AsyncPage'
 import { Avatar } from '@/shared/ui/Avatar'
@@ -23,6 +25,26 @@ export function Component() {
   const query = useAttendanceQuery(courseId)
   const report = query.data
   const atRiskCount = report?.students.filter((student) => student.atRisk).length ?? 0
+  const [exporting, setExporting] = useState<AttendanceExportFormat | null>(null)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const exportDisabled = query.isFetching || exporting !== null
+
+  async function exportReport(format: AttendanceExportFormat): Promise<void> {
+    setExporting(format)
+    setExportError(null)
+    try {
+      await downloadAttendanceReport({
+        courseId,
+        format,
+        threshold: report?.threshold ?? 0,
+      })
+      await query.refetch()
+    } catch (error: unknown) {
+      setExportError(getErrorMessage(error))
+    } finally {
+      setExporting(null)
+    }
+  }
 
   return (
     <section>
@@ -31,11 +53,45 @@ export function Component() {
         eyebrow="Attendance"
         title={report?.courseName ?? 'Attendance report'}
         description="Per-student attendance across completed sessions. Active and not-started sessions are excluded from risk calculations."
-        actions={<Button loading={query.isFetching} onClick={() => void query.refetch()}>Refresh report</Button>}
+        actions={(
+          <>
+            <Button loading={query.isFetching} onClick={() => void query.refetch()}>
+              Refresh report
+            </Button>
+            <Button
+              disabled={exportDisabled}
+              loading={exporting === 'csv'}
+              onClick={() => void exportReport('csv')}
+            >
+              Export CSV
+            </Button>
+            <Button
+              disabled={exportDisabled}
+              loading={exporting === 'xlsx'}
+              onClick={() => void exportReport('xlsx')}
+              variant="primary"
+            >
+              Export Excel
+            </Button>
+          </>
+        )}
       />
+      {(query.isFetching || exporting !== null) && (
+        <div aria-live="polite" className="sync-indicator" role="status">
+          Refreshing latest data…
+        </div>
+      )}
+      {report?.stale === true && (
+        <p className="notice notice--warning" role="status">
+          This stored attendance report may be out of date. Refresh or export to validate the latest data.
+        </p>
+      )}
+      {exportError !== null && (
+        <p className="notice notice--danger" role="alert">{exportError}</p>
+      )}
       <AsyncPage
         pending={query.isPending}
-        fetching={query.isFetching}
+        fetching={false}
         error={query.error === null ? null : getErrorMessage(query.error)}
         empty={report?.students.length === 0}
         emptyTitle="No attendance data"

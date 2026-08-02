@@ -103,6 +103,7 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 		r.With(rl.toggle.Middleware).Post("/courses/{courseId}/sessions/{sessionId}/toggle-checkin", toggleCheckinHandler(ts))
 		r.Put("/courses/{courseId}/sessions/{sessionId}/students/{studentId}/checkin", idempotentCheckinHandler(ts))
 		r.Get("/courses/{courseId}/attendance-report", getCourseAttendanceReportHandler(ts))
+		r.Post("/courses/{courseId}/attendance-report/export", attendanceExportHandler(ts))
 		r.Post("/courses/attendance-batch", getBatchAttendanceHandler(ts))
 
 		// Cross-course absence dashboard
