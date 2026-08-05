@@ -42,7 +42,6 @@ func (s *TeacherService) GetFreshAttendanceExport(
 		return s.getLiveAttendanceExport(ctx, courseID, threshold)
 	}
 
-	barrierStart := s.now()
 	started := time.Now()
 	snapshots, ok := s.reader.(snapshotAwareReader)
 	if !s.snapshotMode || !ok {
@@ -59,18 +58,21 @@ func (s *TeacherService) GetFreshAttendanceExport(
 			}
 			return nil, freshnessError("read course baseline", err)
 		}
-		if err := s.refresher.RefreshNow(ctx, courseRef); err != nil {
-			return nil, freshnessError("refresh course", err)
+		// A snapshot that is already usable is served as-is. Overdue targets
+		// remain usable when verified fresh: the scheduler backlog makes many
+		// targets overdue, and quality_state already encodes serve-age via
+		// deriveQualityState.
+		if !usableSnapshot(courseBaseline) {
+			if err := s.refresher.RefreshNow(ctx, courseRef); err != nil {
+				return nil, freshnessError("refresh course", err)
+			}
 		}
 		courseMetadata, err := snapshots.Metadata(ctx, courseRef)
 		if err != nil {
 			return nil, freshnessError("read refreshed course metadata", err)
 		}
-		if err := validateAdvancedSnapshot(courseRef, courseBaseline.ValidationSeq, courseMetadata); err != nil {
-			return nil, err
-		}
-		if err := validateValidatedAfter(courseMetadata, barrierStart, courseRef); err != nil {
-			return nil, err
+		if !usableSnapshot(courseMetadata) {
+			return nil, fmt.Errorf("%w: %s is not usable for export (incomplete or not verified fresh)", ErrAttendanceExportFreshness, courseRef.IdentityKey())
 		}
 		courseSeqAfterRefresh := courseMetadata.ValidationSeq
 
@@ -95,42 +97,50 @@ func (s *TeacherService) GetFreshAttendanceExport(
 			refs = append(refs, snapshots.SessionRef(courseID, session.SessionID))
 		}
 
-		baselines := make([]int64, len(refs))
+		baselines := make([]domain.SnapshotMetadata, len(refs))
 		for index, ref := range refs {
 			metadata, metadataErr := snapshots.Metadata(ctx, ref)
 			if metadataErr != nil {
 				return nil, freshnessError("read snapshot baseline", metadataErr)
 			}
-			baselines[index] = metadata.ValidationSeq
+			baselines[index] = metadata
 		}
 
+		// Refresh only the snapshots that are not usable for export;
+		// verified-fresh snapshots are served without a refresh.
+		refreshIndexes := make([]int, 0, len(refs))
+		for index := range refs {
+			if !usableSnapshot(baselines[index]) {
+				refreshIndexes = append(refreshIndexes, index)
+			}
+		}
 		var refreshMu sync.Mutex
 		var refreshErrors []error
-		jobErr := runBoundedJobs(ctx, len(refs), s.reportConcurrency, func(index int) {
-			if refreshErr := s.refresher.RefreshNow(ctx, refs[index]); refreshErr != nil {
-				refreshMu.Lock()
-				refreshErrors = append(refreshErrors, fmt.Errorf("refresh %s: %w", refs[index].IdentityKey(), refreshErr))
-				refreshMu.Unlock()
+		if len(refreshIndexes) > 0 {
+			jobErr := runBoundedJobs(ctx, len(refreshIndexes), s.reportConcurrency, func(position int) {
+				index := refreshIndexes[position]
+				if refreshErr := s.refresher.RefreshNow(ctx, refs[index]); refreshErr != nil {
+					refreshMu.Lock()
+					refreshErrors = append(refreshErrors, fmt.Errorf("refresh %s: %w", refs[index].IdentityKey(), refreshErr))
+					refreshMu.Unlock()
+				}
+			})
+			if jobErr != nil {
+				return nil, freshnessError("refresh export snapshots", jobErr)
 			}
-		})
-		if jobErr != nil {
-			return nil, freshnessError("refresh export snapshots", jobErr)
-		}
-		if len(refreshErrors) > 0 {
-			return nil, freshnessError("refresh export snapshots", errors.Join(refreshErrors...))
+			if len(refreshErrors) > 0 {
+				return nil, freshnessError("refresh export snapshots", errors.Join(refreshErrors...))
+			}
 		}
 
 		validatedAt := courseMetadata.ValidatedAt
-		for index, ref := range refs {
+		for _, ref := range refs {
 			metadata, metadataErr := snapshots.Metadata(ctx, ref)
 			if metadataErr != nil {
 				return nil, freshnessError("read refreshed snapshot metadata", metadataErr)
 			}
-			if metadataErr = validateAdvancedSnapshot(ref, baselines[index], metadata); metadataErr != nil {
-				return nil, metadataErr
-			}
-			if metadataErr = validateValidatedAfter(metadata, barrierStart, ref); metadataErr != nil {
-				return nil, metadataErr
+			if !usableSnapshot(metadata) {
+				return nil, fmt.Errorf("%w: %s is not usable for export (incomplete or not verified fresh)", ErrAttendanceExportFreshness, ref.IdentityKey())
 			}
 			if validatedAt.IsZero() || metadata.ValidatedAt.Before(validatedAt) {
 				validatedAt = metadata.ValidatedAt
@@ -152,14 +162,6 @@ func (s *TeacherService) GetFreshAttendanceExport(
 			}
 			restarts = 1
 			continue
-		}
-
-		overdue, err := snapshots.AnyOverdue(ctx, append([]domain.TargetRef{courseRef}, refs...))
-		if err != nil {
-			return nil, freshnessError("check snapshot deadlines", err)
-		}
-		if overdue {
-			return nil, fmt.Errorf("%w: refreshed snapshot target is overdue", ErrAttendanceExportFreshness)
 		}
 
 		snapshotSessions, ok := s.reader.(domain.SessionFetcher)
@@ -244,36 +246,12 @@ func uniqueAttendanceSessions(sessions []domain.SessionSummary) []domain.Session
 	return unique
 }
 
-func validateAdvancedSnapshot(
-	ref domain.TargetRef,
-	baselineValidationSeq int64,
-	metadata domain.SnapshotMetadata,
-) error {
-	if metadata.ValidationSeq <= baselineValidationSeq {
-		return fmt.Errorf("%w: %s validation sequence did not advance", ErrAttendanceExportFreshness, ref.IdentityKey())
-	}
-	if !metadata.Complete {
-		return fmt.Errorf("%w: %s is incomplete", ErrAttendanceExportFreshness, ref.IdentityKey())
-	}
-	if metadata.Stale || metadata.QualityState != domain.DataQualityVerifiedFresh || metadata.ValidatedAt.IsZero() {
-		return fmt.Errorf("%w: %s is not verified fresh", ErrAttendanceExportFreshness, ref.IdentityKey())
-	}
-	return nil
-}
-
-// validateValidatedAfter rejects a refreshed snapshot whose validation
-// timestamp predates the export barrier: the snapshot may be new, but it was
-// not validated within this export attempt. The zero-time case is already
-// rejected by validateAdvancedSnapshot, which always runs first.
-func validateValidatedAfter(
-	metadata domain.SnapshotMetadata,
-	barrierStart time.Time,
-	ref domain.TargetRef,
-) error {
-	if metadata.ValidatedAt.Before(barrierStart) {
-		return fmt.Errorf("%w: %s not validated after the export barrier", ErrAttendanceExportFreshness, ref.IdentityKey())
-	}
-	return nil
+// usableSnapshot reports whether a committed snapshot is good enough to serve
+// an export without a refresh. Overdue (stale) snapshots remain usable when
+// verified fresh: the scheduler backlog makes many targets overdue, and
+// quality_state already encodes serve-age via deriveQualityState.
+func usableSnapshot(md domain.SnapshotMetadata) bool {
+	return md.Complete && md.QualityState == domain.DataQualityVerifiedFresh && !md.ValidatedAt.IsZero()
 }
 
 func freshnessError(operation string, err error) error {

@@ -315,12 +315,6 @@ func TestGetFreshAttendanceExport_RejectsInvalidFreshnessMetadata(t *testing.T) 
 		mutate func(*attendanceExportHarness)
 	}{
 		{
-			name: "validation sequence did not advance",
-			mutate: func(h *attendanceExportHarness) {
-				h.skipAdvance[h.ProfilesRef().IdentityKey()] = true
-			},
-		},
-		{
 			name: "snapshot incomplete",
 			mutate: func(h *attendanceExportHarness) {
 				key := h.ProfilesRef().IdentityKey()
@@ -330,18 +324,21 @@ func TestGetFreshAttendanceExport_RejectsInvalidFreshnessMetadata(t *testing.T) 
 			},
 		},
 		{
-			name: "snapshot remains stale",
+			name: "snapshot not verified fresh",
 			mutate: func(h *attendanceExportHarness) {
-				key := h.SessionRef("course-1", "session-1").IdentityKey()
+				key := h.ProfilesRef().IdentityKey()
 				h.postRefresh[key] = func(metadata *domain.SnapshotMetadata) {
-					metadata.Stale = true
+					metadata.QualityState = domain.DataQualityVerifiedStale
 				}
 			},
 		},
 		{
-			name: "snapshot target is overdue",
+			name: "snapshot validated at zero time",
 			mutate: func(h *attendanceExportHarness) {
-				h.forceOverdue = true
+				key := h.ProfilesRef().IdentityKey()
+				h.postRefresh[key] = func(metadata *domain.SnapshotMetadata) {
+					metadata.ValidatedAt = time.Time{}
+				}
 			},
 		},
 		{
@@ -418,8 +415,8 @@ func TestGetFreshAttendanceExport_RestartsOnceWhenCourseMembershipChanges(t *tes
 	// Then: the workflow restarted once and succeeded with the new session
 	require.NoError(t, err)
 	assert.Equal(t, 1, export.RestartCount)
-	assert.Equal(t, 2, h.refreshCalls[h.CourseRef("course-1").IdentityKey()],
-		"course refresh must run once per attempt")
+	assert.Equal(t, 1, h.refreshCalls[h.CourseRef("course-1").IdentityKey()],
+		"course refresh must run only while the course snapshot is not usable")
 	assert.Equal(t, 1, h.refreshCalls[h.SessionRef("course-1", "session-2").IdentityKey()])
 	require.Len(t, export.Report.Sessions, 2)
 	require.Len(t, export.Report.Students, 1)
@@ -428,9 +425,13 @@ func TestGetFreshAttendanceExport_RestartsOnceWhenCourseMembershipChanges(t *tes
 }
 
 func TestGetFreshAttendanceExport_FailsRetryableWhenCourseMembershipChangesRepeatedly(t *testing.T) {
-	// Given: the course membership keeps changing on every refresh attempt
+	// Given: the course membership keeps changing on every refresh attempt.
+	// The first attempt's profiles refresh advances the course and adds a new
+	// session; the second attempt refreshes that unusable session, whose own
+	// refresh advances the course again so the membership never stabilizes.
 	h := newAttendanceExportHarness()
-	h.onRefresh[h.ProfilesRef().IdentityKey()] = func() {
+	sessionTwoKey := h.SessionRef("course-1", "session-2").IdentityKey()
+	bumpCourseSeq := func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		courseKey := h.CourseRef("course-1").IdentityKey()
@@ -439,17 +440,49 @@ func TestGetFreshAttendanceExport_FailsRetryableWhenCourseMembershipChangesRepea
 		courseMetadata.ValidatedAt = h.now
 		h.metadata[courseKey] = courseMetadata
 	}
+	added := false
+	h.onRefresh[h.ProfilesRef().IdentityKey()] = func() {
+		h.mu.Lock()
+		courseKey := h.CourseRef("course-1").IdentityKey()
+		courseMetadata := h.metadata[courseKey]
+		courseMetadata.ValidationSeq++
+		courseMetadata.ValidatedAt = h.now
+		h.metadata[courseKey] = courseMetadata
+		if !added {
+			added = true
+			h.metadata[sessionTwoKey] = domain.SnapshotMetadata{
+				Kind:          domain.SnapshotSessionDetail,
+				ResourceKey:   "session-2",
+				ParentKey:     "course-1",
+				Version:       7,
+				ValidationSeq: 10,
+				ValidatedAt:   h.now.Add(-time.Hour),
+				Stale:         true,
+				QualityState:  domain.DataQualityVerifiedStale,
+				Complete:      true,
+			}
+			h.detail.Sessions = append(h.detail.Sessions, domain.SessionSummary{
+				SessionID:     "session-2",
+				SessionNumber: 2,
+				Name:          "Week 2",
+				Status:        domain.SessionStatusDone,
+			})
+			h.onRefresh[sessionTwoKey] = bumpCourseSeq
+		}
+		h.mu.Unlock()
+	}
 
 	// When
 	export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
 
-	// Then: the workflow restarted at least once before failing with a
-	// retryable membership-stability error
+	// Then: the workflow restarted before failing with a retryable
+	// membership-stability error
 	assert.Nil(t, export)
 	assert.ErrorIs(t, err, ErrAttendanceExportFreshness)
 	assert.ErrorContains(t, err, "course session membership changed during export")
-	assert.GreaterOrEqual(t, h.refreshCalls[h.CourseRef("course-1").IdentityKey()], 2,
-		"the course must have been re-refreshed at least once before failing")
+	assert.Equal(t, 1, h.refreshCalls[h.CourseRef("course-1").IdentityKey()],
+		"the course must be refreshed only while its snapshot is not usable")
+	assert.Equal(t, 1, h.refreshCalls[sessionTwoKey])
 }
 
 func TestGetFreshAttendanceExport_ZeroSessionsYieldsValidEmptyExport(t *testing.T) {
@@ -530,44 +563,86 @@ func TestGetFreshAttendanceExport_CourseRefreshPrecedesSessionRefreshes(t *testi
 	_ = export.FreshnessDurationMs // measured, may truncate to 0 in fast tests
 }
 
-func TestGetFreshAttendanceExport_RejectsSnapshotValidatedBeforeBarrier(t *testing.T) {
-	tests := []struct {
-		name string
-		key  string
-	}{
-		{
-			name: "course metadata predates the export barrier",
-			key:  "course",
-		},
-		{
-			name: "profile snapshot predates the export barrier",
-			key:  "profiles",
-		},
+func TestGetFreshAttendanceExport_ServesVerifiedFreshSnapshotsWithoutRefresh(t *testing.T) {
+	// Given: every snapshot is already verified fresh (though overdue, which
+	// must not block the export: stale/overdue-but-fresh snapshots are usable)
+	h := newAttendanceExportHarness()
+	for key := range h.metadata {
+		metadata := h.metadata[key]
+		metadata.QualityState = domain.DataQualityVerifiedFresh
+		metadata.ValidatedAt = h.now
+		metadata.Stale = true
+		h.metadata[key] = metadata
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			// Given: the refresh advances the validation sequence but stamps
-			// the snapshot with a ValidatedAt predating the export barrier
-			h := newAttendanceExportHarness()
-			var ref domain.TargetRef
-			if test.key == "course" {
-				ref = h.CourseRef("course-1")
-			} else {
-				ref = h.ProfilesRef()
-			}
-			h.postRefresh[ref.IdentityKey()] = func(metadata *domain.SnapshotMetadata) {
-				metadata.ValidatedAt = h.now.Add(-time.Hour)
-			}
 
-			// When
-			export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+	// When
+	export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
 
-			// Then
-			assert.Nil(t, export)
-			assert.ErrorIs(t, err, ErrAttendanceExportFreshness)
-			assert.ErrorContains(t, err, "not validated after the export barrier")
-		})
+	// Then: the export is served from the already-fresh snapshots without any
+	// refresh
+	require.NoError(t, err)
+	require.NotNil(t, export)
+	assert.Equal(t, "validated-snapshot", export.Source)
+	assert.Equal(t, h.now, export.SourceValidatedAt)
+	assert.Empty(t, h.refreshCalls, "verified-fresh snapshots must be served without any refresh")
+	assert.Empty(t, h.refreshOrder)
+	require.Len(t, export.Report.Students, 1)
+}
+
+func TestGetFreshAttendanceExport_RefreshesOnlyUnusableRefs(t *testing.T) {
+	// Given: the course and profiles snapshots are already verified fresh;
+	// only the session snapshot is degraded and must be refreshed
+	h := newAttendanceExportHarness()
+	for _, ref := range []domain.TargetRef{h.CourseRef("course-1"), h.ProfilesRef()} {
+		key := ref.IdentityKey()
+		metadata := h.metadata[key]
+		metadata.QualityState = domain.DataQualityVerifiedFresh
+		metadata.ValidatedAt = h.now
+		h.metadata[key] = metadata
 	}
+	sessionKey := h.SessionRef("course-1", "session-1").IdentityKey()
+	metadata := h.metadata[sessionKey]
+	metadata.QualityState = domain.DataQualityDegraded
+	h.metadata[sessionKey] = metadata
+
+	// When
+	export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then: only the unusable session snapshot was refreshed
+	require.NoError(t, err)
+	require.NotNil(t, export)
+	assert.Equal(t, "validated-snapshot", export.Source)
+	require.Equal(t, []string{sessionKey}, h.refreshOrder)
+	assert.Equal(t, 1, h.refreshCalls[sessionKey])
+	assert.Zero(t, h.refreshCalls[h.CourseRef("course-1").IdentityKey()],
+		"the usable course snapshot must not be refreshed")
+	assert.Zero(t, h.refreshCalls[h.ProfilesRef().IdentityKey()],
+		"the usable profiles snapshot must not be refreshed")
+	require.Len(t, export.Report.Students, 1)
+}
+
+func TestGetFreshAttendanceExport_FailsClosedWhenUnusableRefCannotRefresh(t *testing.T) {
+	// Given: a session snapshot is not usable for export and its refresh fails
+	h := newAttendanceExportHarness()
+	for _, ref := range []domain.TargetRef{h.CourseRef("course-1"), h.ProfilesRef()} {
+		key := ref.IdentityKey()
+		metadata := h.metadata[key]
+		metadata.QualityState = domain.DataQualityVerifiedFresh
+		metadata.ValidatedAt = h.now
+		h.metadata[key] = metadata
+	}
+	sessionKey := h.SessionRef("course-1", "session-1").IdentityKey()
+	h.refreshErr[sessionKey] = errors.New("session refresh failed")
+
+	// When
+	export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then
+	assert.Nil(t, export)
+	assert.ErrorIs(t, err, ErrAttendanceExportFreshness)
+	assert.ErrorContains(t, err, "session refresh failed")
+	assert.Zero(t, h.refreshCalls[h.CourseRef("course-1").IdentityKey()],
+		"the usable course snapshot must not be refreshed")
 }
 
 func TestGetFreshAttendanceExport_MissingSessionBaselineFailsSafely(t *testing.T) {
