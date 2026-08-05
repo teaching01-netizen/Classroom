@@ -369,9 +369,9 @@ func attendanceSessionValue(student domain.StudentAttendance, index int) string 
 	case cell.SessionStatus == domain.SessionStatusActive || cell.SessionStatus == domain.SessionStatusNotStarted:
 		return "N/A"
 	case cell.CheckedIn:
-		return "Present"
+		return "1"
 	default:
-		return "Absent"
+		return "0"
 	}
 }
 

@@ -98,7 +98,7 @@ func TestAttendanceExportCSV_usesCanonicalSafeRectangularSchema(t *testing.T) {
 	assert.Equal(t, []string{
 		"course/1", "Unicode วิชา", "2026-08-02T12:30:00Z", "2026-08-02T12:29:00Z",
 		"00123", "'=SUM(A1:A2)", "ชื่อนักเรียน, \"หนึ่ง\"", "Engineering",
-		"1", "1", "100.00%", "false", "Present",
+		"1", "1", "100.00%", "false", "1",
 	}, rows[1])
 }
 
@@ -158,7 +158,7 @@ func TestAttendanceExportXLSX_usesDedicatedTypedLayoutAndMetadata(t *testing.T) 
 	assert.Contains(t, stylesXML, `numFmtId="10"`)
 }
 
-func TestAttendanceExportPayloads_includeRefreshedPresentInsteadOfStaleAbsent(t *testing.T) {
+func TestAttendanceExportPayloads_includeRefreshedCheckedInAsOne(t *testing.T) {
 	for _, format := range []string{"csv", "xlsx"} {
 		t.Run(format, func(t *testing.T) {
 			// Given
@@ -177,8 +177,10 @@ func TestAttendanceExportPayloads_includeRefreshedPresentInsteadOfStaleAbsent(t 
 			// Then
 			require.NoError(t, err)
 			if format == "csv" {
-				assert.Contains(t, string(payload), "Present")
-				assert.NotContains(t, string(payload), "Absent")
+				rows, parseErr := csv.NewReader(bytes.NewReader(payload[3:])).ReadAll()
+				require.NoError(t, parseErr)
+				require.Len(t, rows, 2)
+				assert.Equal(t, "1", rows[1][12])
 				return
 			}
 			workbook, openErr := excelize.OpenReader(bytes.NewReader(payload))
@@ -186,7 +188,7 @@ func TestAttendanceExportPayloads_includeRefreshedPresentInsteadOfStaleAbsent(t 
 			defer func() { require.NoError(t, workbook.Close()) }()
 			status, valueErr := workbook.GetCellValue("Attendance", "I2")
 			require.NoError(t, valueErr)
-			assert.Equal(t, "Present", status)
+			assert.Equal(t, "1", status)
 		})
 	}
 }
