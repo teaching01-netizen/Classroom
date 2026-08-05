@@ -3,11 +3,34 @@ import { ApiError, toApiError } from './api-error'
 
 type QueryValue = string | number | boolean | null | undefined
 
+// SnapshotVersionInfo mirrors the server's snapshot envelope (ApiResponse in
+// internal/api/handlers.go). Everything except version/generatedAt is
+// optional so older servers that predate the envelope still parse.
+export const snapshotVersionInfoSchema = z.object({
+  version: z.number(),
+  generatedAt: z.string(),
+  quality: z.string().optional(),
+  complete: z.boolean().optional(),
+  parserVersion: z.string().optional(),
+  stale: z.boolean().optional(),
+  ageSeconds: z.number().optional(),
+})
+
+export type SnapshotVersionInfo = z.infer<typeof snapshotVersionInfoSchema>
+
+export type SnapshotResult<T> = {
+  readonly data: T
+  readonly snapshot: SnapshotVersionInfo | undefined
+}
+
 type RequestOptions<T> = Omit<RequestInit, 'body'> & {
   readonly schema: z.ZodType<T>
   readonly body?: unknown
   readonly query?: Readonly<Record<string, QueryValue>>
   readonly timeoutMs?: number
+  // includeSnapshot opts the request into the server's snapshot envelope:
+  // the resolved value becomes { data, snapshot } instead of the bare data.
+  readonly includeSnapshot?: boolean
 }
 
 const envelopeSchema = z.object({
@@ -16,6 +39,7 @@ const envelopeSchema = z.object({
   error: z.string().optional(),
   code: z.string().optional(),
   details: z.unknown().optional(),
+  snapshot: z.unknown().optional(),
 })
 
 function withQuery(path: string, query: Readonly<Record<string, QueryValue>> | undefined): string {
@@ -59,7 +83,10 @@ async function readPayload(response: Response): Promise<unknown> {
   }
 }
 
-async function request<T>(path: string, options: RequestOptions<T>): Promise<T> {
+async function request<T>(
+  path: string,
+  options: RequestOptions<T>,
+): Promise<T | SnapshotResult<T>> {
   const timeoutController = new AbortController()
   const timeoutMs = options.timeoutMs ?? 30_000
   const timeoutId = window.setTimeout(() => timeoutController.abort('timeout'), timeoutMs)
@@ -76,6 +103,7 @@ async function request<T>(path: string, options: RequestOptions<T>): Promise<T> 
     timeoutMs: _timeoutMs,
     headers,
     signal: _signal,
+    includeSnapshot: _includeSnapshot,
     ...requestInit
   } = options
 
@@ -125,7 +153,16 @@ async function request<T>(path: string, options: RequestOptions<T>): Promise<T> 
         requestId,
       })
     }
-    return schema.parse(envelope.data.data)
+    const data = schema.parse(envelope.data.data)
+    if (options.includeSnapshot !== true) {
+      return data
+    }
+    let snapshot: SnapshotVersionInfo | undefined
+    if (envelope.data.snapshot !== undefined) {
+      const parsed = snapshotVersionInfoSchema.safeParse(envelope.data.snapshot)
+      snapshot = parsed.success ? parsed.data : undefined
+    }
+    return { data, snapshot }
   } catch (error: unknown) {
     if (timeoutController.signal.aborted && !(options.signal?.aborted ?? false)) {
       throw new ApiError(`The request timed out after ${timeoutMs}ms.`, {
@@ -139,17 +176,33 @@ async function request<T>(path: string, options: RequestOptions<T>): Promise<T> 
   }
 }
 
+function get<T>(path: string, options: Omit<RequestOptions<T>, 'method' | 'body'> & { includeSnapshot: true }): Promise<SnapshotResult<T>>
+function get<T>(path: string, options: Omit<RequestOptions<T>, 'method' | 'body'>): Promise<T>
+function get<T>(path: string, options: Omit<RequestOptions<T>, 'method' | 'body'>): Promise<T | SnapshotResult<T>> {
+  return request(path, { ...options, method: 'GET' })
+}
+
+function post<T>(path: string, options: Omit<RequestOptions<T>, 'method'> & { includeSnapshot: true }): Promise<SnapshotResult<T>>
+function post<T>(path: string, options: Omit<RequestOptions<T>, 'method'>): Promise<T>
+function post<T>(path: string, options: Omit<RequestOptions<T>, 'method'>): Promise<T | SnapshotResult<T>> {
+  return request(path, { ...options, method: 'POST' })
+}
+
+function put<T>(path: string, options: Omit<RequestOptions<T>, 'method'> & { includeSnapshot: true }): Promise<SnapshotResult<T>>
+function put<T>(path: string, options: Omit<RequestOptions<T>, 'method'>): Promise<T>
+function put<T>(path: string, options: Omit<RequestOptions<T>, 'method'>): Promise<T | SnapshotResult<T>> {
+  return request(path, { ...options, method: 'PUT' })
+}
+
+function del<T>(path: string, options: Omit<RequestOptions<T>, 'method'> & { includeSnapshot: true }): Promise<SnapshotResult<T>>
+function del<T>(path: string, options: Omit<RequestOptions<T>, 'method'>): Promise<T>
+function del<T>(path: string, options: Omit<RequestOptions<T>, 'method'>): Promise<T | SnapshotResult<T>> {
+  return request(path, { ...options, method: 'DELETE' })
+}
+
 export const apiClient = {
-  get<T>(path: string, options: Omit<RequestOptions<T>, 'method' | 'body'>): Promise<T> {
-    return request(path, { ...options, method: 'GET' })
-  },
-  post<T>(path: string, options: Omit<RequestOptions<T>, 'method'>): Promise<T> {
-    return request(path, { ...options, method: 'POST' })
-  },
-  put<T>(path: string, options: Omit<RequestOptions<T>, 'method'>): Promise<T> {
-    return request(path, { ...options, method: 'PUT' })
-  },
-  delete<T>(path: string, options: Omit<RequestOptions<T>, 'method'>): Promise<T> {
-    return request(path, { ...options, method: 'DELETE' })
-  },
+  get,
+  post,
+  put,
+  delete: del,
 } as const

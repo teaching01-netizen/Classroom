@@ -27,6 +27,9 @@ vi.mock('../api/attendance.queries', () => ({
     error: null,
     refetch,
   }),
+  useAttendanceSnapshotQuery: () => ({
+    data: undefined,
+  }),
 }))
 
 vi.mock('../api/attendance.exports', () => ({

@@ -325,7 +325,7 @@
   line-height: 1.15;
 }
 
-.ui-page-header > div > p:last-child {
+.ui-page-header > div > p:not(.ui-page-header__eyebrow) {
   max-inline-size: 48rem;
   margin-block-start: var(--space-2);
   color: var(--color-text-subtle);

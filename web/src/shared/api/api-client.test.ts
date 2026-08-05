@@ -22,6 +22,58 @@ describe('api client', () => {
     await expect(request).resolves.toEqual({ count: 2 })
   })
 
+  it('returns { data, snapshot } when includeSnapshot is set', async () => {
+    // Given: a response carrying the snapshot envelope next to the data.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({
+        success: true,
+        data: { count: 2 },
+        snapshot: { version: 5, generatedAt: '2026-08-05T10:00:00Z', stale: true, quality: 'verified_fresh' },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    // When
+    const request = apiClient.get('/api/example', {
+      schema: z.object({ count: z.number().int() }),
+      includeSnapshot: true,
+    })
+    // Then
+    await expect(request).resolves.toEqual({
+      data: { count: 2 },
+      snapshot: { version: 5, generatedAt: '2026-08-05T10:00:00Z', stale: true, quality: 'verified_fresh' },
+    })
+  })
+
+  it('resolves an undefined snapshot when includeSnapshot is set but the server sends none', async () => {
+    // Given: a plain response without a snapshot envelope (live mode).
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ success: true, data: { count: 2 } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    // When
+    const request = apiClient.get('/api/example', {
+      schema: z.object({ count: z.number().int() }),
+      includeSnapshot: true,
+    })
+    // Then
+    await expect(request).resolves.toEqual({ data: { count: 2 }, snapshot: undefined })
+  })
+
+  it('tolerates a malformed snapshot envelope without failing the request', async () => {
+    // Given: an envelope whose snapshot payload does not match the schema.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ success: true, data: { count: 2 }, snapshot: { version: 'nope' } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    // When
+    const request = apiClient.get('/api/example', {
+      schema: z.object({ count: z.number().int() }),
+      includeSnapshot: true,
+    })
+    // Then
+    await expect(request).resolves.toEqual({ data: { count: 2 }, snapshot: undefined })
+  })
+
   it('turns invalid JSON into a typed API error', async () => {
     // Given
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('not-json', { status: 200 }))

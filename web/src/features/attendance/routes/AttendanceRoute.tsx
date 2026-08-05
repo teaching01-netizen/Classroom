@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { courseIdSchema } from '@/features/courses'
-import { useAttendanceQuery } from '../api/attendance.queries'
+import { useAttendanceQuery, useAttendanceSnapshotQuery } from '../api/attendance.queries'
 import { downloadAttendanceReport, type AttendanceExportFormat } from '../api/attendance.exports'
 import { attendancePercent } from '../lib/attendance'
 import { AsyncPage } from '@/shared/ui/AsyncPage'
@@ -9,6 +9,7 @@ import { Avatar } from '@/shared/ui/Avatar'
 import { BackLink } from '@/shared/ui/BackLink'
 import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
+import { FreshnessBadge } from '@/shared/ui/FreshnessBadge'
 import { PageHeader } from '@/shared/ui/PageHeader'
 import { StatsGrid } from '@/shared/ui/StatsGrid'
 import { Table, TableContainer } from '@/shared/ui/Table'
@@ -23,6 +24,7 @@ export function Component() {
   }
   const courseId = courseIdResult.data
   const query = useAttendanceQuery(courseId)
+  const snapshotQuery = useAttendanceSnapshotQuery(courseId)
   const report = query.data
   const atRiskCount = report?.students.filter((student) => student.atRisk).length ?? 0
   const [exporting, setExporting] = useState<AttendanceExportFormat | null>(null)
@@ -72,6 +74,13 @@ export function Component() {
         eyebrow="Attendance"
         title={report?.courseName ?? 'Attendance report'}
         description="Per-student attendance across completed sessions. Active and not-started sessions are excluded from risk calculations."
+        status={(
+          <FreshnessBadge
+            generatedAt={snapshotQuery.data?.generatedAt}
+            stale={snapshotQuery.data?.stale}
+            quality={snapshotQuery.data?.quality}
+          />
+        )}
         actions={(
           <>
             <Button loading={query.isFetching} onClick={() => void query.refetch()}>

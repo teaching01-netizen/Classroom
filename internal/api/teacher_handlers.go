@@ -393,6 +393,11 @@ func getCourseAttendanceReportHandler(ts *service.TeacherService) http.HandlerFu
 			return
 		}
 
+		if metadata, active, metadataErr := ts.CourseReportFreshness(ctx, courseID); active && metadataErr == nil {
+			setSnapshotFreshnessHeaders(w, metadata)
+			writeJSON(w, http.StatusOK, versionedResponse(report, metadata))
+			return
+		}
 		writeJSON(w, http.StatusOK, successResponse(report))
 	}
 }

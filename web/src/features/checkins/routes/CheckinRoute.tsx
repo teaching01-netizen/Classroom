@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { courseIdSchema } from '@/features/courses'
 import { sessionIdSchema, useCourseSessionsQuery } from '@/features/sessions'
-import { useCheckinsQuery, useToggleCheckinMutation } from '../api/checkin.queries'
+import { useCheckinsQuery, useSessionSnapshotQuery, useToggleCheckinMutation } from '../api/checkin.queries'
 import type { StudentCheckin, StudentId } from '../api/checkin.schemas'
 import { useSessionQr } from '../hooks/useSessionQr'
 import { checkinsToCsv, downloadCsv } from '../lib/csv'
@@ -13,6 +13,7 @@ import { BackLink } from '@/shared/ui/BackLink'
 import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
 import { Field } from '@/shared/ui/Field'
+import { FreshnessBadge } from '@/shared/ui/FreshnessBadge'
 import { Input } from '@/shared/ui/Input'
 import { PageHeader } from '@/shared/ui/PageHeader'
 import { Pagination } from '@/shared/ui/Pagination'
@@ -20,6 +21,7 @@ import { Select } from '@/shared/ui/Select'
 import { StatsGrid } from '@/shared/ui/StatsGrid'
 import { Table, TableContainer } from '@/shared/ui/Table'
 import { getErrorMessage } from '@/shared/lib/errors'
+import { useConnectionStore } from '@/shared/realtime/connection-store'
 import { useToast } from '@/shared/ui/Toast'
 import '../checkins.css'
 
@@ -42,9 +44,11 @@ export function Component() {
   const sessionId = sessionIdResult.data
   const [params, setParams] = useSearchParams()
   const checkinsQuery = useCheckinsQuery(courseId, sessionId)
+  const snapshotQuery = useSessionSnapshotQuery(courseId, sessionId)
   const courseQuery = useCourseSessionsQuery(courseId)
   const qr = useSessionQr(courseId, sessionId)
   const toggleCheckin = useToggleCheckinMutation(courseId, sessionId)
+  const connected = useConnectionStore((state) => state.status === 'connected')
   const { announce } = useToast()
 
   const students = useMemo(
@@ -137,6 +141,12 @@ export function Component() {
               value: students.length === 0 ? '0%' : `${Math.round(checkedCount / students.length * 100)}%`,
             },
           ]}
+        />
+        <FreshnessBadge
+          live={connected}
+          generatedAt={snapshotQuery.data?.generatedAt}
+          stale={snapshotQuery.data?.stale}
+          quality={snapshotQuery.data?.quality}
         />
         <div className="filter-bar">
           <Field label="Search students">

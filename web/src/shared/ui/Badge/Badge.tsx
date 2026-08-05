@@ -4,9 +4,14 @@ export type BadgeTone = 'neutral' | 'success' | 'warning' | 'danger' | 'info'
 
 type BadgeProps = {
   readonly tone?: BadgeTone
+  readonly title?: string | undefined
   readonly children: ReactNode
 }
 
-export function Badge({ tone = 'neutral', children }: BadgeProps) {
-  return <span className="ui-badge" data-tone={tone}>{children}</span>
+export function Badge({ tone = 'neutral', title, children }: BadgeProps) {
+  return (
+    <span className="ui-badge" data-tone={tone} title={title}>
+      {children}
+    </span>
+  )
 }

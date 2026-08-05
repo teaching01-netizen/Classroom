@@ -1,0 +1,34 @@
+/* FreshnessBadge — status dot + label inside the shared .ui-badge pill.
+   Colors are inherited (currentColor) from the Badge's tone rules so the dot
+   can never drift from the text color; spacing/radius/font come from tokens. */
+
+.freshness-dot {
+  display: inline-block;
+  flex: none;
+  inline-size: 0.5rem;
+  block-size: 0.5rem;
+  margin-inline-end: var(--space-1);
+  border-radius: var(--radius-full);
+  background: currentColor;
+  /* Motion on opacity only, 1.6s ease-in-out; the global
+     prefers-reduced-motion rule collapses it to a single static frame. */
+  animation: freshness-pulse 1.6s ease-in-out infinite;
+}
+
+.freshness-dot--static {
+  animation: none;
+}
+
+@keyframes freshness-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.freshness-time {
+  /* Stable column width while the relative label re-ticks. */
+  font-variant-numeric: tabular-nums;
+}

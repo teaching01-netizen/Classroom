@@ -706,6 +706,100 @@ func (s *TeacherService) SessionMetadata(
 	})
 }
 
+// maxReportFreshnessSessions bounds the per-course session metadata reads so
+// a report freshness lookup stays cheap even for very large courses.
+const maxReportFreshnessSessions = 200
+
+// CourseReportFreshness aggregates snapshot metadata across the course ref,
+// the profiles ref, and every session ref that backs an attendance report.
+// The composite SnapshotMetadata reports the oldest validation time (the
+// data is only as fresh as its least-fresh source), the worst quality state,
+// stale if any ref is stale, complete only when every ref is complete, and a
+// version equal to the maximum validation sequence across refs.
+//
+// It returns ok=false — never an error that could fail the report itself —
+// when snapshot mode is inactive, the reader lacks snapshot metadata support,
+// the course snapshot is missing, or any metadata read fails.
+func (s *TeacherService) CourseReportFreshness(
+	ctx context.Context,
+	courseID string,
+) (domain.SnapshotMetadata, bool, error) {
+	if !s.snapshotMode {
+		return domain.SnapshotMetadata{}, false, nil
+	}
+	snapshots, ok := s.reader.(snapshotAwareReader)
+	if !ok {
+		return domain.SnapshotMetadata{}, false, nil
+	}
+
+	// The course snapshot anchors the report: without it there is nothing to
+	// describe, so the handler falls back to a plain response.
+	courseMetadata, err := snapshots.Metadata(ctx, snapshots.CourseRef(courseID))
+	if err != nil {
+		return domain.SnapshotMetadata{}, false, nil
+	}
+
+	detail, err := s.reader.GetCourseDetail(ctx, courseID)
+	if err != nil || detail == nil {
+		return domain.SnapshotMetadata{}, false, nil
+	}
+	sessions := uniqueAttendanceSessions(detail.Sessions)
+	if len(sessions) > maxReportFreshnessSessions {
+		sessions = sessions[:maxReportFreshnessSessions]
+	}
+
+	refs := make([]domain.TargetRef, 0, len(sessions)+1)
+	refs = append(refs, snapshots.ProfilesRef())
+	for _, session := range sessions {
+		refs = append(refs, snapshots.SessionRef(courseID, session.SessionID))
+	}
+
+	metadatas := make([]domain.SnapshotMetadata, len(refs))
+	var mu sync.Mutex
+	var readErr error
+	if err := runBoundedJobs(ctx, len(refs), s.reportConcurrency, func(index int) {
+		metadata, metadataErr := snapshots.Metadata(ctx, refs[index])
+		mu.Lock()
+		defer mu.Unlock()
+		metadatas[index] = metadata
+		if readErr == nil && metadataErr != nil {
+			readErr = metadataErr
+		}
+	}); err != nil {
+		return domain.SnapshotMetadata{}, false, nil
+	}
+	if readErr != nil {
+		return domain.SnapshotMetadata{}, false, nil
+	}
+
+	composite := domain.SnapshotMetadata{
+		Kind:         domain.SnapshotCourseDetail,
+		ResourceKey:  courseID,
+		QualityState: domain.DataQualityVerifiedFresh,
+		Complete:     true,
+	}
+	composite.ValidatedAt = courseMetadata.ValidatedAt
+	for _, metadata := range append([]domain.SnapshotMetadata{courseMetadata}, metadatas...) {
+		if composite.ValidatedAt.IsZero() || metadata.ValidatedAt.Before(composite.ValidatedAt) {
+			composite.ValidatedAt = metadata.ValidatedAt
+		}
+		if metadata.QualityState != domain.DataQualityVerifiedFresh {
+			composite.QualityState = domain.DataQualityVerifiedStale
+		}
+		if metadata.Stale {
+			composite.Stale = true
+		}
+		if !metadata.Complete {
+			composite.Complete = false
+		}
+		if metadata.ValidationSeq > composite.ValidationSeq {
+			composite.ValidationSeq = metadata.ValidationSeq
+		}
+	}
+	composite.Version = composite.ValidationSeq
+	return composite, true, nil
+}
+
 // BatchAttendanceResult holds per-course results for batch attendance.
 type BatchAttendanceResult struct {
 	Courses map[string]BatchCourseResult
