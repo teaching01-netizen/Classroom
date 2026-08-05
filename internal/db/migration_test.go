@@ -266,6 +266,173 @@ func TestMigration009CreatesSnapshotCoordinationSchema(t *testing.T) {
 	}
 }
 
+func TestMigration014HealsLegacySnapshotCompleteness(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL not set; migration integration test requires a disposable PostgreSQL database")
+	}
+
+	database, schema, ctx := newMigrationSchema(t, databaseURL, "snapshot_completeness_heal")
+
+	source, err := iofs.New(migrations, "migrations")
+	require.NoError(t, err)
+	driver, err := postgres.WithInstance(database, &postgres.Config{})
+	require.NoError(t, err)
+	migrator, err := migrate.NewWithInstance("iofs", source, "postgres", driver)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = migrator.Close()
+	})
+
+	require.NoError(t, migrator.Steps(13))
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	legacyValidatedAt := now.Add(-24 * time.Hour)
+
+	_, err = database.ExecContext(ctx, `
+		INSERT INTO scrape_host_state (
+			host,
+			baseline_requests_per_second,
+			current_requests_per_second,
+			burst,
+			available_tokens,
+			tokens_updated_at,
+			baseline_concurrency,
+			current_concurrency
+		)
+		VALUES ('warwick.example', 1, 1, 1, 1, $1, 1, 1)`,
+		now,
+	)
+	require.NoError(t, err)
+
+	_, err = database.ExecContext(ctx, `
+		INSERT INTO scrape_targets (
+			host,
+			kind,
+			resource_key,
+			current_interval_seconds,
+			min_interval_seconds,
+			max_interval_seconds,
+			max_serve_age_seconds,
+			next_run_at,
+			last_validated_at,
+			etag,
+			last_modified
+		)
+		VALUES (
+			'warwick.example',
+			'course_catalog',
+			'catalog',
+			3600,
+			900,
+			86400,
+			172800,
+			$1,
+			$2,
+			'"validator"',
+			'Sun, 26 Jul 2026 10:00:00 GMT'
+		)`,
+		now,
+		legacyValidatedAt,
+	)
+	require.NoError(t, err)
+
+	// Legacy current snapshot: complete=false, verified_at=NULL, exactly how
+	// migration 013 left every pre-existing row.
+	var currentSnapshotID int64
+	require.NoError(t, database.QueryRowContext(ctx, `
+		INSERT INTO scrape_snapshots (
+			target_id, version, content_hash, payload, content_fetched_at,
+			complete, manifest, validation_report
+		)
+		VALUES (
+			(SELECT id FROM scrape_targets WHERE resource_key = 'catalog'),
+			1,
+			decode(repeat('ab', 32), 'hex'),
+			'{"legacy":true}'::jsonb,
+			$1,
+			FALSE,
+			'{}'::jsonb,
+			'{}'::jsonb
+		)
+		RETURNING id`,
+		legacyValidatedAt,
+	).Scan(&currentSnapshotID))
+	require.NoError(t, err)
+
+	// Historical (non-current) legacy snapshot: must stay untouched.
+	var historicalID int64
+	require.NoError(t, database.QueryRowContext(ctx, `
+		INSERT INTO scrape_snapshots (
+			target_id, version, content_hash, payload, content_fetched_at,
+			complete, manifest, validation_report
+		)
+		VALUES (
+			(SELECT id FROM scrape_targets WHERE resource_key = 'catalog'),
+			2,
+			decode(repeat('cd', 32), 'hex'),
+			'{"legacy":true}'::jsonb,
+			$1,
+			FALSE,
+			'{}'::jsonb,
+			'{}'::jsonb
+		)
+		RETURNING id`,
+		legacyValidatedAt,
+	).Scan(&historicalID))
+	require.NoError(t, err)
+
+	_, err = database.ExecContext(ctx, `
+		UPDATE scrape_targets
+		SET current_snapshot_id=$1,
+			current_version=1,
+			current_content_hash=decode(repeat('ab', 32), 'hex')
+		WHERE resource_key='catalog'`,
+		currentSnapshotID,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, migrator.Steps(1))
+
+	var complete bool
+	var verifiedAt *time.Time
+	require.NoError(t, database.QueryRowContext(ctx,
+		`SELECT complete, verified_at FROM scrape_snapshots WHERE id=$1`,
+		currentSnapshotID,
+	).Scan(&complete, &verifiedAt))
+	require.True(t, complete, "current legacy snapshot must be healed to complete")
+	require.NotNil(t, verifiedAt)
+	require.Equal(t, legacyValidatedAt, verifiedAt.UTC(),
+		"verified_at must come from the target's last_validated_at, not the ancient fetch time")
+
+	require.NoError(t, database.QueryRowContext(ctx,
+		`SELECT complete FROM scrape_snapshots WHERE id=$1`,
+		historicalID,
+	).Scan(&complete))
+	require.False(t, complete, "historical non-current snapshot must stay untouched")
+
+	version, dirty, err := migrator.Version()
+	require.NoError(t, err)
+	require.Equal(t, uint(14), version)
+	require.False(t, dirty)
+
+	// The down migration is a no-op: a data backfill is not safely reversible.
+	require.NoError(t, migrator.Steps(-1))
+	version, dirty, err = migrator.Version()
+	require.NoError(t, err)
+	require.Equal(t, uint(13), version)
+	require.False(t, dirty)
+
+	require.NoError(t, database.QueryRowContext(ctx,
+		`SELECT complete FROM scrape_snapshots WHERE id=$1`,
+		currentSnapshotID,
+	).Scan(&complete))
+	require.True(t, complete, "no-op down migration must not revert the healed data")
+
+	// The no-op down migration must not drop any relations either.
+	assertRelationState(t, ctx, database, schema, "scrape_snapshots", true)
+}
+
 func newMigrationSchema(t *testing.T, databaseURL, prefix string) (*sql.DB, string, context.Context) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

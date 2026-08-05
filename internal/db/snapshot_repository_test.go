@@ -675,6 +675,137 @@ func TestSnapshotRepositoryCommitLifecycleAndIdempotency(t *testing.T) {
 	require.Equal(t, now.Add(2*time.Minute), current.ValidatedAt)
 }
 
+// seedLegacyCurrentSnapshot inserts a snapshot row the way migration 013 left
+// pre-existing rows behind (complete=false, verified_at=NULL) and points the
+// target's current_snapshot_id at it. Returns the snapshot's id.
+func seedLegacyCurrentSnapshot(
+	t *testing.T,
+	ctx context.Context,
+	repo *SnapshotRepository,
+	target domain.ScrapeTarget,
+	fetchedAt time.Time,
+) int64 {
+	t.Helper()
+	hash := sha256.Sum256([]byte("legacy-payload"))
+	var id int64
+	require.NoError(t, repo.pool.QueryRow(ctx, `
+		INSERT INTO scrape_snapshots (
+			target_id, version, content_hash, payload, content_fetched_at,
+			complete, manifest, validation_report
+		)
+		VALUES ($1, $2, $3, $4, $5, FALSE, '{}'::jsonb, '{}'::jsonb)
+		RETURNING id`,
+		target.ID,
+		1,
+		hash[:],
+		json.RawMessage(`{"legacy":true}`),
+		fetchedAt,
+	).Scan(&id))
+	_, err := repo.pool.Exec(ctx, `
+		UPDATE scrape_targets
+		SET current_snapshot_id=$2,
+			current_version=$3,
+			current_content_hash=$4,
+			last_validated_at=$5,
+			quality_state='verified_fresh'
+		WHERE id=$1`,
+		target.ID,
+		id,
+		1,
+		hash[:],
+		fetchedAt,
+	)
+	require.NoError(t, err)
+	return id
+}
+
+func TestSnapshotRepositoryUnchangedCommitRefreshesLegacyCurrentSnapshot(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	seed.Ref.ResourceKey = "legacy-unchanged"
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+
+	target := claimOneTestTarget(t, ctx, repo, now, "legacy-worker")
+	legacyID := seedLegacyCurrentSnapshot(t, ctx, repo, target, now.Add(-48*time.Hour))
+
+	validatedAt := now.Add(time.Minute)
+	seq := target.ValidationSeq + 1
+	unchanged := changedCommit(target, "legacy-worker", validatedAt, nil)
+	unchanged.Outcome = "unchanged"
+	unchanged.Changed = false
+	unchanged.Payload = nil
+	unchanged.ContentHash = [32]byte{}
+	unchanged.RecentChanges = []bool{true, false}
+	unchanged.ValidationSeqAfter = &seq
+
+	result, err := repo.Commit(ctx, unchanged)
+	require.NoError(t, err)
+	require.Nil(t, result.Snapshot)
+	require.Nil(t, result.Metadata)
+
+	// The pre-existing current snapshot row is healed in place (same id)...
+	var complete bool
+	var verifiedAt *time.Time
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT complete, verified_at FROM scrape_snapshots WHERE id=$1`,
+		legacyID,
+	).Scan(&complete, &verifiedAt))
+	require.True(t, complete)
+	require.NotNil(t, verifiedAt)
+	require.Equal(t, validatedAt, verifiedAt.UTC())
+
+	// ...and the read path now serves it as complete and verified.
+	current, err := repo.Current(ctx, target.Ref)
+	require.NoError(t, err)
+	require.Equal(t, legacyID, current.ID)
+	require.True(t, current.Complete)
+	require.Equal(t, validatedAt, current.VerifiedAt)
+}
+
+func TestSnapshotRepositoryNotModifiedCommitRefreshesLegacyCurrentSnapshot(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seed := catalogSeed(now)
+	seed.Ref.ResourceKey = "legacy-not-modified"
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{seed}))
+
+	target := claimOneTestTarget(t, ctx, repo, now, "legacy-worker")
+	legacyID := seedLegacyCurrentSnapshot(t, ctx, repo, target, now.Add(-48*time.Hour))
+
+	validatedAt := now.Add(2 * time.Minute)
+	seq := target.ValidationSeq + 1
+	notModified := changedCommit(target, "legacy-worker", validatedAt, nil)
+	notModified.Outcome = "not_modified"
+	notModified.Changed = false
+	notModified.Payload = nil
+	notModified.ContentHash = [32]byte{}
+	notModified.RecentChanges = []bool{true, false}
+	notModified.ValidationSeqAfter = &seq
+	notModified.ETag = `"v1"`
+
+	result, err := repo.Commit(ctx, notModified)
+	require.NoError(t, err)
+	require.Nil(t, result.Snapshot)
+	require.Nil(t, result.Metadata)
+
+	var complete bool
+	var verifiedAt *time.Time
+	require.NoError(t, repo.pool.QueryRow(ctx,
+		`SELECT complete, verified_at FROM scrape_snapshots WHERE id=$1`,
+		legacyID,
+	).Scan(&complete, &verifiedAt))
+	require.True(t, complete)
+	require.NotNil(t, verifiedAt)
+	require.Equal(t, validatedAt, verifiedAt.UTC())
+
+	current, err := repo.Current(ctx, target.Ref)
+	require.NoError(t, err)
+	require.Equal(t, legacyID, current.ID)
+	require.True(t, current.Complete)
+	require.Equal(t, validatedAt, current.VerifiedAt)
+}
+
 func TestSnapshotRepositoryIdempotentRetryReturnsOriginalRunMetadata(t *testing.T) {
 	repo, ctx := newSnapshotRepositoryTest(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)

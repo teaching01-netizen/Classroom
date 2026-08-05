@@ -1034,6 +1034,24 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 		if tag.RowsAffected() != 1 {
 			return CommitResult{}, domain.ErrLeaseLost
 		}
+		// Unchanged / not_modified commits keep the published snapshot row
+		// pointed at by current_snapshot_id. Refresh its verification state
+		// so legacy rows that predate the verified pipeline (complete=false,
+		// verified_at=NULL) are healed on the next successful upstream
+		// contact. A zero-row update is not an error: the target simply has
+		// no published snapshot yet.
+		if snapshotID == nil {
+			if _, refreshErr := tx.Exec(ctx, `
+				UPDATE scrape_snapshots AS s
+				SET complete = TRUE, verified_at = $2
+				FROM scrape_targets AS t
+				WHERE s.id = t.current_snapshot_id AND t.id = $1`,
+				input.TargetID,
+				validatedAt,
+			); refreshErr != nil {
+				return CommitResult{}, fmt.Errorf("commit snapshot: refresh current snapshot verification: %w", refreshErr)
+			}
+		}
 	} else {
 		tag, updateErr := tx.Exec(ctx, `
 			UPDATE scrape_targets
