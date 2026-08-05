@@ -86,6 +86,12 @@ type TeacherService struct {
 	refresher         SnapshotRefresher
 	reportConcurrency int
 	snapshotMode      bool
+	// now is the service clock. Freshness barriers are anchored to it so the
+	// export path can be tested against a fixed time.
+	now func() time.Time
+	// reportGen computes an attendance report. It defaults to ComputeReport
+	// and is overridable from same-package tests.
+	reportGen func(context.Context, domain.SessionFetcher, *domain.CourseDetail, int, int) *domain.CourseAttendanceReport
 }
 
 var ErrLiveSourceDisabled = errors.New("request-level live source is disabled in snapshot mode")
@@ -209,6 +215,8 @@ func NewTeacherServiceWithDependenciesAndMutator(
 		refresher:         refresher,
 		reportConcurrency: reportConcurrency,
 		snapshotMode:      snapshotMode,
+		now:               time.Now,
+		reportGen:         ComputeReport,
 	}
 }
 

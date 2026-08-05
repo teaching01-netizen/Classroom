@@ -411,4 +411,82 @@ var (
 		},
 		[]string{"event_class"},
 	)
+
+	// ============================================================================
+	// Attendance report export observability
+	// ============================================================================
+	// Labels are bounded (format, status, reason) and never carry course,
+	// session, or student identifiers.
+
+	// AttendanceExportRequestsTotal counts every attendance export request.
+	// Labels: format (csv or xlsx), status (success or failure).
+	AttendanceExportRequestsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "attendance_export_requests_total",
+			Help: "Total attendance export requests by format and status.",
+		},
+		[]string{"format", "status"},
+	)
+
+	// AttendanceExportDurationSeconds measures end-to-end attendance export
+	// duration. Label: format (csv or xlsx).
+	AttendanceExportDurationSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "attendance_export_duration_seconds",
+			Help:    "End-to-end attendance export duration in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"format"},
+	)
+
+	// AttendanceExportFreshnessDurationSeconds measures the time spent
+	// refreshing and validating snapshots for an export.
+	AttendanceExportFreshnessDurationSeconds = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "attendance_export_freshness_duration_seconds",
+			Help:    "Attendance export snapshot freshness validation duration in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+
+	// AttendanceExportGenerationDurationSeconds measures payload generation
+	// (CSV or XLSX serialization). Label: format (csv or xlsx).
+	AttendanceExportGenerationDurationSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "attendance_export_generation_duration_seconds",
+			Help:    "Attendance export payload generation duration in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"format"},
+	)
+
+	// AttendanceExportFailuresTotal counts failed exports by bounded reason:
+	// refresh_failed, stale, incomplete, timeout, report_error,
+	// generation_failed, cancelled, too_large, course_not_found.
+	AttendanceExportFailuresTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "attendance_export_failures_total",
+			Help: "Total attendance export failures by bounded reason.",
+		},
+		[]string{"reason"},
+	)
+
+	// AttendanceExportBytesTotal counts exported payload bytes. Label: format
+	// (csv or xlsx).
+	AttendanceExportBytesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "attendance_export_bytes_total",
+			Help: "Total attendance export payload bytes by format.",
+		},
+		[]string{"format"},
+	)
+
+	// AttendanceExportRefreshRestartsTotal counts exports that restarted after
+	// course session membership changed during the refresh phase.
+	AttendanceExportRefreshRestartsTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "attendance_export_refresh_restarts_total",
+			Help: "Total attendance exports restarted after course membership changed mid-refresh.",
+		},
+	)
 )

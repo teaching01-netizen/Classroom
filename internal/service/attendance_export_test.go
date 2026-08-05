@@ -22,11 +22,13 @@ type attendanceExportHarness struct {
 	skipAdvance  map[string]bool
 	postRefresh  map[string]func(*domain.SnapshotMetadata)
 	onRefresh    map[string]func()
+	refreshOrder []string
 	forceOverdue bool
 	detail       *domain.CourseDetail
 	sessions     map[string]*domain.SessionDetail
 	fetchErr     map[string]error
 	profiles     []domain.StudentProfile
+	profilesErr  error
 	now          time.Time
 }
 
@@ -129,6 +131,7 @@ func (h *attendanceExportHarness) RefreshNow(ctx context.Context, ref domain.Tar
 	key := ref.IdentityKey()
 	h.mu.Lock()
 	h.refreshCalls[key]++
+	h.refreshOrder = append(h.refreshOrder, key)
 	blocked := h.blockRefresh[key]
 	skipAdvance := h.skipAdvance[key]
 	postRefresh := h.postRefresh[key]
@@ -190,7 +193,7 @@ func (h *attendanceExportHarness) FetchStudentProfiles(context.Context) ([]domai
 }
 
 func (h *attendanceExportHarness) CurrentStudentProfiles(context.Context) ([]domain.StudentProfile, error) {
-	return h.profiles, nil
+	return h.profiles, h.profilesErr
 }
 
 func (h *attendanceExportHarness) FetchSessionForReport(ctx context.Context, courseID, sessionID string) (*domain.SessionDetail, error) {
@@ -202,7 +205,17 @@ func (h *attendanceExportHarness) ToggleCheckin(context.Context, string, string,
 }
 
 func newAttendanceExportService(h *attendanceExportHarness) *TeacherService {
-	return NewTeacherServiceWithDependencies(h, h, h, h, 2, true)
+	s := NewTeacherServiceWithDependencies(h, h, h, h, 2, true)
+	s.now = func() time.Time { return h.now }
+	return s
+}
+
+// setReportGen forces the report generator seam to return the given report,
+// driving the export through its fail-closed report checks.
+func setReportGen(s *TeacherService, report *domain.CourseAttendanceReport) {
+	s.reportGen = func(context.Context, domain.SessionFetcher, *domain.CourseDetail, int, int) *domain.CourseAttendanceReport {
+		return report
+	}
 }
 
 func TestGetFreshAttendanceExport_RefreshesStaleSnapshotsBeforeReporting(t *testing.T) {
@@ -337,6 +350,248 @@ func TestGetFreshAttendanceExport_RejectsInvalidFreshnessMetadata(t *testing.T) 
 
 			// When
 			export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+			// Then
+			assert.Nil(t, export)
+			assert.ErrorIs(t, err, ErrAttendanceExportFreshness)
+		})
+	}
+}
+
+func TestGetFreshAttendanceExport_RestartsOnceWhenCourseMembershipChanges(t *testing.T) {
+	// Given: a session is added to the course while the profiles snapshot
+	// refreshes, so the export must stabilize the membership before reporting
+	h := newAttendanceExportHarness()
+	h.sessions["session-2"] = &domain.SessionDetail{
+		SessionSummary: domain.SessionSummary{SessionID: "session-2"},
+		Students: []domain.StudentCheckin{{
+			StudentID: "student-1",
+			Name:      "Alice",
+			CheckedIn: true,
+		}},
+	}
+	changed := false
+	h.onRefresh[h.ProfilesRef().IdentityKey()] = func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if changed {
+			return
+		}
+		changed = true
+		courseKey := h.CourseRef("course-1").IdentityKey()
+		courseMetadata := h.metadata[courseKey]
+		courseMetadata.ValidationSeq++
+		courseMetadata.ValidatedAt = h.now
+		h.metadata[courseKey] = courseMetadata
+		h.detail.Sessions = append(h.detail.Sessions, domain.SessionSummary{
+			SessionID:     "session-2",
+			SessionNumber: 2,
+			Name:          "Week 2",
+			Status:        domain.SessionStatusDone,
+		})
+		sessionKey := h.SessionRef("course-1", "session-2").IdentityKey()
+		h.metadata[sessionKey] = domain.SnapshotMetadata{
+			Kind:          domain.SnapshotSessionDetail,
+			ResourceKey:   "session-2",
+			ParentKey:     "course-1",
+			Version:       7,
+			ValidationSeq: 10,
+			ValidatedAt:   h.now.Add(-time.Hour),
+			Stale:         true,
+			QualityState:  domain.DataQualityVerifiedStale,
+			Complete:      true,
+		}
+	}
+
+	// When
+	export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then: the workflow restarted once and succeeded with the new session
+	require.NoError(t, err)
+	assert.Equal(t, 1, export.RestartCount)
+	assert.Equal(t, 2, h.refreshCalls[h.CourseRef("course-1").IdentityKey()],
+		"course refresh must run once per attempt")
+	assert.Equal(t, 1, h.refreshCalls[h.SessionRef("course-1", "session-2").IdentityKey()])
+	require.Len(t, export.Report.Sessions, 2)
+	require.Len(t, export.Report.Students, 1)
+	assert.Len(t, export.Report.Students[0].PerSession, 2)
+	_ = export.FreshnessDurationMs // measured, may truncate to 0 in fast tests
+}
+
+func TestGetFreshAttendanceExport_FailsRetryableWhenCourseMembershipChangesRepeatedly(t *testing.T) {
+	// Given: the course membership keeps changing on every refresh attempt
+	h := newAttendanceExportHarness()
+	h.onRefresh[h.ProfilesRef().IdentityKey()] = func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		courseKey := h.CourseRef("course-1").IdentityKey()
+		courseMetadata := h.metadata[courseKey]
+		courseMetadata.ValidationSeq++
+		courseMetadata.ValidatedAt = h.now
+		h.metadata[courseKey] = courseMetadata
+	}
+
+	// When
+	export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then: the workflow restarted at least once before failing with a
+	// retryable membership-stability error
+	assert.Nil(t, export)
+	assert.ErrorIs(t, err, ErrAttendanceExportFreshness)
+	assert.ErrorContains(t, err, "course session membership changed during export")
+	assert.GreaterOrEqual(t, h.refreshCalls[h.CourseRef("course-1").IdentityKey()], 2,
+		"the course must have been re-refreshed at least once before failing")
+}
+
+func TestGetFreshAttendanceExport_ZeroSessionsYieldsValidEmptyExport(t *testing.T) {
+	// Given
+	h := newAttendanceExportHarness()
+	h.detail.Sessions = nil
+
+	// When
+	export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then
+	require.NoError(t, err)
+	require.NotNil(t, export.Report)
+	assert.Empty(t, export.Report.Sessions)
+	assert.Empty(t, export.Report.Students)
+	assert.Empty(t, export.Report.Errors)
+	assert.False(t, export.Report.Truncated)
+	assert.Equal(t, 0, export.RestartCount)
+}
+
+func TestGetFreshAttendanceExport_MissingCourseSnapshotIsCourseNotFound(t *testing.T) {
+	// Given
+	h := newAttendanceExportHarness()
+	delete(h.metadata, h.CourseRef("course-1").IdentityKey())
+
+	// When
+	export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then
+	assert.Nil(t, export)
+	assert.ErrorIs(t, err, ErrAttendanceExportCourseNotFound)
+	assert.NotErrorIs(t, err, ErrAttendanceExportFreshness)
+}
+
+func TestGetFreshAttendanceExport_NilCourseMetadataAfterRefreshFailsSafely(t *testing.T) {
+	// Given: the course snapshot disappears while the session refreshes run
+	h := newAttendanceExportHarness()
+	h.onRefresh[h.ProfilesRef().IdentityKey()] = func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		delete(h.metadata, h.CourseRef("course-1").IdentityKey())
+	}
+
+	// When
+	export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then
+	assert.Nil(t, export)
+	assert.ErrorIs(t, err, ErrAttendanceExportFreshness)
+}
+
+func TestGetFreshAttendanceExport_ProfileEnrichmentFailureFailsClosed(t *testing.T) {
+	// Given
+	h := newAttendanceExportHarness()
+	h.profilesErr = errors.New("profiles unavailable")
+
+	// When
+	export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then
+	assert.Nil(t, export)
+	assert.ErrorIs(t, err, ErrAttendanceExportFreshness)
+}
+
+func TestGetFreshAttendanceExport_CourseRefreshPrecedesSessionRefreshes(t *testing.T) {
+	// Given
+	h := newAttendanceExportHarness()
+
+	// When
+	export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then
+	require.NoError(t, err)
+	require.NotEmpty(t, h.refreshOrder)
+	require.Equal(t, h.CourseRef("course-1").IdentityKey(), h.refreshOrder[0],
+		"the course snapshot must be refreshed before any session or profile refresh")
+	assert.Equal(t, 1, h.refreshCalls[h.CourseRef("course-1").IdentityKey()])
+	_ = export.FreshnessDurationMs // measured, may truncate to 0 in fast tests
+}
+
+func TestGetFreshAttendanceExport_RejectsSnapshotValidatedBeforeBarrier(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{
+			name: "course metadata predates the export barrier",
+			key:  "course",
+		},
+		{
+			name: "profile snapshot predates the export barrier",
+			key:  "profiles",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Given: the refresh advances the validation sequence but stamps
+			// the snapshot with a ValidatedAt predating the export barrier
+			h := newAttendanceExportHarness()
+			var ref domain.TargetRef
+			if test.key == "course" {
+				ref = h.CourseRef("course-1")
+			} else {
+				ref = h.ProfilesRef()
+			}
+			h.postRefresh[ref.IdentityKey()] = func(metadata *domain.SnapshotMetadata) {
+				metadata.ValidatedAt = h.now.Add(-time.Hour)
+			}
+
+			// When
+			export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+			// Then
+			assert.Nil(t, export)
+			assert.ErrorIs(t, err, ErrAttendanceExportFreshness)
+			assert.ErrorContains(t, err, "not validated after the export barrier")
+		})
+	}
+}
+
+func TestGetFreshAttendanceExport_MissingSessionBaselineFailsSafely(t *testing.T) {
+	// Given: the session snapshot is absent when the export reads its baseline
+	h := newAttendanceExportHarness()
+	delete(h.metadata, h.SessionRef("course-1", "session-1").IdentityKey())
+
+	// When
+	export, err := newAttendanceExportService(h).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then
+	assert.Nil(t, export)
+	assert.ErrorIs(t, err, ErrAttendanceExportFreshness)
+}
+
+func TestGetFreshAttendanceExport_FailsClosedOnIncompleteGeneratedReport(t *testing.T) {
+	tests := []struct {
+		name   string
+		report *domain.CourseAttendanceReport
+	}{
+		{name: "generated report is truncated", report: &domain.CourseAttendanceReport{Truncated: true}},
+		{name: "generated report is stale", report: &domain.CourseAttendanceReport{Stale: true}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Given: the generator seam returns an incomplete report with no
+			// per-session errors, so only the report-level checks can reject it
+			h := newAttendanceExportHarness()
+			s := newAttendanceExportService(h)
+			setReportGen(s, test.report)
+
+			// When
+			export, err := s.GetFreshAttendanceExport(context.Background(), "course-1", 1)
 
 			// Then
 			assert.Nil(t, export)

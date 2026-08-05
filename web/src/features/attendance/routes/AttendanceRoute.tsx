@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { courseIdSchema } from '@/features/courses'
 import { useAttendanceQuery } from '../api/attendance.queries'
@@ -27,9 +27,27 @@ export function Component() {
   const atRiskCount = report?.students.filter((student) => student.atRisk).length ?? 0
   const [exporting, setExporting] = useState<AttendanceExportFormat | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
+  const exportingRef = useRef<AttendanceExportFormat | null>(null)
+  const focusTriggerRef = useRef<HTMLElement | null>(null)
   const exportDisabled = query.isFetching || exporting !== null
 
+  useEffect(() => {
+    // Once the export finishes and the buttons are re-enabled, return focus to
+    // the control that initiated it.
+    if (exporting !== null || focusTriggerRef.current === null) {
+      return
+    }
+    const trigger = focusTriggerRef.current
+    focusTriggerRef.current = null
+    trigger.focus()
+  }, [exporting])
+
   async function exportReport(format: AttendanceExportFormat): Promise<void> {
+    if (exportingRef.current !== null) {
+      return
+    }
+    exportingRef.current = format
+    focusTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setExporting(format)
     setExportError(null)
     try {
@@ -42,6 +60,7 @@ export function Component() {
     } catch (error: unknown) {
       setExportError(getErrorMessage(error))
     } finally {
+      exportingRef.current = null
       setExporting(null)
     }
   }

@@ -59,6 +59,7 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 	}
 
 	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
 	r.Use(redactInternalQueryBeforeLogging)
 	r.Use(chimiddleware.Logger)
 	r.Use(corsMiddleware(options.CORSOrigin))

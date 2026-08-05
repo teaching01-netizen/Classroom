@@ -17,6 +17,7 @@ import (
 	"github.com/xuri/excelize/v2"
 
 	"qr-command-center/internal/domain"
+	"qr-command-center/internal/metrics"
 	"qr-command-center/internal/service"
 )
 
@@ -33,11 +34,20 @@ type attendanceExportRequest struct {
 
 func attendanceExportHandler(exporter attendanceExportService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		format := "unknown"
+		status := "success"
+		defer func() {
+			metrics.AttendanceExportRequestsTotal.WithLabelValues(format, status).Inc()
+			metrics.AttendanceExportDurationSeconds.WithLabelValues(format).Observe(time.Since(started).Seconds())
+		}()
+
 		courseID := chi.URLParam(r, "courseId")
 		if courseID == "" {
 			courseID = r.PathValue("courseId")
 		}
 		if courseID == "" {
+			status = "failure"
 			writeJSON(w, http.StatusBadRequest, errorResponse("courseId is required"))
 			return
 		}
@@ -47,14 +57,24 @@ func attendanceExportHandler(exporter attendanceExportService) http.HandlerFunc 
 		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&request); err != nil {
+			status = "failure"
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				metrics.AttendanceExportFailuresTotal.WithLabelValues("too_large").Inc()
+				writeJSON(w, http.StatusRequestEntityTooLarge, errorResponse("export request too large"))
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))
 			return
 		}
+		format = request.Format
 		if request.Format != "csv" && request.Format != "xlsx" {
+			status = "failure"
 			writeJSON(w, http.StatusBadRequest, errorResponse("format must be csv or xlsx"))
 			return
 		}
 		if request.Threshold < 0 {
+			status = "failure"
 			writeJSON(w, http.StatusBadRequest, errorResponse("threshold must be non-negative"))
 			return
 		}
@@ -63,9 +83,17 @@ func attendanceExportHandler(exporter attendanceExportService) http.HandlerFunc 
 		defer cancel()
 		export, err := exporter.GetFreshAttendanceExport(ctx, courseID, request.Threshold)
 		if err != nil {
+			status = "failure"
+			metrics.AttendanceExportFailuresTotal.WithLabelValues(exportFailureReason(err)).Inc()
 			switch {
 			case errors.Is(err, context.DeadlineExceeded):
 				writeJSON(w, http.StatusGatewayTimeout, errorResponse("attendance export timed out"))
+			case errors.Is(err, service.ErrAttendanceExportCourseNotFound):
+				writeJSON(w, http.StatusNotFound, errorResponse("course not found"))
+			case errors.Is(err, service.ErrAttendanceExportTooLarge):
+				writeJSON(w, http.StatusRequestEntityTooLarge, errorResponse("attendance report too large"))
+			case errors.Is(err, context.Canceled):
+				return
 			case errors.Is(err, service.ErrAttendanceExportFreshness):
 				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Latest attendance data could not be validated. Please try again."))
 			default:
@@ -74,12 +102,15 @@ func attendanceExportHandler(exporter attendanceExportService) http.HandlerFunc 
 			return
 		}
 		if export == nil || export.Report == nil {
+			status = "failure"
+			metrics.AttendanceExportFailuresTotal.WithLabelValues("report_error").Inc()
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse("Latest attendance data could not be validated. Please try again."))
 			return
 		}
 
 		var payload []byte
 		var contentType string
+		generationStarted := time.Now()
 		if request.Format == "csv" {
 			payload, err = buildAttendanceCSV(export)
 			contentType = "text/csv; charset=utf-8"
@@ -87,8 +118,19 @@ func attendanceExportHandler(exporter attendanceExportService) http.HandlerFunc 
 			payload, err = buildAttendanceXLSX(export)
 			contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 		}
+		metrics.AttendanceExportGenerationDurationSeconds.WithLabelValues(format).Observe(time.Since(generationStarted).Seconds())
 		if err != nil {
+			status = "failure"
+			metrics.AttendanceExportFailuresTotal.WithLabelValues("generation_failed").Inc()
 			writeJSON(w, http.StatusInternalServerError, errorResponse("attendance export generation failed"))
+			return
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			status = "failure"
+			metrics.AttendanceExportFailuresTotal.WithLabelValues(exportFailureReason(ctxErr)).Inc()
+			if errors.Is(ctxErr, context.DeadlineExceeded) {
+				writeJSON(w, http.StatusGatewayTimeout, errorResponse("attendance export timed out"))
+			}
 			return
 		}
 
@@ -105,6 +147,38 @@ func attendanceExportHandler(exporter attendanceExportService) http.HandlerFunc 
 		w.Header().Set("X-Attendance-Validated-At", export.SourceValidatedAt.UTC().Format(time.RFC3339))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(payload)
+		metrics.AttendanceExportBytesTotal.WithLabelValues(format).Add(float64(len(payload)))
+		metrics.AttendanceExportRefreshRestartsTotal.Add(float64(export.RestartCount))
+		metrics.AttendanceExportFreshnessDurationSeconds.Observe(float64(export.FreshnessDurationMs) / 1000.0)
+	}
+}
+
+// exportFailureReason maps an export error to a bounded, low-cardinality
+// metric reason. The mapping is deterministic: every error resolves to exactly
+// one of the allowed label values.
+func exportFailureReason(err error) string {
+	switch {
+	case err == nil:
+		return "report_error"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, service.ErrAttendanceExportCourseNotFound):
+		return "course_not_found"
+	case errors.Is(err, service.ErrAttendanceExportTooLarge):
+		return "too_large"
+	case errors.Is(err, service.ErrAttendanceExportFreshness):
+		message := err.Error()
+		if strings.Contains(message, "incomplete") {
+			return "incomplete"
+		}
+		if strings.Contains(message, "overdue") || strings.Contains(message, "not verified fresh") {
+			return "stale"
+		}
+		return "refresh_failed"
+	default:
+		return "report_error"
 	}
 }
 

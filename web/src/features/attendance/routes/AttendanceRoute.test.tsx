@@ -108,4 +108,51 @@ describe('AttendanceRoute exports', () => {
     expect(screen.getByRole('button', { name: 'Export CSV' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Export Excel' })).toBeDisabled()
   })
+
+  it('triggers a single export request when the CSV button is double-clicked', async () => {
+    // Given
+    downloadAttendanceReport.mockImplementation(() => new Promise<{ filename: string }>((resolve) => {
+      resolveDownload = () => resolve({ filename: 'attendance.csv' })
+    }))
+    renderRoute()
+
+    // When
+    const csvButton = screen.getByRole('button', { name: 'Export CSV' })
+    fireEvent.click(csvButton)
+    fireEvent.click(csvButton)
+
+    // Then
+    expect(downloadAttendanceReport).toHaveBeenCalledTimes(1)
+    expect(refetch).not.toHaveBeenCalled()
+    if (resolveDownload === null) {
+      throw new Error('Expected the export download to be pending')
+    }
+    resolveDownload()
+    await waitFor(() => {
+      expect(refetch).toHaveBeenCalledOnce()
+    })
+    expect(downloadAttendanceReport).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns focus to the initiating export control after the download finishes', async () => {
+    // Given
+    downloadAttendanceReport.mockImplementation(() => new Promise<{ filename: string }>((resolve) => {
+      resolveDownload = () => resolve({ filename: 'attendance.xlsx' })
+    }))
+    renderRoute()
+
+    // When
+    const excelButton = screen.getByRole('button', { name: 'Export Excel' })
+    excelButton.focus()
+    fireEvent.click(excelButton)
+    if (resolveDownload === null) {
+      throw new Error('Expected the export download to be pending')
+    }
+    resolveDownload()
+
+    // Then
+    await waitFor(() => {
+      expect(document.activeElement).toBe(excelButton)
+    })
+  })
 })

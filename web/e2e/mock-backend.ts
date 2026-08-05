@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test'
+import { xlsxFixtureBase64 as attendanceExportFixtureBase64 } from './attendance-export-fixture'
 
 const course = {
   course_id: 'CS101',
@@ -62,7 +63,38 @@ function envelope(data: unknown) {
   return { success: true, data }
 }
 
-export async function mockBackend(page: Page): Promise<void> {
+export type AttendanceExportMode = 'success' | 'failure' | 'delay'
+
+export type MockBackendOptions = {
+  readonly exportMode?: AttendanceExportMode
+  readonly exportDelayMs?: number
+}
+
+const exportedAt = '2026-02-01T10:05:00Z'
+const csvHeader = [
+  'course_id', 'course_name', 'exported_at', 'source_validated_at',
+  'student_id', 'student_name', 'nickname', 'school',
+  'attended_sessions', 'total_sessions', 'attendance_rate', 'at_risk', 'Session 1',
+].join(',')
+
+function attendanceCsv(present: boolean): string {
+  const rows = [
+    ['CS101', 'Software Engineering', exportedAt, exportedAt, 'u123', 'Alice Chen', 'Alice', 'Computer Science', '1', '1', '100.00%', 'false', present ? 'Present' : 'Absent'].join(','),
+    ['CS101', 'Software Engineering', exportedAt, exportedAt, 'u456', 'Sam Rivera', '', 'Computer Science', '0', '1', '0.00%', 'false', 'Absent'].join(','),
+  ]
+  return '\ufeff' + [csvHeader, ...rows].join('\n')
+}
+
+// A real attendance workbook produced by the Go serializer (excelize): two
+// sheets (Attendance, Metadata), frozen header pane, autofilter, percentage
+// NumFmt, and shared strings containing the student and course names.
+const xlsxFixtureBase64 = attendanceExportFixtureBase64
+
+export async function mockBackend(page: Page, options: MockBackendOptions = {}): Promise<void> {
+  // The attendance report is stateful so tests can simulate a scraper refresh:
+  // an export request validates freshly scraped data, which marks attendance
+  // present for subsequent report reads.
+  const state = { attendancePresent: false }
   await page.routeWebSocket('**/ws', (socket) => {
     socket.onMessage(() => undefined)
   })
@@ -73,6 +105,40 @@ export async function mockBackend(page: Page): Promise<void> {
 
     if (!path.startsWith('/api/')) {
       await route.continue()
+      return
+    }
+
+    if (path === '/api/teacher/courses/CS101/attendance-report/export' && request.method() === 'POST') {
+      const body = request.postDataJSON()
+      if (options.exportMode === 'failure') {
+        await route.fulfill({
+          status: 503,
+          contentType: 'application/json',
+          body: JSON.stringify({ success: false, error: 'Latest attendance data could not be validated. Please try again.' }),
+        })
+        return
+      }
+      if (options.exportDelayMs !== undefined && options.exportDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, options.exportDelayMs))
+      }
+      // Simulate the snapshot scraper refreshing the course before serving the
+      // export: the fresh data marks the stored attendance present.
+      state.attendancePresent = true
+      if (body.format === 'xlsx') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          headers: { 'Content-Disposition': 'attachment; filename="attendance-software-engineering-2026-02-01.xlsx"' },
+          body: Buffer.from(xlsxFixtureBase64, 'base64'),
+        })
+        return
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/csv; charset=utf-8',
+        headers: { 'Content-Disposition': 'attachment; filename="attendance-software-engineering-2026-02-01.csv"' },
+        body: Buffer.from(attendanceCsv(state.attendancePresent), 'utf8'),
+      })
       return
     }
 
@@ -113,7 +179,7 @@ export async function mockBackend(page: Page): Promise<void> {
               sessionName: 'Architecture workshop',
               sessionDate: '2026-02-01',
               sessionStatus: 'done',
-              checkedIn: true,
+              checkedIn: state.attendancePresent,
               status: 'ok',
             }],
           }],
