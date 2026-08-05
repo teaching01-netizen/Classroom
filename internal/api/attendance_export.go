@@ -94,6 +94,8 @@ func attendanceExportHandler(exporter attendanceExportService) http.HandlerFunc 
 				writeJSON(w, http.StatusRequestEntityTooLarge, errorResponse("attendance report too large"))
 			case errors.Is(err, context.Canceled):
 				return
+			case errors.Is(err, service.ErrAttendanceExportLiveFailure):
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse("attendance data is temporarily unavailable; please try again"))
 			case errors.Is(err, service.ErrAttendanceExportFreshness):
 				writeJSON(w, http.StatusServiceUnavailable, errorResponse("Latest attendance data could not be validated. Please try again."))
 			default:

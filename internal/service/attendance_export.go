@@ -14,6 +14,7 @@ var (
 	ErrAttendanceExportFreshness      = errors.New("attendance export freshness validation failed")
 	ErrAttendanceExportCourseNotFound = errors.New("attendance export course not found")
 	ErrAttendanceExportTooLarge       = errors.New("attendance export too large")
+	ErrAttendanceExportLiveFailure    = errors.New("attendance export live data unavailable")
 )
 
 // Export size caps: at most 5000 students and 200 sessions per export keep the
@@ -37,6 +38,10 @@ func (s *TeacherService) GetFreshAttendanceExport(
 	courseID string,
 	threshold int,
 ) (*AttendanceExportResult, error) {
+	if !s.snapshotMode {
+		return s.getLiveAttendanceExport(ctx, courseID, threshold)
+	}
+
 	barrierStart := s.now()
 	started := time.Now()
 	snapshots, ok := s.reader.(snapshotAwareReader)
@@ -190,6 +195,40 @@ func (s *TeacherService) GetFreshAttendanceExport(
 			FreshnessDurationMs: time.Since(started).Milliseconds(),
 		}, nil
 	}
+}
+
+// getLiveAttendanceExport serves the export directly from live Warwick data,
+// bypassing snapshot refresh and freshness validation entirely. It is only
+// reachable when snapshot mode is disabled.
+func (s *TeacherService) getLiveAttendanceExport(
+	ctx context.Context,
+	courseID string,
+	threshold int,
+) (*AttendanceExportResult, error) {
+	started := time.Now()
+
+	report, err := s.GetAttendanceReport(ctx, courseID, threshold, "live")
+	if err != nil {
+		return nil, errors.Join(ErrAttendanceExportLiveFailure, err)
+	}
+	if report == nil {
+		return nil, errors.Join(ErrAttendanceExportLiveFailure, errors.New("live attendance report is unavailable"))
+	}
+	if len(report.Sessions) > maxExportSessions {
+		return nil, fmt.Errorf("%w: course session count exceeds limit", ErrAttendanceExportTooLarge)
+	}
+	if len(report.Students) > maxExportStudents {
+		return nil, fmt.Errorf("%w: course student count exceeds limit", ErrAttendanceExportTooLarge)
+	}
+
+	return &AttendanceExportResult{
+		Report:              report,
+		Source:              "live-warwick",
+		ExportedAt:          s.now().UTC(),
+		SourceValidatedAt:   s.now().UTC(),
+		RestartCount:        0,
+		FreshnessDurationMs: time.Since(started).Milliseconds(),
+	}, nil
 }
 
 func uniqueAttendanceSessions(sessions []domain.SessionSummary) []domain.SessionSummary {

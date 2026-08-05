@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ type attendanceExportHarness struct {
 	refreshOrder []string
 	forceOverdue bool
 	detail       *domain.CourseDetail
+	detailErr    error
 	sessions     map[string]*domain.SessionDetail
 	fetchErr     map[string]error
 	profiles     []domain.StudentProfile
@@ -175,6 +177,9 @@ func (h *attendanceExportHarness) GetCourseCatalog(context.Context) ([]domain.Co
 }
 
 func (h *attendanceExportHarness) GetCourseDetail(context.Context, string) (*domain.CourseDetail, error) {
+	if h.detailErr != nil {
+		return nil, h.detailErr
+	}
 	copy := *h.detail
 	copy.Sessions = append([]domain.SessionSummary(nil), h.detail.Sessions...)
 	return &copy, nil
@@ -205,7 +210,11 @@ func (h *attendanceExportHarness) ToggleCheckin(context.Context, string, string,
 }
 
 func newAttendanceExportService(h *attendanceExportHarness) *TeacherService {
-	s := NewTeacherServiceWithDependencies(h, h, h, h, 2, true)
+	return newAttendanceExportServiceWithMode(h, true)
+}
+
+func newAttendanceExportServiceWithMode(h *attendanceExportHarness, snapshotMode bool) *TeacherService {
+	s := NewTeacherServiceWithDependencies(h, h, h, h, 2, snapshotMode)
 	s.now = func() time.Time { return h.now }
 	return s
 }
@@ -596,6 +605,99 @@ func TestGetFreshAttendanceExport_FailsClosedOnIncompleteGeneratedReport(t *test
 			// Then
 			assert.Nil(t, export)
 			assert.ErrorIs(t, err, ErrAttendanceExportFreshness)
+		})
+	}
+}
+
+func TestGetFreshAttendanceExport_LiveModeReturnsLiveReportWithoutRefresh(t *testing.T) {
+	// Given: snapshot mode disabled, so the export must bypass the snapshot
+	// workflow and serve the live Warwick report directly
+	h := newAttendanceExportHarness()
+
+	// When
+	export, err := newAttendanceExportServiceWithMode(h, false).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then
+	require.NoError(t, err)
+	require.NotNil(t, export)
+	assert.Equal(t, "live-warwick", export.Source)
+	assert.Equal(t, h.now, export.SourceValidatedAt)
+	assert.Equal(t, h.now, export.ExportedAt)
+	assert.Zero(t, export.RestartCount)
+	require.NotNil(t, export.Report)
+	assert.Equal(t, "course-1", export.Report.CourseID)
+	require.Len(t, export.Report.Students, 1)
+	assert.Equal(t, "w1234567", export.Report.Students[0].StudentID, "live report students must be enriched with w-codes")
+	assert.Empty(t, h.refreshCalls, "live mode must not trigger any snapshot refreshes")
+	assert.Empty(t, h.refreshOrder)
+}
+
+func TestGetFreshAttendanceExport_LiveModeRejectsTooManySessions(t *testing.T) {
+	// Given: a course with more sessions than the export cap
+	h := newAttendanceExportHarness()
+	h.detail.Sessions = make([]domain.SessionSummary, 0, maxExportSessions+1)
+	for index := 0; index < maxExportSessions+1; index++ {
+		h.detail.Sessions = append(h.detail.Sessions, domain.SessionSummary{
+			SessionID:     fmt.Sprintf("session-%d", index),
+			SessionNumber: index + 1,
+			Status:        domain.SessionStatusDone,
+		})
+	}
+
+	// When
+	export, err := newAttendanceExportServiceWithMode(h, false).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then
+	assert.Nil(t, export)
+	assert.ErrorIs(t, err, ErrAttendanceExportTooLarge)
+	assert.NotErrorIs(t, err, ErrAttendanceExportLiveFailure)
+}
+
+func TestGetFreshAttendanceExport_LiveModeRejectsTooManyStudents(t *testing.T) {
+	// Given: a session with more students than the export cap
+	h := newAttendanceExportHarness()
+	students := make([]domain.StudentCheckin, 0, maxExportStudents+1)
+	for index := 0; index < maxExportStudents+1; index++ {
+		students = append(students, domain.StudentCheckin{
+			StudentID: fmt.Sprintf("student-%d", index),
+			Name:      fmt.Sprintf("Student %d", index),
+			CheckedIn: true,
+		})
+	}
+	h.sessions["session-1"].Students = students
+
+	// When
+	export, err := newAttendanceExportServiceWithMode(h, false).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+	// Then
+	assert.Nil(t, export)
+	assert.ErrorIs(t, err, ErrAttendanceExportTooLarge)
+	assert.NotErrorIs(t, err, ErrAttendanceExportLiveFailure)
+}
+
+func TestGetFreshAttendanceExport_LiveModeWrapsReadFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "upstream error", err: errors.New("upstream boom")},
+		{name: "deadline exceeded", err: context.DeadlineExceeded},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Given: the reader fails while serving the live report
+			h := newAttendanceExportHarness()
+			h.detailErr = test.err
+
+			// When
+			export, err := newAttendanceExportServiceWithMode(h, false).GetFreshAttendanceExport(context.Background(), "course-1", 1)
+
+			// Then: the failure is attributed to the live source while the
+			// wrapped cause stays visible for handler error mapping
+			assert.Nil(t, export)
+			assert.ErrorIs(t, err, ErrAttendanceExportLiveFailure)
+			assert.ErrorIs(t, err, test.err)
+			assert.NotErrorIs(t, err, ErrAttendanceExportFreshness)
 		})
 	}
 }

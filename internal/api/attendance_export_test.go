@@ -237,10 +237,12 @@ func TestAttendanceExportHandler_MapsValidationFreshnessAndDeadlineErrors(t *tes
 		err     error
 		status  int
 		message string
+		absent  string
 	}{
 		{name: "invalid format", body: `{"format":"pdf","threshold":0}`, status: http.StatusBadRequest, message: "format must be csv or xlsx"},
 		{name: "negative threshold", body: `{"format":"csv","threshold":-1}`, status: http.StatusBadRequest, message: "threshold must be non-negative"},
 		{name: "freshness failure", body: `{"format":"csv","threshold":0}`, err: errors.Join(service.ErrAttendanceExportFreshness, errors.New("secret upstream detail")), status: http.StatusServiceUnavailable, message: "Latest attendance data could not be validated. Please try again."},
+		{name: "live failure", body: `{"format":"csv","threshold":0}`, err: errors.Join(service.ErrAttendanceExportLiveFailure, errors.New("secret upstream detail")), status: http.StatusServiceUnavailable, message: "attendance data is temporarily unavailable; please try again", absent: "Latest attendance data could not be validated. Please try again."},
 		{name: "deadline", body: `{"format":"csv","threshold":0}`, err: context.DeadlineExceeded, status: http.StatusGatewayTimeout, message: "attendance export timed out"},
 	}
 	for _, test := range tests {
@@ -258,6 +260,9 @@ func TestAttendanceExportHandler_MapsValidationFreshnessAndDeadlineErrors(t *tes
 			assert.Equal(t, test.status, recorder.Code)
 			assert.Contains(t, recorder.Body.String(), test.message)
 			assert.NotContains(t, recorder.Body.String(), "secret upstream detail")
+			if test.absent != "" {
+				assert.NotContains(t, recorder.Body.String(), test.absent)
+			}
 		})
 	}
 }
