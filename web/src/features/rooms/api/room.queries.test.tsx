@@ -186,9 +186,9 @@ describe('useRoomQuery', () => {
     expect(result.current.data?.qr_url).toBeUndefined()
     expect(fetchMock).toHaveBeenCalledTimes(1)
 
-    // Fast-poll phase (first 3s at 500ms) keeps fetching until qr_url arrives.
+    // Flat 1s poll keeps fetching until qr_url arrives.
     act(() => {
-      vi.advanceTimersByTime(500)
+      vi.advanceTimersByTime(1_000)
     })
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })

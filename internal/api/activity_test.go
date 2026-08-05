@@ -24,24 +24,24 @@ func TestRouter_AdmittedRoomRequestsRecordActivityAfterRateLimit(t *testing.T) {
 	})
 	defer rateLimiters.Stop()
 
-	for index := 0; index < 21; index++ {
+	for index := 0; index < 61; index++ {
 		req := httptest.NewRequest(http.MethodGet, "/api/rooms", nil)
 		res := httptest.NewRecorder()
 		router.ServeHTTP(res, req)
-		if index < 20 {
+		if index < 60 {
 			require.NotEqual(t, http.StatusTooManyRequests, res.Code)
 		} else {
 			require.Equal(t, http.StatusTooManyRequests, res.Code)
 		}
 	}
-	require.Equal(t, int64(20), counter.count.Load(), "rejected requests must not extend activity")
+	require.Equal(t, int64(60), counter.count.Load(), "rejected requests must not extend activity")
 
 	for _, path := range []string{"/api", "/metrics", "/api/teacherish"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		res := httptest.NewRecorder()
 		router.ServeHTTP(res, req)
 	}
-	require.Equal(t, int64(20), counter.count.Load(), "non-business routes must remain inactive")
+	require.Equal(t, int64(60), counter.count.Load(), "non-business routes must remain inactive")
 }
 
 func (c *activityCounter) RecordActivity() {

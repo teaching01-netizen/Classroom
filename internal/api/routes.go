@@ -53,9 +53,9 @@ func (rl *RateLimiters) Stop() {
 
 func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *service.FavouriteService, viewSvc *service.DashboardViewService, options RouterOptions) (*chi.Mux, *RateLimiters) {
 	rl := &RateLimiters{
-		teacher: middleware.NewIPRateLimiter(5, 10),  // teacher/courses browsing: 5 req/s, burst 10
-		toggle:  middleware.NewIPRateLimiter(2, 3),   // POST toggle-checkin: 2 req/s, burst 3
-		room:    middleware.NewIPRateLimiter(10, 20), // rooms API: 10 req/s, burst 20
+		teacher: middleware.NewIPRateLimiter(15, 40), // teacher/courses browsing: 15 req/s, burst 40
+		toggle:  middleware.NewIPRateLimiter(8, 20),  // POST toggle-checkin: 8 req/s, burst 20
+		room:    middleware.NewIPRateLimiter(25, 60), // rooms API: 25 req/s, burst 60
 	}
 
 	r := chi.NewRouter()

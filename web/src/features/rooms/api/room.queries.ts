@@ -27,14 +27,12 @@ export function useRoomQuery(roomId: string | undefined, enabled: boolean) {
     queryFn: ({ signal }) =>
       apiClient.get(endpoints.room(roomId ?? ''), { schema: roomDetailSchema, signal }),
     enabled: enabled && roomId !== undefined,
+    refetchOnWindowFocus: false,
     refetchInterval: (query) => {
       if (query.state.data?.qr_url) {
         return false
       }
-      // Fast poll (500 ms) for the first 3 seconds while a fresh room's QR is
-      // being generated, then relax to 1 s until qr_url arrives.
-      const elapsed = Date.now() - query.state.dataUpdatedAt
-      return elapsed < 3_000 ? 500 : 1_000
+      return 1_000
     },
   })
 }
