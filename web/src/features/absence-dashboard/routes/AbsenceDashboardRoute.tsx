@@ -15,6 +15,7 @@ import {
 } from '../lib/filter-params'
 import { AbsenceResults } from '../components/AbsenceResults'
 import { DashboardFiltersPanel } from '../components/DashboardFilters'
+import { downloadAbsenceDashboard } from '../lib/csv'
 import { AsyncPage } from '@/shared/ui/AsyncPage'
 import { Button } from '@/shared/ui/Button'
 import { Dialog } from '@/shared/ui/Dialog'
@@ -121,6 +122,16 @@ export function Component() {
               }}
             >
               {activeView === undefined ? 'Save view' : 'Update view'}
+            </Button>
+            <Button
+              disabled={reportQuery.data === undefined}
+              onClick={() => {
+                if (reportQuery.data !== undefined) {
+                  downloadAbsenceDashboard(reportQuery.data)
+                }
+              }}
+            >
+              Export CSV
             </Button>
             {activeView !== undefined && (
               <Button variant="danger" onClick={() => setDeleteDialogOpen(true)}>Delete view</Button>
