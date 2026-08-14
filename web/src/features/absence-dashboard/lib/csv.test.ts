@@ -54,24 +54,25 @@ const report: AbsenceDashboard = {
 }
 
 describe('absenceDashboardToCsv', () => {
-  it('emits a BOM and a per-course header with absences, sessions, and rate', () => {
+  it('emits a BOM and a per-course header', () => {
     const csv = absenceDashboardToCsv(report)
     expect(csv.startsWith('\ufeff')).toBe(true)
     expect(csv.slice(1).split('\n')[0]).toBe(
-      'WCode,Name,Nickname,School,'
-        + 'SAT Math absences,SAT Math sessions,SAT Math absence rate,'
-        + 'English Adv absences,English Adv sessions,English Adv absence rate,'
-        + 'Total absences,Attended,Total sessions,Rate',
+      'WCode,Name,Nickname,School,Course,Total sessions,Absences,Absence rate',
     )
   })
 
-  it('writes per-course absences, total sessions, and absence rate for each student', () => {
+  it('writes one row per course the student takes, sorted by course name', () => {
     const lines = absenceDashboardToCsv(report).split('\n')
-    expect(lines[1]).toBe('W1001,Alice Chen,Alice,Intensive,1,2,50%,1,1,100%,2,1,3,33%')
+    // Alice takes two courses: English Adv before SAT Math alphabetically.
+    expect(lines[1]).toBe('W1001,Alice Chen,Alice,Intensive,English Adv,1,1,100%')
+    expect(lines[2]).toBe('W1001,Alice Chen,Alice,Intensive,SAT Math,2,1,50%')
   })
 
-  it('leaves the course cells empty when the student does not study that course', () => {
+  it('does not include courses the student does not take', () => {
     const lines = absenceDashboardToCsv(report).split('\n')
-    expect(lines[2]).toBe('W1002,"Bob, Smith",,Intensive,2,2,100%,,,,2,0,2,0%')
+    // Bob only takes SAT Math, so he has exactly one row and no empty cells.
+    expect(lines[3]).toBe('W1002,"Bob, Smith",,Intensive,SAT Math,2,2,100%')
+    expect(lines).toHaveLength(4)
   })
 })
