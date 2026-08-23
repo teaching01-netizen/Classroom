@@ -1,4 +1,4 @@
-if (import.meta.env.DEV) {
+if (import.meta.env.DEV && import.meta.env['VITE_ENABLE_REACT_DEBUG_TOOLS'] === 'true') {
   void import('react-grab')
   void import('react-scan')
 }

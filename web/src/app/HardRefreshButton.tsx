@@ -1,4 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
 import { z } from 'zod'
 import { apiClient } from '@/shared/api/api-client'
 import { endpoints } from '@/shared/api/endpoints'
@@ -24,37 +25,67 @@ function RefreshIcon() {
   )
 }
 
+type SyncFeedback = 'idle' | 'success' | 'error'
+
 export function HardRefreshButton() {
   const queryClient = useQueryClient()
   const { announce } = useToast()
+  const [feedback, setFeedback] = useState<SyncFeedback>('idle')
   const refresh = useMutation({
     mutationFn: () => apiClient.post(endpoints.refreshAllData, {
       schema: refreshAllResultSchema,
       timeoutMs: 120_000,
     }),
+    onMutate: () => setFeedback('idle'),
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ refetchType: 'all' })
       if (result.failed_targets === 0) {
-        announce('All data synced, including newly added courses.', 'success')
+        setFeedback('success')
         return
       }
       announce(`Data synced with ${result.failed_targets} item${result.failed_targets === 1 ? '' : 's'} still pending.`, 'error')
     },
-    onError: (error) => announce(getErrorMessage(error), 'error'),
+    onError: (error) => {
+      setFeedback('error')
+      announce(getErrorMessage(error), 'error')
+    },
   })
+  const feedbackMessage = feedback === 'success'
+    ? 'All data synced, including newly added courses.'
+    : feedback === 'error'
+      ? 'Data sync failed.'
+      : ''
+  const desktopLabel = refresh.isPending
+    ? 'Syncing…'
+    : feedback === 'success'
+      ? 'Synced'
+      : 'Sync all data'
+  const mobileLabel = refresh.isPending
+    ? 'Sync…'
+    : feedback === 'success'
+      ? 'Synced'
+      : 'Sync'
 
   return (
-    <Button
-      aria-label="Sync all data"
-      className="app-sync-button"
-      loading={refresh.isPending}
-      onClick={() => refresh.mutate()}
-      size="sm"
-      title="Pull the latest courses, sessions, and attendance data"
-      variant="ghost"
-    >
-      <RefreshIcon />
-      <span className="app-sync-button__label">Sync all data</span>
-    </Button>
+    <>
+      <Button
+        aria-label="Sync all data"
+        className="app-sync-button"
+        loading={refresh.isPending}
+        onClick={() => refresh.mutate()}
+        size="sm"
+        title="Pull the latest courses, sessions, and attendance data"
+        variant="ghost"
+      >
+        {!refresh.isPending && <RefreshIcon />}
+        <span className="app-sync-button__label">{desktopLabel}</span>
+        <span className="app-sync-button__mobile-label">{mobileLabel}</span>
+      </Button>
+      {feedbackMessage !== '' && (
+        <span className="sr-only" role="status">
+          {feedbackMessage}
+        </span>
+      )}
+    </>
   )
 }

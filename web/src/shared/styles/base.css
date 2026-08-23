@@ -68,6 +68,7 @@ a {
 .app-brand__mark {
   display: grid;
   place-items: center;
+  flex-shrink: 0;
   inline-size: 2rem;
   block-size: 2rem;
   border-radius: var(--radius-md);
@@ -108,6 +109,10 @@ a {
 
 .app-sync-button {
   flex-shrink: 0;
+}
+
+.app-sync-button__mobile-label {
+  display: none;
 }
 
 .density-control {
@@ -167,7 +172,7 @@ a {
 
   .app-topbar {
     grid-template-columns: minmax(0, 1fr) auto;
-    gap: var(--space-3);
+    gap: var(--space-2);
     padding-block: var(--space-3);
   }
 
@@ -213,13 +218,31 @@ a {
     white-space: nowrap;
   }
 
+  .app-sync-button__mobile-label {
+    display: inline;
+  }
+
   .connection-status {
-    gap: 0;
-    font-size: 0;
+    position: absolute;
+    overflow: hidden;
+    inline-size: 1px;
+    block-size: 1px;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
   .app-sync-button {
-    min-inline-size: 2.25rem;
+    min-inline-size: 3.25rem;
+    gap: var(--space-1);
+    padding-inline: var(--space-1);
+  }
+
+  .density-control select {
+    max-inline-size: 5.25rem;
     padding-inline: var(--space-2);
+  }
+
+  .app-brand__name {
+    white-space: nowrap;
   }
 }

@@ -28,7 +28,7 @@ test('syncs the fresh catalog and shows newly added courses', async ({ page }) =
   await page.getByRole('button', { name: 'Sync all data' }).click()
 
   await expect(page.getByRole('heading', { name: 'Distributed Systems' })).toBeVisible()
-  await expect(page.getByText('All data synced, including newly added courses.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Sync all data' })).toContainText('Synced')
 })
 
 test('opens the QR dialog and exports session attendance', async ({ page }) => {
