@@ -42,6 +42,12 @@ Spacing uses a four-pixel base with `--space-1` through `--space-12`. The conten
 - **Accessibility**: semantic `header` and labelled `nav`; skip link targets the main landmark; connection status has text as well as color.
 - **Layout**: fixed document-level top bar; content is the sole scroll owner.
 
+### Global data sync control
+
+- **Structure**: compact secondary action in the top-bar utilities, available on every course-facing route.
+- **States**: idle, busy with a spinner and `aria-busy`, and success or partial-failure feedback through the toast region.
+- **Behavior**: the server refreshes the catalog first, then discovered course, session, and profile snapshots; active queries refetch after the command completes so newly discovered courses appear immediately.
+
 ### Shared primitives
 
 Buttons, fields, selects, badges, tables, dialogs, toasts, empty states, errors, pagination, avatars, page headers, and statistics grids live in `src/shared/ui`. They use semantic tokens, keyboard support, visible focus states, and loading/error/empty variants where relevant.

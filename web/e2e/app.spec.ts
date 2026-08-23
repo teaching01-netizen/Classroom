@@ -18,6 +18,19 @@ test('navigates courses and preserves usable responsive controls', async ({ page
   await expect(page.getByRole('searchbox', { name: 'Search courses' })).toBeVisible()
 })
 
+test('syncs the fresh catalog and shows newly added courses', async ({ page }) => {
+  await mockBackend(page)
+  await page.goto('/courses')
+
+  await expect(page.getByRole('heading', { name: 'Software Engineering' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Distributed Systems' })).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'Sync all data' }).click()
+
+  await expect(page.getByRole('heading', { name: 'Distributed Systems' })).toBeVisible()
+  await expect(page.getByText('All data synced, including newly added courses.')).toBeVisible()
+})
+
 test('opens the QR dialog and exports session attendance', async ({ page }) => {
   // Given
   await mockBackend(page)

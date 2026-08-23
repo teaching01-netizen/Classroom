@@ -2,6 +2,7 @@ import { useLayoutEffect, type ReactNode } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useApplicationUiPreferences } from '@/shared/state/application-ui-store'
 import { useConnectionStore } from '@/shared/realtime/connection-store'
+import { HardRefreshButton } from './HardRefreshButton'
 
 const navigation = [
   { to: '/', label: 'Dashboard', end: true },
@@ -50,6 +51,7 @@ export function AppShellFrame({ children }: { readonly children: ReactNode }) {
           ))}
         </nav>
         <div className="app-topbar__utilities">
+          <HardRefreshButton />
           <label className="density-control">
             <span>Density</span>
             <select

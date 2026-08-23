@@ -98,6 +98,7 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 		r.Use(rl.teacher.Middleware)
 		r.Use(admittedActivityMiddleware(options.ActivityRecorder))
 
+		r.Post("/refresh", refreshAllDataHandler(ts))
 		r.Get("/courses", getCoursesHandler(ts))
 		r.Get("/courses/{courseId}", getCourseDetailHandler(ts))
 		r.Get("/courses/{courseId}/sessions/{sessionId}", getSessionDetailHandler(ts))

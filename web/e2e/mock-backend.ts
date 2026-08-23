@@ -13,6 +13,18 @@ const course = {
   status: 'active',
 }
 
+const newCourse = {
+  course_id: 'CS202',
+  name: 'Distributed Systems',
+  start_date: '2026-01-10',
+  end_date: '2026-04-10',
+  enrolled_count: 3,
+  total_sessions: 2,
+  completed_sessions: 1,
+  avg_attendance_rate: 0.8,
+  status: 'active',
+}
+
 const session = {
   session_id: 'S1',
   session_number: 1,
@@ -94,7 +106,7 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
   // The attendance report is stateful so tests can simulate a scraper refresh:
   // an export request validates freshly scraped data, which marks attendance
   // present for subsequent report reads.
-  const state = { attendancePresent: false }
+  const state = { attendancePresent: false, catalogSynced: false }
   await page.routeWebSocket('**/ws', (socket) => {
     socket.onMessage(() => undefined)
   })
@@ -142,8 +154,25 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
       return
     }
 
+    if (path === '/api/teacher/refresh' && request.method() === 'POST') {
+      state.catalogSynced = true
+      await route.fulfill({
+        json: envelope({
+          courses_discovered: 2,
+          courses_refreshed: 2,
+          sessions_discovered: 2,
+          sessions_refreshed: 2,
+          profiles_refreshed: true,
+          failed_targets: 0,
+        }),
+      })
+      return
+    }
+
     if (path === '/api/teacher/courses' && request.method() === 'GET') {
-      await route.fulfill({ json: envelope({ courses: [course] }) })
+      await route.fulfill({
+        json: envelope({ courses: state.catalogSynced ? [course, newCourse] : [course] }),
+      })
       return
     }
     if (path === '/api/teacher/favourites') {

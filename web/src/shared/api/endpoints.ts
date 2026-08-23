@@ -1,6 +1,7 @@
 const encode = encodeURIComponent
 
 export const endpoints = {
+  refreshAllData: '/api/teacher/refresh',
   courses: '/api/teacher/courses',
   course: (courseId: string) => `/api/teacher/courses/${encode(courseId)}`,
   session: (courseId: string, sessionId: string) =>
