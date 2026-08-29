@@ -5,7 +5,7 @@ import { useConnectionStore } from '@/shared/realtime/connection-store'
 import { HardRefreshButton } from './HardRefreshButton'
 
 const navigation = [
-  { to: '/', label: 'Dashboard', end: true },
+  { to: '/dashboard', label: 'Dashboard', end: true },
   { to: '/absence-dashboard', label: 'Absence alerts', end: false },
   { to: '/courses', label: 'All courses', end: false },
 ] as const
@@ -34,7 +34,7 @@ export function AppShellFrame({ children }: { readonly children: ReactNode }) {
         Skip to content
       </a>
       <header className="app-topbar">
-        <NavLink aria-label="Check-in Command Center home" className="app-brand" to="/">
+        <NavLink aria-label="Check-in Command Center home" className="app-brand" to="/dashboard">
           <span className="app-brand__mark" aria-hidden="true">C</span>
           <span className="app-brand__name">Check-in Center</span>
         </NavLink>

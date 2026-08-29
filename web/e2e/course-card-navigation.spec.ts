@@ -44,7 +44,7 @@ test('keeps the pin control independent from the card destination', async ({ pag
   await page.getByRole('button', { name: 'Unpin' }).click()
 
   // Then
-  await expect(page).toHaveURL('/')
+  await expect(page).toHaveURL('/dashboard')
 })
 
 test('opens sessions from the card link with the keyboard', async ({ page }) => {

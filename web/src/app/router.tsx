@@ -1,4 +1,4 @@
-import { createBrowserRouter } from 'react-router-dom'
+import { createBrowserRouter, Navigate } from 'react-router-dom'
 import { AppShell, AppShellFrame } from './AppShell'
 import { RootRouteErrorBoundary } from './route-error-boundary'
 import { NotFoundRoute } from './not-found-route'
@@ -13,6 +13,10 @@ export const router = createBrowserRouter([
     children: [
       {
         index: true,
+        element: <Navigate replace to="/dashboard" />,
+      },
+      {
+        path: 'dashboard',
         lazy: () => import('@/features/courses/routes/HomeRoute'),
       },
       {

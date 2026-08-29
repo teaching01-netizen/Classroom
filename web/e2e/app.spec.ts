@@ -1,6 +1,24 @@
 import { expect, test } from '@playwright/test'
 import { mockBackend } from './mock-backend'
 
+
+for (const viewport of [
+  { name: 'desktop', width: 1280, height: 720 },
+  { name: 'iPhone', width: 393, height: 852 },
+  { name: 'iPad', width: 834, height: 1194 },
+] as const) {
+  test(`opens the dashboard by default on ${viewport.name}`, async ({ page }) => {
+    await mockBackend(page)
+    await page.setViewportSize({ width: viewport.width, height: viewport.height })
+
+    await page.goto('/')
+
+    await expect(page).toHaveURL('/dashboard')
+    await expect(page.getByRole('heading', { name: 'Your teaching dashboard' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Dashboard' })).toHaveClass(/is-active/)
+  })
+}
+
 test('navigates courses and preserves usable responsive controls', async ({ page }) => {
   // Given
   await mockBackend(page)
@@ -55,7 +73,7 @@ test('keeps session content inside the mobile viewport', async ({ page }) => {
   await page.goto('/courses/CS101/sessions')
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
   await expect(page.getByLabel('Check-in Command Center home')).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Dashboard' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Dashboard', exact: true })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Absence alerts' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'All courses' })).toBeVisible()
   const overflow = await page.locator('body *').evaluateAll((elements) =>
