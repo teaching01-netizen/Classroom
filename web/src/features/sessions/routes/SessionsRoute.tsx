@@ -98,7 +98,13 @@ export function Component() {
                   <td><Badge tone={statusTone[session.status]}>{session.status.replace('_', ' ')}</Badge></td>
                   <td className="is-secondary">{session.checked_in_count}/{session.total_students}</td>
                   <td>
-                    <span className="session-open-affordance" aria-hidden="true">Open</span>
+                    <Link
+                      aria-label={`Open ${session.name}`}
+                      className="session-open-affordance"
+                      to={`/courses/${courseId}/sessions/${session.session_id}`}
+                    >
+                      Open
+                    </Link>
                   </td>
                 </tr>
               ))}
