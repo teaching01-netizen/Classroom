@@ -137,12 +137,18 @@ describe('useRoomQuery', () => {
     expect(result.current.data).toMatchObject({ warning_message: 'expiring soon' })
   })
 
-  it('stops polling once qr_url arrives', async () => {
+  it('stops polling once an unexpired qr_url arrives', async () => {
     vi.useFakeTimers()
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
       JSON.stringify({
         success: true,
-        data: { room_id: 'room-1', status: 'Running', qr_url: 'data:image/png;base64,abc' },
+        data: {
+          room_id: 'room-1',
+          status: 'Running',
+          qr_url: 'data:image/png;base64,abc',
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          upstream_attendance_label: 'Class Attendance 1',
+        },
       }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     ))
@@ -163,6 +169,66 @@ describe('useRoomQuery', () => {
       vi.advanceTimersByTime(10_000)
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps polling while Humantix verification is still pending', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({
+        success: true,
+        data: {
+          room_id: 'room-1',
+          status: 'Running',
+          qr_url: 'data:image/png;base64,abc',
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    const queryClient = makeQueryClient()
+    renderQuery(() => useRoomQuery('room-1', true), queryClient)
+
+    await act(async () => {
+      for (let i = 0; i < 5; i++) {
+        await vi.advanceTimersByTimeAsync(0)
+      }
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps polling when the cached QR is already expired', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({
+        success: true,
+        data: {
+          room_id: 'room-1',
+          status: 'Running',
+          qr_url: 'data:image/png;base64,expired',
+          expires_at: new Date(Date.now() - 1_000).toISOString(),
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    const queryClient = makeQueryClient()
+    renderQuery(() => useRoomQuery('room-1', true), queryClient)
+
+    await act(async () => {
+      for (let i = 0; i < 5; i++) {
+        await vi.advanceTimersByTimeAsync(0)
+      }
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('resumes polling while the room is still starting (no qr_url yet)', async () => {

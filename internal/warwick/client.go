@@ -29,6 +29,7 @@ type WarwickQrClient struct {
 	pool       *SessionPool // new — used when pool is set
 	tier       SessionTier  // new — tier for pool acquisition
 	client     *http.Client
+	baseURL    string
 	qrEndpoint string
 }
 
@@ -41,13 +42,15 @@ func NewWarwickQrClient(auth *WarwickAuth) *WarwickQrClient {
 				return http.ErrUseLastResponse
 			},
 		},
+		baseURL:    "https://warwick.humantix.cloud",
 		qrEndpoint: defaultQREndpoint,
 	}
 }
 
 // SetBaseURL updates the QR endpoint URL base. Must be called before use.
 func (c *WarwickQrClient) SetBaseURL(baseURL string) {
-	c.qrEndpoint = baseURL + "/admin/ClassAttendance/GetQRCode"
+	c.baseURL = strings.TrimRight(baseURL, "/")
+	c.qrEndpoint = c.baseURL + "/admin/ClassAttendance/GetQRCode"
 }
 
 func (c *WarwickQrClient) SetTransport(transport http.RoundTripper) {
@@ -65,6 +68,7 @@ func NewWarwickQrClientWithEndpoint(auth *WarwickAuth, endpoint string) *Warwick
 				return http.ErrUseLastResponse
 			},
 		},
+		baseURL:    strings.TrimSuffix(endpoint, "/admin/ClassAttendance/GetQRCode"),
 		qrEndpoint: endpoint,
 	}
 }
@@ -81,6 +85,7 @@ func NewWarwickQrClientFromPool(pool *SessionPool, tier SessionTier) *WarwickQrC
 				return http.ErrUseLastResponse
 			},
 		},
+		baseURL:    "https://warwick.humantix.cloud",
 		qrEndpoint: defaultQREndpoint,
 	}
 }

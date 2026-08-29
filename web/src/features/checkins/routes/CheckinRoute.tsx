@@ -204,6 +204,9 @@ export function Component() {
         sessionName={checkinsQuery.data?.name}
         totalCount={students.length}
         warningMessage={qr.warningMessage}
+        upstreamAttendanceLabel={qr.upstreamAttendanceLabel}
+        upstreamVerifiedAt={qr.upstreamVerifiedAt}
+        upstreamVerificationError={qr.upstreamVerificationError}
       />
     </section>
   )

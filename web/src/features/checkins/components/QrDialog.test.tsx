@@ -25,6 +25,32 @@ describe('QrDialog', () => {
     expect(screen.getByRole('img')).toHaveAttribute('src', 'data:image/png;base64,abc')
   })
 
+  it('shows the attendance label scraped from Humantix beside the QR', () => {
+    render(
+      <QrDialog
+        {...baseProps}
+        qrUrl="data:image/png;base64,abc"
+        upstreamAttendanceLabel="Class Attendance 1"
+        upstreamVerifiedAt="2026-08-29T09:00:00Z"
+      />,
+    )
+    expect(screen.getByText('Verified from Humantix')).toBeInTheDocument()
+    expect(screen.getByText('Class Attendance 1')).toBeInTheDocument()
+    expect(screen.getByText('Read directly from the Humantix attendance page.')).toBeInTheDocument()
+  })
+
+  it('never invents a Humantix label while verification is unavailable', () => {
+    render(
+      <QrDialog
+        {...baseProps}
+        qrUrl="data:image/png;base64,abc"
+        upstreamVerificationError="Could not verify this QR against the Humantix attendance page."
+      />,
+    )
+    expect(screen.getByText('Humantix verification unavailable')).toBeInTheDocument()
+    expect(screen.queryByText(/Class Attendance \d+/)).not.toBeInTheDocument()
+  })
+
   it('renders without roster-derived counts', () => {
     render(<QrDialog {...baseProps} qrUrl="data:image/png;base64,abc" />)
     expect(screen.queryByText(/students checked in/)).not.toBeInTheDocument()

@@ -81,6 +81,9 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 	eventHub := service.NewEventHub(512, 1024)
 	repository := db.NewPgRoomRepository(dbPool)
 	rm := service.NewRoomManagerWithEventHub(qrClient, repository, eventHub)
+	if qrClient != nil {
+		rm.SetAttendanceLabelSource(qrClient)
+	}
 
 	if err := rm.LoadRoomsFromDB(); err != nil {
 		eventHub.Close()

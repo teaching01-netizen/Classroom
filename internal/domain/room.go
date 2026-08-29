@@ -126,17 +126,20 @@ func NewInvalidPayloadError(msg string) *FetchError {
 }
 
 type Room struct {
-	RoomID         string     `json:"room_id"`
-	ClassID        string     `json:"class_id"`
-	Name           *string    `json:"name"`
-	Status         RoomStatus `json:"status"`
-	QRURL          *string    `json:"qr_url"`
-	ExpiresAt      *time.Time `json:"expires_at"`
-	LastUpdatedAt  *time.Time `json:"last_updated_at"`
-	WarningMessage *string    `json:"warning_message"`
-	ErrorMessage   *string    `json:"error_message"`
-	LastFetchAt    *time.Time `json:"last_fetch_at"`
-	CreatedAt      time.Time  `json:"-"`
+	RoomID                    string     `json:"room_id"`
+	ClassID                   string     `json:"class_id"`
+	Name                      *string    `json:"name"`
+	Status                    RoomStatus `json:"status"`
+	QRURL                     *string    `json:"qr_url"`
+	ExpiresAt                 *time.Time `json:"expires_at"`
+	LastUpdatedAt             *time.Time `json:"last_updated_at"`
+	WarningMessage            *string    `json:"warning_message"`
+	ErrorMessage              *string    `json:"error_message"`
+	LastFetchAt               *time.Time `json:"last_fetch_at"`
+	UpstreamAttendanceLabel   *string    `json:"upstream_attendance_label,omitempty"`
+	UpstreamVerifiedAt        *time.Time `json:"upstream_verified_at,omitempty"`
+	UpstreamVerificationError *string    `json:"upstream_verification_error,omitempty"`
+	CreatedAt                 time.Time  `json:"-"`
 }
 
 // RoomLite is a stripped-down version of Room returned when the `lite` query

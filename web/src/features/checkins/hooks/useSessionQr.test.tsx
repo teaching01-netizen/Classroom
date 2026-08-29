@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => {
     roomQuery,
     roomQueryArgs: vi.fn(),
     startRoomMutate: vi.fn(),
+    unstableRoomQueryResult: false,
   }
 })
 
@@ -23,7 +24,7 @@ vi.mock('@/features/rooms', () => ({
   useStartRoomMutation: () => ({ mutate: mocks.startRoomMutate, isPending: false }),
   useRoomQuery: (roomId: string | undefined, enabled: boolean) => {
     mocks.roomQueryArgs(roomId, enabled)
-    return mocks.roomQuery
+    return mocks.unstableRoomQueryResult ? { ...mocks.roomQuery } : mocks.roomQuery
   },
 }))
 
@@ -50,6 +51,7 @@ describe('useSessionQr', () => {
     mocks.roomQueryArgs.mockReset()
     mocks.roomQuery.refetch.mockReset()
     mocks.roomQuery.data = undefined
+    mocks.unstableRoomQueryResult = false
     // Default: the start mutation resolves immediately with a room id.
     mocks.startRoomMutate.mockImplementation((_vars: unknown, opts?: { onSuccess?: (r: { roomId: string }) => void }) => {
       opts?.onSuccess?.({ roomId: 'room-1' })
@@ -73,6 +75,22 @@ describe('useSessionQr', () => {
     const { result } = renderHook(() => useSessionQr(courseId, sessionId))
 
     await waitFor(() => expect(result.current.open).toBe(true))
+    expect(mocks.startRoomMutate).toHaveBeenCalledTimes(2)
+  })
+
+  it('coalesces expired auto-refresh while the room version has not advanced', async () => {
+    mocks.roomQuery.data = qrData(new Date(Date.now() - 1_000).toISOString())
+    mocks.unstableRoomQueryResult = true
+
+    const { result, rerender } = renderHook(() => useSessionQr(courseId, sessionId))
+
+    await waitFor(() => expect(result.current.open).toBe(true))
+    expect(mocks.startRoomMutate).toHaveBeenCalledTimes(2)
+
+    rerender()
+    rerender()
+    rerender()
+
     expect(mocks.startRoomMutate).toHaveBeenCalledTimes(2)
   })
 

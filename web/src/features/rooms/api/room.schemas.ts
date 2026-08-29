@@ -20,6 +20,9 @@ export const roomDetailSchema = roomSummarySchema.extend({
   qr_url: z.string().nullish(),
   warning_message: z.string().nullish(),
   error_message: z.string().nullish(),
+  upstream_attendance_label: z.string().nullish(),
+  upstream_verified_at: z.string().nullish(),
+  upstream_verification_error: z.string().nullish(),
 })
 export type RoomDetail = z.infer<typeof roomDetailSchema>
 

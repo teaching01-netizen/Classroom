@@ -14,13 +14,18 @@ import (
 )
 
 const (
-	roomRecoveryInitialBackoff = 1 * time.Second
-	roomRecoveryMaxBackoff     = 30 * time.Second
-	roomRecoveryMaxAttempts    = 10
-	minEmitInterval            = 5 * time.Second
+	roomRecoveryInitialBackoff           = 1 * time.Second
+	roomRecoveryMaxBackoff               = 30 * time.Second
+	roomRecoveryMaxAttempts              = 10
+	minEmitInterval                      = 5 * time.Second
+	attendanceVerificationAttemptTimeout = 8 * time.Second
 )
 
 type RoomManagerEvent = AppEvent
+
+type AttendanceLabelSource interface {
+	FetchAttendanceLabelContext(ctx context.Context, classID string) (string, error)
+}
 
 type RoomState struct {
 	room               domain.Room
@@ -39,16 +44,17 @@ type RoomState struct {
 }
 
 type RoomManager struct {
-	lifecycleMu   sync.Mutex
-	mu            sync.RWMutex
-	rooms         map[string]*RoomState
-	eventHub      *EventHub
-	qrClient      domain.QrClient
-	repository    db.RoomRepository
-	emitMu        sync.Mutex
-	lastEmittedAt map[string]time.Time // roomID → last emit time (rate limiting)
-	emitSeqs      map[string]int64     // roomID → per-room monotonic ROOM_CHANGED revision
-	syncDriver    SessionSyncDriver
+	lifecycleMu           sync.Mutex
+	mu                    sync.RWMutex
+	rooms                 map[string]*RoomState
+	eventHub              *EventHub
+	qrClient              domain.QrClient
+	repository            db.RoomRepository
+	emitMu                sync.Mutex
+	lastEmittedAt         map[string]time.Time // roomID → last emit time (rate limiting)
+	emitSeqs              map[string]int64     // roomID → per-room monotonic ROOM_CHANGED revision
+	syncDriver            SessionSyncDriver
+	attendanceLabelSource AttendanceLabelSource
 }
 
 func NewRoomManager(qrClient domain.QrClient, repository db.RoomRepository) *RoomManager {
@@ -89,6 +95,16 @@ func (rm *RoomManager) SetSessionSync(driver SessionSyncDriver) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	rm.syncDriver = driver
+}
+
+// SetAttendanceLabelSource wires the independent Humantix page scraper used
+// to show operators which upstream attendance page owns the QR. The source is
+// optional for tests/offline operation and must be configured before rooms are
+// started.
+func (rm *RoomManager) SetAttendanceLabelSource(source AttendanceLabelSource) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	rm.attendanceLabelSource = source
 }
 
 func (rm *RoomManager) LoadRoomsFromDB() error {
@@ -338,6 +354,12 @@ func (rm *RoomManager) StartRoom(roomID string) error {
 		state.room.ErrorMessage = nil
 	}
 
+	// A new worker means a new verification run. Do not carry a label from a
+	// previous process/worker and present it as freshly scraped.
+	state.room.UpstreamAttendanceLabel = nil
+	state.room.UpstreamVerifiedAt = nil
+	state.room.UpstreamVerificationError = nil
+
 	ctx, cancel := context.WithCancel(context.Background())
 	state.cancel = cancel
 	state.done = make(chan struct{})
@@ -350,9 +372,17 @@ func (rm *RoomManager) StartRoom(roomID string) error {
 
 	driver := rm.syncDriver
 	courseID := state.courseID
+	attendanceLabelSource := rm.attendanceLabelSource
 	go func() {
 		defer close(done)
 		var wg sync.WaitGroup
+		if attendanceLabelSource != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				rm.runAttendanceVerification(ctx, state, attendanceLabelSource)
+			}()
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -439,6 +469,89 @@ func (rm *RoomManager) emitRoomEvents(room domain.Room) {
 		HasQR:     room.QRURL != nil,
 		Revision:  revision,
 	}})
+}
+
+func (rm *RoomManager) runAttendanceVerification(
+	ctx context.Context,
+	state *RoomState,
+	source AttendanceLabelSource,
+) {
+	rm.mu.RLock()
+	classID := state.room.ClassID
+	roomID := state.room.RoomID
+	rm.mu.RUnlock()
+
+	// Keep retries sparse and bounded. This verification is operator assurance,
+	// not part of QR generation, so it must never create an upstream storm or
+	// delay the QR worker.
+	backoffs := []time.Duration{0, 500 * time.Millisecond, 1500 * time.Millisecond}
+	var lastErr error
+	for attempt, backoff := range backoffs {
+		if backoff > 0 {
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+
+		attemptCtx, cancel := context.WithTimeout(ctx, attendanceVerificationAttemptTimeout)
+		label, err := source.FetchAttendanceLabelContext(attemptCtx, classID)
+		cancel()
+		if err == nil && label != "" {
+			now := time.Now().UTC()
+			rm.mu.Lock()
+			current, exists := rm.rooms[roomID]
+			if !exists || current != state || state.cancel == nil {
+				rm.mu.Unlock()
+				return
+			}
+			state.room.UpstreamAttendanceLabel = &label
+			state.room.UpstreamVerifiedAt = &now
+			state.room.UpstreamVerificationError = nil
+			roomCopy := state.room
+			rm.mu.Unlock()
+			rm.emitRoomEvents(roomCopy)
+			return
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return
+		}
+		if !shouldRetryAttendanceVerification(err) || attempt == len(backoffs)-1 {
+			break
+		}
+	}
+
+	slog.Warn("Humantix attendance verification unavailable", "room_id", roomID, "error", lastErr)
+	message := "Could not verify this QR against the Humantix attendance page."
+	rm.mu.Lock()
+	current, exists := rm.rooms[roomID]
+	if !exists || current != state || state.cancel == nil {
+		rm.mu.Unlock()
+		return
+	}
+	state.room.UpstreamAttendanceLabel = nil
+	state.room.UpstreamVerifiedAt = nil
+	state.room.UpstreamVerificationError = &message
+	roomCopy := state.room
+	rm.mu.Unlock()
+	rm.emitRoomEvents(roomCopy)
+}
+
+func shouldRetryAttendanceVerification(err error) bool {
+	if err == nil {
+		return false
+	}
+	var fetchErr *domain.FetchError
+	if errors.As(err, &fetchErr) {
+		// A structurally invalid Humantix page will not heal by retrying a few
+		// milliseconds later. Network/auth/capacity failures can.
+		return fetchErr.Kind != domain.ErrKindInvalidPayload
+	}
+	return true
 }
 
 func (rm *RoomManager) handleNoQRClient(state *RoomState) {

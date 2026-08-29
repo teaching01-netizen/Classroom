@@ -11,6 +11,9 @@ type QrDialogProps = {
   // "Generating…" spinner: error/warning messages explain why no QR exists.
   readonly errorMessage?: string | undefined
   readonly warningMessage?: string | undefined
+  readonly upstreamAttendanceLabel?: string | undefined
+  readonly upstreamVerifiedAt?: string | undefined
+  readonly upstreamVerificationError?: string | undefined
   // Roster-derived labels are optional so the QR renders independently of
   // roster loading.
   readonly courseName?: string | undefined
@@ -43,6 +46,9 @@ export function QrDialog({
   expiresAt,
   errorMessage,
   warningMessage,
+  upstreamAttendanceLabel,
+  upstreamVerifiedAt,
+  upstreamVerificationError,
   courseName,
   sessionName,
   checkedCount,
@@ -68,6 +74,26 @@ export function QrDialog({
       title="Student check-in QR code"
     >
       <div className="qr-dialog">
+        {upstreamAttendanceLabel !== undefined ? (
+          <div className="qr-dialog__verification qr-dialog__verification--verified" role="status">
+            <span className="qr-dialog__verification-kicker">Verified from Humantix</span>
+            <strong>{upstreamAttendanceLabel}</strong>
+            <span>Read directly from the Humantix attendance page.</span>
+            {upstreamVerifiedAt !== undefined ? (
+              <time dateTime={upstreamVerifiedAt}>Verification received</time>
+            ) : null}
+          </div>
+        ) : upstreamVerificationError !== undefined ? (
+          <div className="qr-dialog__verification qr-dialog__verification--unavailable" role="status">
+            <strong>Humantix verification unavailable</strong>
+            <span>{upstreamVerificationError}</span>
+          </div>
+        ) : (
+          <div className="qr-dialog__verification" role="status">
+            <strong>Checking Humantix attendance page…</strong>
+            <span>The label below will only appear after a live upstream scrape.</span>
+          </div>
+        )}
         {!hasQr && blockerMessage !== undefined ? (
           <div className="qr-dialog__blocked" role="alert">
             <p>{blockerMessage}</p>

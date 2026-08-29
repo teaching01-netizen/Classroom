@@ -24,7 +24,8 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
   const [openedIdentity, setOpenedIdentity] = useState<string>()
   const [activeRoom, setActiveRoom] = useState<{ identity: string; roomId: string }>()
   const initializedIdentity = useRef<string>()
-  const startRoom = useStartRoomMutation()
+  const lastAutoRenewedVersion = useRef<string>()
+  const { mutate: startRoomMutate, isPending: startRoomPending } = useStartRoomMutation()
   const activeRoomId = activeRoom?.identity === identity ? activeRoom.roomId : undefined
   const roomQuery = useRoomQuery(activeRoomId, activeRoomId !== undefined)
   const { announce } = useToast()
@@ -35,6 +36,7 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
       return
     }
     initializedIdentity.current = identity
+    lastAutoRenewedVersion.current = undefined
     const requestedIdentity = identity
 
     // Route params can change without unmounting this hook. Never carry a QR
@@ -42,7 +44,7 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
     setActiveRoom(undefined)
     setOpenedIdentity(undefined)
 
-    startRoom.mutate(
+    startRoomMutate(
       { sessionId, courseId },
       {
         onSuccess: (result) => {
@@ -56,7 +58,7 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
         },
       },
     )
-  }, [announce, courseId, identity, sessionId, startRoom])
+  }, [announce, courseId, identity, sessionId, startRoomMutate])
 
   const openQr = () => {
     if (activeRoomId !== undefined) {
@@ -64,7 +66,7 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
       return
     }
     const requestedIdentity = identity
-    startRoom.mutate(
+    startRoomMutate(
       { sessionId, courseId },
       {
         onSuccess: (result) => {
@@ -80,14 +82,16 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
     )
   }
 
+  const refetchRoom = roomQuery.refetch
+
   const refresh = useCallback(() => {
     const requestedIdentity = identity
-    startRoom.mutate(
+    startRoomMutate(
       { sessionId, courseId },
       {
         onSuccess: () => {
           if (currentIdentityRef.current !== requestedIdentity) return
-          void roomQuery.refetch()
+          void refetchRoom()
         },
         onError: (error) => {
           if (currentIdentityRef.current !== requestedIdentity) return
@@ -95,7 +99,7 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
         },
       },
     )
-  }, [announce, courseId, identity, roomQuery, sessionId, startRoom])
+  }, [announce, courseId, identity, refetchRoom, sessionId, startRoomMutate])
 
   // A route transition disables the previous room query immediately. Ignore
   // any data retained by the query observer until the new session owns a room.
@@ -104,6 +108,19 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
   const expiresAt = roomData?.expires_at ?? undefined
   const errorMessage = roomData?.error_message ?? undefined
   const warningMessage = roomData?.warning_message ?? undefined
+  const upstreamAttendanceLabel = roomData?.upstream_attendance_label ?? undefined
+  const upstreamVerifiedAt = roomData?.upstream_verified_at ?? undefined
+  const upstreamVerificationError = roomData?.upstream_verification_error ?? undefined
+  const autoRenewVersion = activeRoomId === undefined
+    ? undefined
+    : JSON.stringify([identity, activeRoomId, expiresAt ?? null])
+
+  const autoRenew = useCallback(() => {
+    if (autoRenewVersion === undefined) return
+    if (lastAutoRenewedVersion.current === autoRenewVersion) return
+    lastAutoRenewedVersion.current = autoRenewVersion
+    refresh()
+  }, [autoRenewVersion, refresh])
 
   useEffect(() => {
     if (!open) {
@@ -113,26 +130,29 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
       // A QR without an expiry is anomalous (the backend always pairs them);
       // refresh once to recover rather than showing a frozen image.
       if (qrUrl !== undefined && qrUrl !== '') {
-        refresh()
+        autoRenew()
       }
       return
     }
     const remaining = new Date(expiresAt).getTime() - Date.now()
     if (remaining <= 0) {
-      refresh()
+      autoRenew()
       return
     }
-    const timer = window.setTimeout(refresh, Math.max(remaining - AUTO_REFRESH_AHEAD_MS, 0))
+    const timer = window.setTimeout(autoRenew, Math.max(remaining - AUTO_REFRESH_AHEAD_MS, 0))
     return () => window.clearTimeout(timer)
-  }, [open, expiresAt, qrUrl, refresh])
+  }, [autoRenew, open, expiresAt, qrUrl])
 
   return {
     qrUrl,
     expiresAt,
     errorMessage,
     warningMessage,
+    upstreamAttendanceLabel,
+    upstreamVerifiedAt,
+    upstreamVerificationError,
     open,
-    refreshing: startRoom.isPending || roomQuery.isFetching,
+    refreshing: startRoomPending || roomQuery.isFetching,
     openQr,
     closeQr: () => setOpenedIdentity(undefined),
     refresh,

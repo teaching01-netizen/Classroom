@@ -129,6 +129,91 @@ func (c *recordingQRClient) Fetches() []string {
 	return append([]string(nil), c.fetches...)
 }
 
+type recordingAttendanceLabelSource struct {
+	mu       sync.Mutex
+	classIDs []string
+	label    string
+}
+
+func (s *recordingAttendanceLabelSource) FetchAttendanceLabelContext(_ context.Context, classID string) (string, error) {
+	s.mu.Lock()
+	s.classIDs = append(s.classIDs, classID)
+	s.mu.Unlock()
+	return s.label, nil
+}
+
+func (s *recordingAttendanceLabelSource) ClassIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.classIDs...)
+}
+
+func TestEnsureSessionRoom_ScrapesHumantixAttendanceLabelForExactClassID(t *testing.T) {
+	repo := newIdleRoomRepository()
+	hub := NewEventHub(16, 16)
+	defer hub.Close()
+	rm := NewRoomManagerWithEventHub(idleQRClient{}, repo, hub)
+	verifier := &recordingAttendanceLabelSource{label: "Class Attendance 1"}
+	rm.SetAttendanceLabelSource(verifier)
+
+	_, err := rm.EnsureSessionRoom("19591", "2269")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		room := rm.GetRoom("19591")
+		return room != nil && room.UpstreamAttendanceLabel != nil
+	}, time.Second, 10*time.Millisecond)
+
+	room := rm.GetRoom("19591")
+	require.NotNil(t, room)
+	require.NotNil(t, room.UpstreamAttendanceLabel)
+	assert.Equal(t, "Class Attendance 1", *room.UpstreamAttendanceLabel)
+	require.NotNil(t, room.UpstreamVerifiedAt)
+	assert.Equal(t, []string{"19591"}, verifier.ClassIDs(), "verification must use the exact QR class/session id")
+
+	// Re-entering the same live room must not trigger another upstream page scrape.
+	_, err = rm.EnsureSessionRoom("19591", "2269")
+	require.NoError(t, err)
+	time.Sleep(30 * time.Millisecond)
+	assert.Equal(t, []string{"19591"}, verifier.ClassIDs())
+	require.NoError(t, rm.StopRoom("19591"))
+}
+
+type invalidAttendanceLabelSource struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *invalidAttendanceLabelSource) FetchAttendanceLabelContext(context.Context, string) (string, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	return "", domain.NewInvalidPayloadError("head-sub missing")
+}
+
+func (s *invalidAttendanceLabelSource) Calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func TestAttendanceVerification_DoesNotRetryStructuralScrapeFailure(t *testing.T) {
+	repo := newIdleRoomRepository()
+	hub := NewEventHub(16, 16)
+	defer hub.Close()
+	rm := NewRoomManagerWithEventHub(idleQRClient{}, repo, hub)
+	verifier := &invalidAttendanceLabelSource{}
+	rm.SetAttendanceLabelSource(verifier)
+
+	_, err := rm.EnsureSessionRoom("19591", "2269")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		room := rm.GetRoom("19591")
+		return room != nil && room.UpstreamVerificationError != nil
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, 1, verifier.Calls(), "invalid HTML should fail closed without retrying the same page")
+	require.NoError(t, rm.StopRoom("19591"))
+}
+
 func TestEnsureSessionRoom_StartsWorkerForPersistedRunningRoom(t *testing.T) {
 	// A room persisted as Running by a previous process has no in-process
 	// worker after a cold start. EnsureSessionRoom must not trust the

@@ -29,10 +29,21 @@ export function useRoomQuery(roomId: string | undefined, enabled: boolean) {
     enabled: enabled && roomId !== undefined,
     refetchOnWindowFocus: false,
     refetchInterval: (query) => {
-      if (query.state.data?.qr_url) {
-        return false
+      const room = query.state.data
+      if (!room?.qr_url) {
+        return 1_000
       }
-      return 1_000
+      const expiresAt = room.expires_at
+      if (expiresAt === null || expiresAt === undefined) {
+        return 1_000
+      }
+      const expiresAtMs = Date.parse(expiresAt)
+      if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+        return 1_000
+      }
+      const verificationSettled =
+        Boolean(room.upstream_attendance_label) || Boolean(room.upstream_verification_error)
+      return verificationSettled ? false : 1_000
     },
   })
 }
