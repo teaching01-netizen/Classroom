@@ -14,13 +14,17 @@ const mocks = vi.hoisted(() => {
   }
   return {
     roomQuery,
+    roomQueryArgs: vi.fn(),
     startRoomMutate: vi.fn(),
   }
 })
 
 vi.mock('@/features/rooms', () => ({
   useStartRoomMutation: () => ({ mutate: mocks.startRoomMutate, isPending: false }),
-  useRoomQuery: () => mocks.roomQuery,
+  useRoomQuery: (roomId: string | undefined, enabled: boolean) => {
+    mocks.roomQueryArgs(roomId, enabled)
+    return mocks.roomQuery
+  },
 }))
 
 vi.mock('@/shared/lib/errors', () => ({
@@ -43,6 +47,7 @@ function qrData(expiresAt: string) {
 describe('useSessionQr', () => {
   beforeEach(() => {
     mocks.startRoomMutate.mockReset()
+    mocks.roomQueryArgs.mockReset()
     mocks.roomQuery.refetch.mockReset()
     mocks.roomQuery.data = undefined
     // Default: the start mutation resolves immediately with a room id.
@@ -113,6 +118,52 @@ describe('useSessionQr', () => {
 
     act(() => vi.advanceTimersByTime(20_000))
     expect(mocks.startRoomMutate).toHaveBeenCalledTimes(2)
+  })
+
+  it('starts a new QR room when the route changes to another session', async () => {
+    const sessionTwo = 'session-2' as SessionId
+    const { rerender } = renderHook(
+      ({ session }) => useSessionQr(courseId, session),
+      { initialProps: { session: sessionId } },
+    )
+
+    expect(mocks.startRoomMutate).toHaveBeenCalledTimes(1)
+    expect(mocks.startRoomMutate).toHaveBeenLastCalledWith(
+      { sessionId, courseId },
+      expect.any(Object),
+    )
+
+    rerender({ session: sessionTwo })
+
+    await waitFor(() => expect(mocks.startRoomMutate).toHaveBeenCalledTimes(2))
+    expect(mocks.startRoomMutate).toHaveBeenLastCalledWith(
+      { sessionId: sessionTwo, courseId },
+      expect.any(Object),
+    )
+  })
+
+  it('ignores a late room-start result from the previous session', async () => {
+    const sessionTwo = 'session-2' as SessionId
+    const completions = new Map<string, (result: { roomId: string }) => void>()
+    mocks.startRoomMutate.mockImplementation((
+      variables: { sessionId: string },
+      options?: { onSuccess?: (result: { roomId: string }) => void },
+    ) => {
+      if (options?.onSuccess) completions.set(variables.sessionId, options.onSuccess)
+    })
+
+    const { rerender } = renderHook(
+      ({ session }) => useSessionQr(courseId, session),
+      { initialProps: { session: sessionId } },
+    )
+    rerender({ session: sessionTwo })
+
+    await waitFor(() => expect(mocks.startRoomMutate).toHaveBeenCalledTimes(2))
+    act(() => completions.get(sessionTwo)?.({ roomId: 'room-2' }))
+    await waitFor(() => expect(mocks.roomQueryArgs).toHaveBeenLastCalledWith('room-2', true))
+
+    act(() => completions.get(sessionId)?.({ roomId: 'room-1' }))
+    expect(mocks.roomQueryArgs).toHaveBeenLastCalledWith('room-2', true)
   })
 
   it('runs the initial start mutation exactly once under StrictMode', () => {

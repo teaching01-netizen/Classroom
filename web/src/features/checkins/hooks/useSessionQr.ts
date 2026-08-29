@@ -17,63 +17,93 @@ const AUTO_REFRESH_AHEAD_MS = 10_000
 // room detail with an adaptive interval until qr_url arrives. While the dialog
 // is open it keeps the displayed QR fresh by re-fetching shortly before expiry.
 export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
-  const [open, setOpen] = useState(false)
-  const [activeRoomId, setActiveRoomId] = useState<string>()
-  const initializedRoom = useRef(false)
+  const identity = JSON.stringify([courseId, sessionId])
+  const currentIdentityRef = useRef(identity)
+  currentIdentityRef.current = identity
+
+  const [openedIdentity, setOpenedIdentity] = useState<string>()
+  const [activeRoom, setActiveRoom] = useState<{ identity: string; roomId: string }>()
+  const initializedIdentity = useRef<string>()
   const startRoom = useStartRoomMutation()
+  const activeRoomId = activeRoom?.identity === identity ? activeRoom.roomId : undefined
   const roomQuery = useRoomQuery(activeRoomId, activeRoomId !== undefined)
   const { announce } = useToast()
+  const open = openedIdentity === identity
 
   useEffect(() => {
-    if (initializedRoom.current) {
+    if (initializedIdentity.current === identity) {
       return
     }
-    initializedRoom.current = true
+    initializedIdentity.current = identity
+    const requestedIdentity = identity
+
+    // Route params can change without unmounting this hook. Never carry a QR
+    // room across that identity boundary, even for a single render.
+    setActiveRoom(undefined)
+    setOpenedIdentity(undefined)
+
     startRoom.mutate(
       { sessionId, courseId },
       {
         onSuccess: (result) => {
-          setActiveRoomId(result.roomId)
-          setOpen(true)
+          if (currentIdentityRef.current !== requestedIdentity) return
+          setActiveRoom({ identity: requestedIdentity, roomId: result.roomId })
+          setOpenedIdentity(requestedIdentity)
         },
-        onError: (error) => announce(getErrorMessage(error), 'error'),
+        onError: (error) => {
+          if (currentIdentityRef.current !== requestedIdentity) return
+          announce(getErrorMessage(error), 'error')
+        },
       },
     )
-  }, [announce, courseId, sessionId, startRoom])
+  }, [announce, courseId, identity, sessionId, startRoom])
 
   const openQr = () => {
     if (activeRoomId !== undefined) {
-      setOpen(true)
+      setOpenedIdentity(identity)
       return
     }
+    const requestedIdentity = identity
     startRoom.mutate(
       { sessionId, courseId },
       {
         onSuccess: (result) => {
-          setActiveRoomId(result.roomId)
-          setOpen(true)
+          if (currentIdentityRef.current !== requestedIdentity) return
+          setActiveRoom({ identity: requestedIdentity, roomId: result.roomId })
+          setOpenedIdentity(requestedIdentity)
         },
-        onError: (error) => announce(getErrorMessage(error), 'error'),
+        onError: (error) => {
+          if (currentIdentityRef.current !== requestedIdentity) return
+          announce(getErrorMessage(error), 'error')
+        },
       },
     )
   }
 
   const refresh = useCallback(() => {
+    const requestedIdentity = identity
     startRoom.mutate(
       { sessionId, courseId },
       {
         onSuccess: () => {
+          if (currentIdentityRef.current !== requestedIdentity) return
           void roomQuery.refetch()
         },
-        onError: (error) => announce(getErrorMessage(error), 'error'),
+        onError: (error) => {
+          if (currentIdentityRef.current !== requestedIdentity) return
+          announce(getErrorMessage(error), 'error')
+        },
       },
     )
-  }, [announce, courseId, roomQuery, sessionId, startRoom])
+  }, [announce, courseId, identity, roomQuery, sessionId, startRoom])
 
-  const qrUrl = roomQuery.data?.qr_url ?? undefined
-  const expiresAt = roomQuery.data?.expires_at ?? undefined
-  const errorMessage = roomQuery.data?.error_message ?? undefined
-  const warningMessage = roomQuery.data?.warning_message ?? undefined
+  // A route transition disables the previous room query immediately. Ignore
+  // any data retained by the query observer until the new session owns a room.
+  const roomData = activeRoomId === undefined ? undefined : roomQuery.data
+  const qrUrl = roomData?.qr_url ?? undefined
+  const expiresAt = roomData?.expires_at ?? undefined
+  const errorMessage = roomData?.error_message ?? undefined
+  const warningMessage = roomData?.warning_message ?? undefined
 
   useEffect(() => {
     if (!open) {
@@ -104,7 +134,7 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
     open,
     refreshing: startRoom.isPending || roomQuery.isFetching,
     openQr,
-    closeQr: () => setOpen(false),
+    closeQr: () => setOpenedIdentity(undefined),
     refresh,
   }
 }

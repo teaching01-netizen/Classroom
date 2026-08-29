@@ -196,4 +196,5 @@ describe('useRoomQuery', () => {
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.restoreAllMocks()
 })
