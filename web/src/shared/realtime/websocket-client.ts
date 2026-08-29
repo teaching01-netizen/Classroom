@@ -1,6 +1,8 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { z } from 'zod'
+import { courseIdSchema } from '@/features/courses'
 import { roomKeys } from '@/features/rooms/api/room.queries'
+import { sessionIdSchema, sessionKeys } from '@/features/sessions'
 import {
   roomSummarySchema,
   roomSummariesSchema,
@@ -12,7 +14,6 @@ import {
   applySnapshotStateSync,
   snapshotMetadataSchema,
 } from './snapshot-events'
-import { applyCheckinDelta, isSessionDetailLike } from './checkin-update'
 import { useConnectionStore } from './connection-store'
 import {
   applyRoomChanged,
@@ -23,19 +24,22 @@ import {
   type RoomChanged,
 } from './room-events'
 
-const checkinUpdateSchema = z.object({
+const checkinDeltaSchema = z.object({
   student_id: z.string(),
   checked_in: z.boolean(),
-  course_id: z.string().optional(),
-  session_id: z.string().optional(),
+})
+
+const checkinUpdateSchema = checkinDeltaSchema.extend({
+  course_id: courseIdSchema,
+  session_id: sessionIdSchema,
   observed_at: z.string().optional(),
 })
 
 const checkinsUpdateSchema = z.object({
-  course_id: z.string().optional(),
-  session_id: z.string(),
+  course_id: courseIdSchema,
+  session_id: sessionIdSchema,
   observed_at: z.string().optional(),
-  updates: z.array(checkinUpdateSchema),
+  updates: z.array(checkinDeltaSchema),
 })
 
 const eventSchema = z.looseObject({
@@ -196,22 +200,16 @@ export class RealtimeClient {
     }
     if (event.CHECKIN_UPDATED !== undefined) {
       const update = event.CHECKIN_UPDATED
-      // Apply the delta to any cached session detail in place instead of
-      // refetching the whole roster.
-      this.#queryClient.setQueriesData({ queryKey: ['sessions'] }, (current: unknown) =>
-        isSessionDetailLike(current) ? applyCheckinDelta(current, update.student_id, update.checked_in) : current,
-      )
+      void this.#queryClient.invalidateQueries({
+        queryKey: sessionKeys.detail(update.course_id, update.session_id),
+        exact: true,
+      })
     }
     if (event.CHECKINS_UPDATED !== undefined) {
-      const updates = event.CHECKINS_UPDATED.updates
-      this.#queryClient.setQueriesData({ queryKey: ['sessions'] }, (current: unknown) => {
-        if (!isSessionDetailLike(current)) {
-          return current
-        }
-        return updates.reduce(
-          (detail, update) => applyCheckinDelta(detail, update.student_id, update.checked_in),
-          current,
-        )
+      const update = event.CHECKINS_UPDATED
+      void this.#queryClient.invalidateQueries({
+        queryKey: sessionKeys.detail(update.course_id, update.session_id),
+        exact: true,
       })
     }
     if (event.SESSION_STATS_UPDATED !== undefined) {

@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test'
+import type { Page, WebSocketRoute } from '@playwright/test'
 import { xlsxFixtureBase64 as attendanceExportFixtureBase64 } from './attendance-export-fixture'
 
 const course = {
@@ -80,6 +80,19 @@ export type AttendanceExportMode = 'success' | 'failure' | 'delay'
 export type MockBackendOptions = {
   readonly exportMode?: AttendanceExportMode
   readonly exportDelayMs?: number
+  readonly checkinMode?: 'success' | 'failure'
+}
+
+export type CheckinRequest = {
+  readonly studentId: string
+  readonly checkedIn: boolean
+  readonly expectedSnapshotVersion?: number
+  readonly idempotencyKey: string
+}
+
+export type MockBackendController = {
+  readonly checkinRequests: CheckinRequest[]
+  qrCheckin(studentId: string, checkedIn: boolean): void
 }
 
 const exportedAt = '2026-02-01T10:05:00Z'
@@ -102,12 +115,19 @@ function attendanceCsv(present: boolean): string {
 // NumFmt, and shared strings containing the student and course names.
 const xlsxFixtureBase64 = attendanceExportFixtureBase64
 
-export async function mockBackend(page: Page, options: MockBackendOptions = {}): Promise<void> {
+export async function mockBackend(
+  page: Page,
+  options: MockBackendOptions = {},
+): Promise<MockBackendController> {
   // The attendance report is stateful so tests can simulate a scraper refresh:
   // an export request validates freshly scraped data, which marks attendance
   // present for subsequent report reads.
+  const roster = students.map((student) => ({ ...student }))
   const state = { attendancePresent: false, catalogSynced: false }
+  const checkinRequests: CheckinRequest[] = []
+  let browserSocket: WebSocketRoute | undefined
   await page.routeWebSocket('**/ws', (socket) => {
+    browserSocket = socket
     socket.onMessage(() => undefined)
   })
   await page.route('**/api/**', async (route) => {
@@ -222,11 +242,43 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
     }
     if (path === '/api/teacher/courses/CS101/sessions/S1' && request.method() === 'GET') {
       await route.fulfill({
+        json: {
+          ...envelope({
+            ...session,
+            checked_in_count: roster.filter((student) => student.checked_in).length,
+            students: roster,
+            qr_active: true,
+            qr_expires_at: new Date(Date.now() + 60_000).toISOString(),
+          }),
+          snapshot: { version: 7, generatedAt: '2026-02-01T10:00:00Z' },
+        },
+      })
+      return
+    }
+    const checkinMatch = path.match(/^\/api\/teacher\/courses\/CS101\/sessions\/S1\/students\/([^/]+)\/checkin$/)
+    if (checkinMatch !== null && request.method() === 'PUT') {
+      const studentId = decodeURIComponent(checkinMatch[1] ?? '')
+      const body = request.postDataJSON() as Omit<CheckinRequest, 'studentId'>
+      checkinRequests.push({ studentId, ...body })
+      if (options.checkinMode === 'failure') {
+        await route.fulfill({
+          status: 502,
+          json: { success: false, error: 'Humanix rejected the check-in change' },
+        })
+        return
+      }
+      const student = roster.find((item) => item.student_id === studentId)
+      if (student === undefined) {
+        await route.fulfill({ status: 404, json: { success: false, error: 'Student not found' } })
+        return
+      }
+      student.checked_in = body.checkedIn
+      await route.fulfill({
         json: envelope({
-          ...session,
-          students,
-          qr_active: true,
-          qr_expires_at: '2026-02-01T11:00:00Z',
+          status: 'confirmed',
+          checkedIn: body.checkedIn,
+          snapshotVersion: 7,
+          refreshPending: false,
         }),
       })
       return
@@ -245,6 +297,13 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
     }
     if (path === '/api/rooms' && request.method() === 'GET') {
       await route.fulfill({ json: envelope([]) })
+      return
+    }
+    if (path === '/api/rooms/from-session/start' && request.method() === 'POST') {
+      await route.fulfill({
+        status: 202,
+        json: envelope({ status: 'starting', room_id: 'S1', retry_after_ms: 500 }),
+      })
       return
     }
     if (path === '/api/rooms/from-session') {
@@ -270,7 +329,8 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
           name: 'Architecture workshop',
           status: 'Running',
           qr_url: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 21 21"%3E%3Crect width="21" height="21" fill="white"/%3E%3Cg fill="black"%3E%3Cpath d="M1 1h7v7H1zM13 1h7v7h-7zM1 13h7v7H1z"/%3E%3Cpath fill="white" d="M3 3h3v3H3zM15 3h3v3h-3zM3 15h3v3H3z"/%3E%3Cpath d="M10 2h1v2h1v2h-2zM9 8h3v1h2v2h-1v2h-2v-2H9zM15 9h2v1h2v2h-3v2h-2v-3h1zM9 14h2v2h2v1h-2v3H9zM14 15h2v1h1v-2h2v3h1v3h-3v-1h-2v1h-2v-2h1z"/%3E%3C/g%3E%3C/svg%3E',
-          expires_at: '2026-02-01T11:00:00Z',
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          upstream_attendance_label: 'Architecture workshop',
         }),
       })
       return
@@ -334,4 +394,26 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
     }
     await route.fulfill({ status: 404, json: { success: false, error: `Unhandled ${path}` } })
   })
+
+  return {
+    checkinRequests,
+    qrCheckin(studentId, checkedIn) {
+      const student = roster.find((item) => item.student_id === studentId)
+      if (student === undefined) {
+        throw new Error(`Unknown mock student ${studentId}`)
+      }
+      if (browserSocket === undefined) {
+        throw new Error('Mock WebSocket is not connected')
+      }
+      student.checked_in = checkedIn
+      browserSocket.send(JSON.stringify({
+        CHECKIN_UPDATED: {
+          course_id: 'CS101',
+          session_id: 'S1',
+          student_id: 'humanix-guid-for-student',
+          checked_in: checkedIn,
+        },
+      }))
+    },
+  }
 }

@@ -1105,24 +1105,24 @@ func (r *SnapshotRepository) Commit(ctx context.Context, input CommitInput) (Com
 			validatedAt = *input.ValidatedAt
 		}
 		snapshot := &domain.Snapshot{
-			ID:                *snapshotID,
-			TargetID:          input.TargetID,
-			Ref:               target.Ref,
-			Version:           version,
-			ValidationSeq:     validationSeqAfter,
-			ContentHash:       input.ContentHash,
-			Payload:           append(json.RawMessage(nil), input.Payload...),
-			ContentFetchedAt:  input.FinishedAt,
-			ValidatedAt:       validatedAt,
-			VerifiedAt:        input.FinishedAt,
-			NextRunAt:         input.NextRunAt,
-			MaxServeAge:       target.MaxServeAge,
-			ParserVersion:     input.ParserVersion,
-			SchemaVersion:     input.SchemaVersion,
-			RawBodyHash:       input.RawBodyHash,
-			Complete:          input.Manifest.Complete,
-			Manifest:          input.Manifest,
-			ValidationReport:  input.Validation,
+			ID:               *snapshotID,
+			TargetID:         input.TargetID,
+			Ref:              target.Ref,
+			Version:          version,
+			ValidationSeq:    validationSeqAfter,
+			ContentHash:      input.ContentHash,
+			Payload:          append(json.RawMessage(nil), input.Payload...),
+			ContentFetchedAt: input.FinishedAt,
+			ValidatedAt:      validatedAt,
+			VerifiedAt:       input.FinishedAt,
+			NextRunAt:        input.NextRunAt,
+			MaxServeAge:      target.MaxServeAge,
+			ParserVersion:    input.ParserVersion,
+			SchemaVersion:    input.SchemaVersion,
+			RawBodyHash:      input.RawBodyHash,
+			Complete:         input.Manifest.Complete,
+			Manifest:         input.Manifest,
+			ValidationReport: input.Validation,
 		}
 		metadata := &domain.SnapshotMetadata{
 			Kind:          target.Ref.Kind,
@@ -2608,6 +2608,11 @@ type IdempotencyKeyResult struct {
 	Response json.RawMessage
 }
 
+// CheckinLock holds one mutation lock until the caller finishes Humanix verification.
+type CheckinLock interface {
+	Release(context.Context) error
+}
+
 // ReserveIdempotencyKey reserves an idempotency key inside a transaction and
 // returns whether the key was already present, and if so, whether the request
 // parameters match. The caller must commit or rollback the transaction.
@@ -2735,28 +2740,53 @@ func (r *SnapshotRepository) MarkIdempotencyKeyFailed(
 	return nil
 }
 
-// AdvisoryLockCheckin acquires a PostgreSQL advisory lock scoped to a
-// session+student pair. The lock is held until the transaction is committed
-// or rolled back, which serializes concurrent mutations for the same student
-// in the same session.
-func (r *SnapshotRepository) AdvisoryLockCheckin(
+type postgresCheckinLock struct {
+	tx pgx.Tx
+}
+
+func (l *postgresCheckinLock) Release(ctx context.Context) error {
+	if l.tx == nil {
+		return nil
+	}
+	err := l.tx.Rollback(ctx)
+	l.tx = nil
+	if errors.Is(err, pgx.ErrTxClosed) {
+		return nil
+	}
+	return err
+}
+
+// AcquireCheckinLock holds a transaction-scoped PostgreSQL advisory lock for
+// one session/student pair until the returned lease is released.
+func (r *SnapshotRepository) AcquireCheckinLock(
 	ctx context.Context,
 	sessionID, studentID string,
-) error {
-	// Use hashtext() to get a stable int4 from each string, then combine.
+) (CheckinLock, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin checkin lock transaction: %w", err)
+	}
+	rollback := func() {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}
+
 	var lockKey int64
-	err := r.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT (hashtext($1)::bigint << 32) | (hashtext($2)::bigint & x'FFFFFFFF'::bigint)`,
 		sessionID, studentID,
 	).Scan(&lockKey)
 	if err != nil {
-		return fmt.Errorf("compute advisory lock key: %w", err)
+		rollback()
+		return nil, fmt.Errorf("compute advisory lock key: %w", err)
 	}
-	_, err = r.pool.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lockKey)
+	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lockKey)
 	if err != nil {
-		return fmt.Errorf("acquire advisory lock: %w", err)
+		rollback()
+		return nil, fmt.Errorf("acquire advisory lock: %w", err)
 	}
-	return nil
+	return &postgresCheckinLock{tx: tx}, nil
 }
 
 func sameIntPtr(a, b *int64) bool {

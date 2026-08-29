@@ -75,3 +75,36 @@ func TestEnrichCheckinStudentIDWithWCode_HandlesEmptyProfiles(t *testing.T) {
 
 	assert.Equal(t, "uuid-1111", result[0].StudentID)
 }
+
+func TestResolveCheckinStudentID(t *testing.T) {
+	students := []StudentCheckin{
+		{StudentID: "guid-a", Name: "Alice"},
+		{StudentID: "guid-b", Name: "Bob"},
+	}
+	profiles := []StudentProfile{
+		{StudentID: "W123", StudentGuid: "guid-a"},
+		{StudentID: "W456", StudentGuid: "guid-not-enrolled"},
+	}
+
+	tests := []struct {
+		name      string
+		requested string
+		profiles  []StudentProfile
+		want      string
+		wantOK    bool
+	}{
+		{name: "resolves WCode to enrolled Humanix GUID", requested: "W123", profiles: profiles, want: "guid-a", wantOK: true},
+		{name: "accepts an existing raw roster ID", requested: "guid-b", profiles: nil, want: "guid-b", wantOK: true},
+		{name: "rejects a profile outside this session", requested: "W456", profiles: profiles, want: "", wantOK: false},
+		{name: "rejects unknown WCode without profiles", requested: "W123", profiles: nil, want: "", wantOK: false},
+		{name: "rejects empty ID", requested: "", profiles: profiles, want: "", wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ResolveCheckinStudentID(tt.requested, students, tt.profiles)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

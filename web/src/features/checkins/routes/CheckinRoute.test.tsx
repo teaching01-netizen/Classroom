@@ -21,9 +21,10 @@ vi.mock('../api/checkin.queries', () => ({
   useSessionSnapshotQuery: () => ({
     data: undefined,
   }),
-  useToggleCheckinMutation: () => ({
+  useCheckinMutation: () => ({
     mutate: vi.fn(),
     isPending: false,
+    variables: undefined,
   }),
 }))
 

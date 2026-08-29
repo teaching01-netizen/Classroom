@@ -47,19 +47,6 @@ test('opens the QR dialog and exports session attendance', async ({ page }) => {
   expect(download.suggestedFilename()).toBe('checkin_S1.csv')
 })
 
-test('updates a student optimistically through the live route', async ({ page }) => {
-  // Given
-  await mockBackend(page)
-  await page.goto('/courses/CS101/sessions/S1')
-  await page.getByRole('button', { name: 'Close dialog' }).click()
-  const samRow = page.getByRole('row').filter({ hasText: 'Sam Rivera' })
-  // When
-  await samRow.getByRole('button', { name: 'Check in' }).click()
-  // Then
-  await expect(samRow.getByText('Checked in')).toBeVisible()
-  await expect(page.getByText('Check-in updated.')).toBeVisible()
-})
-
 test('keeps session content inside the mobile viewport', async ({ page }) => {
   // Given
   await mockBackend(page)

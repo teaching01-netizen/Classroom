@@ -103,7 +103,7 @@ func NewRouter(rm *service.RoomManager, ts *service.TeacherService, favSvc *serv
 		r.Get("/courses/{courseId}", getCourseDetailHandler(ts))
 		r.Get("/courses/{courseId}/sessions/{sessionId}", getSessionDetailHandler(ts))
 		r.With(rl.toggle.Middleware).Post("/courses/{courseId}/sessions/{sessionId}/toggle-checkin", toggleCheckinHandler(ts))
-		r.Put("/courses/{courseId}/sessions/{sessionId}/students/{studentId}/checkin", idempotentCheckinHandler(ts))
+		r.With(rl.toggle.Middleware).Put("/courses/{courseId}/sessions/{sessionId}/students/{studentId}/checkin", idempotentCheckinHandler(ts))
 		r.Get("/courses/{courseId}/attendance-report", getCourseAttendanceReportHandler(ts))
 		r.Post("/courses/{courseId}/attendance-report/export", attendanceExportHandler(ts))
 		r.Post("/courses/attendance-batch", getBatchAttendanceHandler(ts))

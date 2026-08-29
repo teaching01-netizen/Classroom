@@ -25,7 +25,7 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
   const [activeRoom, setActiveRoom] = useState<{ identity: string; roomId: string }>()
   const initializedIdentity = useRef<string>()
   const lastAutoRenewedVersion = useRef<string>()
-  const { mutate: startRoomMutate, isPending: startRoomPending } = useStartRoomMutation()
+  const { mutateAsync: startRoom, isPending: startRoomPending } = useStartRoomMutation()
   const activeRoomId = activeRoom?.identity === identity ? activeRoom.roomId : undefined
   const roomQuery = useRoomQuery(activeRoomId, activeRoomId !== undefined)
   const { announce } = useToast()
@@ -44,21 +44,15 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
     setActiveRoom(undefined)
     setOpenedIdentity(undefined)
 
-    startRoomMutate(
-      { sessionId, courseId },
-      {
-        onSuccess: (result) => {
-          if (currentIdentityRef.current !== requestedIdentity) return
-          setActiveRoom({ identity: requestedIdentity, roomId: result.roomId })
-          setOpenedIdentity(requestedIdentity)
-        },
-        onError: (error) => {
-          if (currentIdentityRef.current !== requestedIdentity) return
-          announce(getErrorMessage(error), 'error')
-        },
-      },
-    )
-  }, [announce, courseId, identity, sessionId, startRoomMutate])
+    void startRoom({ sessionId, courseId }).then((result) => {
+      if (currentIdentityRef.current !== requestedIdentity) return
+      setActiveRoom({ identity: requestedIdentity, roomId: result.roomId })
+      setOpenedIdentity(requestedIdentity)
+    }).catch((error: unknown) => {
+      if (currentIdentityRef.current !== requestedIdentity) return
+      announce(getErrorMessage(error), 'error')
+    })
+  }, [announce, courseId, identity, sessionId, startRoom])
 
   const openQr = () => {
     if (activeRoomId !== undefined) {
@@ -66,40 +60,28 @@ export function useSessionQr(courseId: CourseId, sessionId: SessionId) {
       return
     }
     const requestedIdentity = identity
-    startRoomMutate(
-      { sessionId, courseId },
-      {
-        onSuccess: (result) => {
-          if (currentIdentityRef.current !== requestedIdentity) return
-          setActiveRoom({ identity: requestedIdentity, roomId: result.roomId })
-          setOpenedIdentity(requestedIdentity)
-        },
-        onError: (error) => {
-          if (currentIdentityRef.current !== requestedIdentity) return
-          announce(getErrorMessage(error), 'error')
-        },
-      },
-    )
+    void startRoom({ sessionId, courseId }).then((result) => {
+      if (currentIdentityRef.current !== requestedIdentity) return
+      setActiveRoom({ identity: requestedIdentity, roomId: result.roomId })
+      setOpenedIdentity(requestedIdentity)
+    }).catch((error: unknown) => {
+      if (currentIdentityRef.current !== requestedIdentity) return
+      announce(getErrorMessage(error), 'error')
+    })
   }
 
   const refetchRoom = roomQuery.refetch
 
   const refresh = useCallback(() => {
     const requestedIdentity = identity
-    startRoomMutate(
-      { sessionId, courseId },
-      {
-        onSuccess: () => {
-          if (currentIdentityRef.current !== requestedIdentity) return
-          void refetchRoom()
-        },
-        onError: (error) => {
-          if (currentIdentityRef.current !== requestedIdentity) return
-          announce(getErrorMessage(error), 'error')
-        },
-      },
-    )
-  }, [announce, courseId, identity, refetchRoom, sessionId, startRoomMutate])
+    void startRoom({ sessionId, courseId }).then(() => {
+      if (currentIdentityRef.current !== requestedIdentity) return
+      void refetchRoom()
+    }).catch((error: unknown) => {
+      if (currentIdentityRef.current !== requestedIdentity) return
+      announce(getErrorMessage(error), 'error')
+    })
+  }, [announce, courseId, identity, refetchRoom, sessionId, startRoom])
 
   // A route transition disables the previous room query immediately. Ignore
   // any data retained by the query observer until the new session owns a room.

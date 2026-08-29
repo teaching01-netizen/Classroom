@@ -8,6 +8,8 @@ export const endpoints = {
     `/api/teacher/courses/${encode(courseId)}/sessions/${encode(sessionId)}`,
   toggleCheckin: (courseId: string, sessionId: string) =>
     `/api/teacher/courses/${encode(courseId)}/sessions/${encode(sessionId)}/toggle-checkin`,
+  checkin: (courseId: string, sessionId: string, studentId: string) =>
+    `/api/teacher/courses/${encode(courseId)}/sessions/${encode(sessionId)}/students/${encode(studentId)}/checkin`,
   attendance: (courseId: string, threshold: number) =>
     `/api/teacher/courses/${encode(courseId)}/attendance-report?threshold=${threshold}`,
   attendanceExport: (courseId: string) =>

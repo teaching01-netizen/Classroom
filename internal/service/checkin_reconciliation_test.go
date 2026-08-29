@@ -13,20 +13,23 @@ import (
 )
 
 type checkinWriterFake struct {
-	mu    sync.Mutex
-	err   error
-	calls int
+	mu            sync.Mutex
+	err           error
+	calls         int
+	lastStudentID string
+	lastChecked   bool
 }
 
 func (w *checkinWriterFake) ToggleCheckin(
-	context.Context,
-	string,
-	string,
-	string,
-	bool,
+	_ context.Context,
+	_, _ string,
+	studentID string,
+	checked bool,
 ) error {
 	w.mu.Lock()
 	w.calls++
+	w.lastStudentID = studentID
+	w.lastChecked = checked
 	w.mu.Unlock()
 	return w.err
 }

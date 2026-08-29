@@ -41,3 +41,34 @@ func EnrichCheckinStudentIDWithWCode(students []StudentCheckin, profiles []Stude
 	}
 	return students
 }
+
+// ResolveCheckinStudentID returns the Humanix roster identifier for a public
+// student identifier. Public APIs expose the WCode from StudentProfile, while
+// attendance mutations require the corresponding StudentGuid. A profile is
+// accepted only when its GUID is present in the requested session roster.
+func ResolveCheckinStudentID(requestedID string, students []StudentCheckin, profiles []StudentProfile) (string, bool) {
+	if requestedID == "" {
+		return "", false
+	}
+
+	rosterIDs := make(map[string]struct{}, len(students))
+	for _, student := range students {
+		if student.StudentID == "" {
+			continue
+		}
+		rosterIDs[student.StudentID] = struct{}{}
+	}
+	if _, ok := rosterIDs[requestedID]; ok {
+		return requestedID, true
+	}
+
+	for _, profile := range profiles {
+		if profile.StudentID != requestedID || profile.StudentGuid == "" {
+			continue
+		}
+		if _, ok := rosterIDs[profile.StudentGuid]; ok {
+			return profile.StudentGuid, true
+		}
+	}
+	return "", false
+}

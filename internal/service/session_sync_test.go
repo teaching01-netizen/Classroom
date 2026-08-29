@@ -139,6 +139,8 @@ func TestPublishCheckinDeltas_PublishesOnlyChangedStudents(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "s1", update.StudentID)
 	assert.True(t, update.CheckedIn)
+	assert.Equal(t, "course-1", update.CourseID)
+	assert.Equal(t, "session-1", update.SessionID)
 	assert.False(t, update.ObservedAt.IsZero())
 
 	// Unchanged cycle publishes nothing.
@@ -148,6 +150,18 @@ func TestPublishCheckinDeltas_PublishesOnlyChangedStudents(t *testing.T) {
 		t.Fatalf("unexpected event on unchanged cycle: %+v", event)
 	case <-time.After(50 * time.Millisecond):
 	}
+
+	unchecked := checkinStudents("s1", "s2")
+	reverted := rm.publishCheckinDeltas(state, unchecked, "course-1", "session-1", time.Now())
+	require.Len(t, reverted, 1)
+	assert.False(t, reverted[0].CheckedIn)
+
+	event = waitForEvent(t, events, time.Second, "CHECKIN_UPDATED")
+	update, ok = event.Data.(domain.CheckinUpdate)
+	require.True(t, ok)
+	assert.False(t, update.CheckedIn)
+	assert.Equal(t, "course-1", update.CourseID)
+	assert.Equal(t, "session-1", update.SessionID)
 }
 
 func TestPublishCheckinDeltas_BatchesLargeDiffs(t *testing.T) {
@@ -172,7 +186,12 @@ func TestPublishCheckinDeltas_BatchesLargeDiffs(t *testing.T) {
 	batch, ok := event.Data.(domain.CheckinsUpdate)
 	require.True(t, ok)
 	assert.Len(t, batch.Updates, 10)
+	assert.Equal(t, "course-1", batch.CourseID)
 	assert.Equal(t, "session-1", batch.SessionID)
+	for _, update := range batch.Updates {
+		assert.Equal(t, "course-1", update.CourseID)
+		assert.Equal(t, "session-1", update.SessionID)
+	}
 
 	select {
 	case event := <-events:
@@ -302,7 +321,7 @@ func TestRunSessionSyncLoop_PublishesDeltaAndStopsOnCancel(t *testing.T) {
 	state := &RoomState{room: domain.NewRoom("room-1", "session-1", nil), courseID: "course-1"}
 	refresher := &fakeSyncRefresher{}
 	source := &fakeCheckinSource{results: []fetchResult{
-		{students: checkinStudents("s1")}, // seed
+		{students: checkinStudents("s1")},                                       // seed
 		{students: []domain.StudentCheckin{{StudentID: "s1", CheckedIn: true}}}, // change
 	}}
 	driver := syncTestDriver(source, refresher)

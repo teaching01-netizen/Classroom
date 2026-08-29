@@ -29,5 +29,12 @@ export const toggleCheckinSchema = z.object({
   snapshot_refresh_pending: z.boolean().default(false),
 })
 
+export const checkinMutationSchema = z.object({
+  status: z.enum(['confirmed', 'already_satisfied', 'pending_verification']),
+  checkedIn: z.boolean(),
+  snapshotVersion: z.number().int(),
+  refreshPending: z.boolean(),
+})
+
 export type StudentCheckin = z.infer<typeof studentCheckinSchema>
 export type SessionDetail = z.infer<typeof sessionDetailSchema>

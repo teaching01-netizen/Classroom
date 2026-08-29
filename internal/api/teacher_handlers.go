@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"qr-command-center/internal/domain"
 	"qr-command-center/internal/service"
@@ -153,8 +154,24 @@ func toggleCheckinHandler(ts *service.TeacherService) http.HandlerFunc {
 			return
 		}
 
-		response, err := ts.ToggleCheckin(r.Context(), courseID, sessionID, req.StudentID, req.Checked)
+		result, err := ts.Checkin(r.Context(), service.CheckinRequest{
+			CourseID:         courseID,
+			SessionID:        sessionID,
+			StudentID:        req.StudentID,
+			DesiredCheckedIn: req.Checked,
+			IdempotencyKey:   uuid.NewString(),
+		})
 		if err != nil {
+			var upstreamFailure *service.ErrCheckinUpstream
+			if errors.As(err, &upstreamFailure) {
+				writeJSON(w, http.StatusBadGateway, errorResponse("Humanix rejected the check-in change"))
+				return
+			}
+			var studentNotFound *service.ErrStudentNotFound
+			if errors.As(err, &studentNotFound) {
+				writeJSON(w, http.StatusNotFound, errorResponse(err.Error()))
+				return
+			}
 			if mapServiceError(w, err) {
 				return
 			}
@@ -162,7 +179,16 @@ func toggleCheckinHandler(ts *service.TeacherService) http.HandlerFunc {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, successResponse(response))
+		newCount := 0
+		if detail, detailErr := ts.GetSessionDetail(r.Context(), courseID, sessionID); detailErr == nil && detail != nil && detail.Detail != nil {
+			newCount = detail.Detail.CheckedInCount
+		}
+		writeJSON(w, http.StatusOK, successResponse(domain.ToggleCheckinResponse{
+			StudentID:              req.StudentID,
+			CheckedIn:              result.CheckedIn,
+			NewCount:               newCount,
+			SnapshotRefreshPending: result.RefreshPending,
+		}))
 
 	}
 }
@@ -200,6 +226,16 @@ func idempotentCheckinHandler(ts *service.TeacherService) http.HandlerFunc {
 
 		result, err := ts.Checkin(r.Context(), checkinReq)
 		if err != nil {
+			var upstreamFailure *service.ErrCheckinUpstream
+			if errors.As(err, &upstreamFailure) {
+				writeJSON(w, http.StatusBadGateway, errorResponse("Humanix rejected the check-in change"))
+				return
+			}
+			var studentNotFound *service.ErrStudentNotFound
+			if errors.As(err, &studentNotFound) {
+				writeJSON(w, http.StatusNotFound, errorResponse(err.Error()))
+				return
+			}
 			var conflict *service.ErrConflict
 			if errors.As(err, &conflict) {
 				writeJSON(w, http.StatusConflict, errorResponse(err.Error()))

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ type checkinMutatorFake struct {
 	mu                sync.Mutex
 	keys              map[string]*checkinKeyState
 	advisorLockCalled int
+	lockReleaseCalled int
 	reserveCalled     int
 	confirmCalled     int
 	pendingCalled     int
@@ -119,11 +121,22 @@ func (m *checkinMutatorFake) MarkIdempotencyKeyFailed(_ context.Context, key, er
 	return nil
 }
 
-func (m *checkinMutatorFake) AdvisoryLockCheckin(_ context.Context, sessionID, studentID string) error {
+type checkinLockFake struct {
+	mutator *checkinMutatorFake
+}
+
+func (l *checkinLockFake) Release(context.Context) error {
+	l.mutator.mu.Lock()
+	defer l.mutator.mu.Unlock()
+	l.mutator.lockReleaseCalled++
+	return nil
+}
+
+func (m *checkinMutatorFake) AcquireCheckinLock(_ context.Context, sessionID, studentID string) (CheckinLock, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.advisorLockCalled++
-	return nil
+	return &checkinLockFake{mutator: m}, nil
 }
 
 // updateSnapshot updates the snapshot in the fake reader to reflect a desired state.
@@ -363,6 +376,132 @@ func TestTimeoutAfterSuccessfulToggleDoesNotRetryBlindly(t *testing.T) {
 	assert.Equal(t, 1, writer.calls, "Warwick should be called exactly once")
 	assert.True(t, result.RefreshPending)
 	assert.GreaterOrEqual(t, len(refresher.refreshes), 1)
+
+	result, err = svc.Checkin(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, "pending_verification", result.Status)
+	assert.Equal(t, 1, writer.calls, "a pending idempotency key must not repeat the Humanix write")
+}
+
+func TestFailedIdempotencyReplayPreservesUpstreamErrorWithoutRewriting(t *testing.T) {
+	now := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
+	svc, writer, _, _, _ := checkinTestSetup(t, now, false, nil)
+	writer.err = errors.New("rejected")
+	req := CheckinRequest{
+		CourseID:         "course-1",
+		SessionID:        "session-1",
+		StudentID:        "student-1",
+		DesiredCheckedIn: true,
+		IdempotencyKey:   "failed-replay",
+	}
+
+	for range 2 {
+		_, err := svc.Checkin(context.Background(), req)
+		var upstream *ErrCheckinUpstream
+		require.ErrorAs(t, err, &upstream)
+	}
+	assert.Equal(t, 1, writer.calls)
+}
+
+type liveCheckinProviderFake struct {
+	*mockProvider
+	mu          sync.Mutex
+	checkedIn   bool
+	profiles    []domain.StudentProfile
+	writerCalls int
+	studentID   string
+	checked     bool
+}
+
+func newLiveCheckinProviderFake(checkedIn bool) *liveCheckinProviderFake {
+	return &liveCheckinProviderFake{
+		mockProvider: newMockProvider(),
+		checkedIn:    checkedIn,
+		profiles: []domain.StudentProfile{{
+			StudentID:   "W123",
+			StudentGuid: "guid-a",
+		}},
+	}
+}
+
+func (p *liveCheckinProviderFake) GetSessionDetail(context.Context, string, string) (*domain.SessionDetail, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return &domain.SessionDetail{
+		SessionSummary: domain.SessionSummary{SessionID: "session-1", CheckedInCount: boolToInt(p.checkedIn)},
+		Students:       []domain.StudentCheckin{{StudentID: "guid-a", CheckedIn: p.checkedIn}},
+	}, nil
+}
+
+func (p *liveCheckinProviderFake) FetchStudentProfiles(context.Context) ([]domain.StudentProfile, error) {
+	return p.profiles, nil
+}
+
+func (p *liveCheckinProviderFake) ToggleCheckin(_ context.Context, _, _, studentID string, checked bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.writerCalls++
+	p.studentID = studentID
+	p.checked = checked
+	p.checkedIn = checked
+	return nil
+}
+
+func TestCheckinLiveModeResolvesWCodeAndVerifiesDesiredState(t *testing.T) {
+	tests := []struct {
+		name    string
+		before  bool
+		desired bool
+	}{
+		{name: "check in", before: false, desired: true},
+		{name: "undo check-in", before: true, desired: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := newLiveCheckinProviderFake(tt.before)
+			mutator := newCheckinMutatorFake()
+			svc := NewTeacherServiceWithDependenciesAndMutator(
+				provider, provider, provider, mutator, NoopSnapshotRefresher{}, 2, false,
+			)
+
+			result, err := svc.Checkin(context.Background(), CheckinRequest{
+				CourseID:         "course-1",
+				SessionID:        "session-1",
+				StudentID:        "W123",
+				DesiredCheckedIn: tt.desired,
+				IdempotencyKey:   "live-" + tt.name,
+			})
+
+			require.NoError(t, err)
+			assert.Equal(t, "confirmed", result.Status)
+			assert.Equal(t, tt.desired, result.CheckedIn)
+			assert.Equal(t, 1, provider.writerCalls)
+			assert.Equal(t, "guid-a", provider.studentID)
+			assert.Equal(t, tt.desired, provider.checked)
+		})
+	}
+}
+
+func TestCheckinLiveModeRejectsUnknownWCodeWithoutWriting(t *testing.T) {
+	provider := newLiveCheckinProviderFake(false)
+	mutator := newCheckinMutatorFake()
+	svc := NewTeacherServiceWithDependenciesAndMutator(
+		provider, provider, provider, mutator, NoopSnapshotRefresher{}, 2, false,
+	)
+
+	_, err := svc.Checkin(context.Background(), CheckinRequest{
+		CourseID:         "course-1",
+		SessionID:        "session-1",
+		StudentID:        "W999",
+		DesiredCheckedIn: true,
+		IdempotencyKey:   "unknown-student",
+	})
+
+	require.Error(t, err)
+	var notFound *ErrStudentNotFound
+	assert.ErrorAs(t, err, &notFound)
+	assert.Equal(t, 0, provider.writerCalls)
 }
 
 // TestTwoTeachersSetSameDesiredState verifies that two concurrent requests
@@ -447,6 +586,7 @@ func TestMutationLockSerializesSameStudent(t *testing.T) {
 	_, err := svc.Checkin(context.Background(), req)
 	require.NoError(t, err)
 	assert.Equal(t, 1, mutator.advisorLockCalled, "advisory lock should be acquired")
+	assert.Equal(t, 1, mutator.lockReleaseCalled, "advisory lock should be released after the mutation")
 
 	// Second request — lock should be acquired again.
 	req2 := CheckinRequest{
@@ -459,6 +599,7 @@ func TestMutationLockSerializesSameStudent(t *testing.T) {
 	_, err = svc.Checkin(context.Background(), req2)
 	require.NoError(t, err)
 	assert.Equal(t, 2, mutator.advisorLockCalled)
+	assert.Equal(t, 2, mutator.lockReleaseCalled)
 }
 
 // TestDifferentStudentsCanMutateConcurrently verifies that different students

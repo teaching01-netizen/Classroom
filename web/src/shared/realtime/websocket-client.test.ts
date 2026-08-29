@@ -189,3 +189,76 @@ describe('websocket room events', () => {
     }
   })
 })
+
+describe('websocket check-in events', () => {
+  it('invalidates only the addressed session when a raw Humanix UUID changes', () => {
+    const { queryClient, invalidateSpy, socket } = makeClient()
+    const targetKey = ['sessions', 'course-1', 'session-1']
+    const otherKey = ['sessions', 'course-1', 'session-2']
+    const target = {
+      detail: {
+        students: [{ student_id: 'W123', checked_in: false }],
+        checked_in_count: 0,
+      },
+      snapshot: { version: 7, generatedAt: '2026-08-29T10:00:00Z' },
+    }
+    const other = {
+      detail: {
+        students: [{ student_id: 'W123', checked_in: false }],
+        checked_in_count: 0,
+      },
+      snapshot: { version: 8, generatedAt: '2026-08-29T10:01:00Z' },
+    }
+    queryClient.setQueryData(targetKey, target)
+    queryClient.setQueryData(otherKey, other)
+
+    send(socket, {
+      CHECKIN_UPDATED: {
+        course_id: 'course-1',
+        session_id: 'session-1',
+        student_id: 'humanix-guid-123',
+        checked_in: true,
+      },
+    })
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: targetKey, exact: true })
+    expect(invalidateSpy).toHaveBeenCalledTimes(1)
+    expect(queryClient.getQueryData(targetKey)).toEqual(target)
+    expect(queryClient.getQueryData(otherKey)).toEqual(other)
+  })
+
+  it('invalidates the addressed session once for a QR check-in batch', () => {
+    const { invalidateSpy, socket } = makeClient()
+    const queryKey = ['sessions', 'course-1', 'session-1']
+
+    send(socket, {
+      CHECKINS_UPDATED: {
+        course_id: 'course-1',
+        session_id: 'session-1',
+        updates: [
+          { student_id: 'humanix-guid-123', checked_in: true },
+          { student_id: 'humanix-guid-456', checked_in: false },
+        ],
+      },
+    })
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey, exact: true })
+    expect(invalidateSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores check-in events without exact course and session identity', () => {
+    const { invalidateSpy, socket } = makeClient()
+
+    send(socket, {
+      CHECKIN_UPDATED: { student_id: 'humanix-guid-123', checked_in: true },
+    })
+    send(socket, {
+      CHECKINS_UPDATED: {
+        session_id: 'session-1',
+        updates: [{ student_id: 'humanix-guid-123', checked_in: true }],
+      },
+    })
+
+    expect(invalidateSpy).not.toHaveBeenCalled()
+  })
+})

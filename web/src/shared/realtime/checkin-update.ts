@@ -16,11 +16,6 @@ export function isSessionDetailLike(value: unknown): value is CheckinDetailShape
   return Array.isArray((value as CheckinDetailShape).students)
 }
 
-// applyCheckinDelta returns a new session-detail cache entry with the
-// student's check-in state flipped and the derived checked-in count refreshed.
-// It is the single source of truth shared by the optimistic toggle mutation
-// and the CHECKIN_UPDATED / CHECKINS_UPDATED WebSocket handlers, so a delta
-// event and a local toggle never diverge in cache shape.
 export function applyCheckinDelta<T extends CheckinDetailShape>(
   detail: T,
   studentId: string,

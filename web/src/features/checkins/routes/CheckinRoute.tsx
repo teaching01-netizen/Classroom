@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { courseIdSchema } from '@/features/courses'
 import { sessionIdSchema, useCourseSessionsQuery } from '@/features/sessions'
-import { useCheckinsQuery, useSessionSnapshotQuery, useToggleCheckinMutation } from '../api/checkin.queries'
+import { useCheckinMutation, useCheckinsQuery, useSessionSnapshotQuery } from '../api/checkin.queries'
 import type { StudentCheckin, StudentId } from '../api/checkin.schemas'
 import { useSessionQr } from '../hooks/useSessionQr'
 import { checkinsToCsv, downloadCsv } from '../lib/csv'
@@ -47,7 +47,7 @@ export function Component() {
   const snapshotQuery = useSessionSnapshotQuery(courseId, sessionId)
   const courseQuery = useCourseSessionsQuery(courseId)
   const qr = useSessionQr(courseId, sessionId)
-  const toggleCheckin = useToggleCheckinMutation(courseId, sessionId)
+  const checkinMutation = useCheckinMutation(courseId, sessionId)
   const connected = useConnectionStore((state) => state.status === 'connected')
   const { announce } = useToast()
 
@@ -93,12 +93,20 @@ export function Component() {
     }
     setParams(next, { replace: true })
   }
-  const handleToggle = (studentId: StudentId, checked: boolean) => {
-    toggleCheckin.mutate(
-      { studentId, checked },
+  const handleToggle = (studentId: StudentId, checkedIn: boolean) => {
+    checkinMutation.mutate(
+      {
+        studentId,
+        checkedIn,
+        expectedSnapshotVersion: snapshotQuery.data?.version,
+        idempotencyKey: crypto.randomUUID(),
+      },
       {
         onError: (error) => announce(`${getErrorMessage(error)} The check-in was restored.`, 'error'),
-        onSuccess: () => announce('Check-in updated.', 'success'),
+        onSuccess: () => announce(
+          checkedIn ? 'Check-in confirmed in Humanix.' : 'Check-in removed from Humanix.',
+          'success',
+        ),
       },
     )
   }
@@ -179,7 +187,7 @@ export function Component() {
           <>
             <StudentCheckinTable
               students={pagedStudents}
-              pendingStudentId={toggleCheckin.isPending ? toggleCheckin.variables.studentId : undefined}
+              pendingStudentId={checkinMutation.isPending ? checkinMutation.variables.studentId : undefined}
               onToggle={handleToggle}
             />
             <Pagination
@@ -259,7 +267,7 @@ function StudentCheckinTable({
                   variant={student.checked_in ? 'secondary' : 'primary'}
                   onClick={() => onToggle(student.student_id, !student.checked_in)}
                 >
-                  {student.checked_in ? 'Undo' : 'Check in'}
+                  {student.checked_in ? 'Undo check-in' : 'Check in'}
                 </Button>
               </td>
             </tr>

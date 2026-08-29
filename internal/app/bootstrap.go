@@ -250,10 +250,11 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 			dbPool.Close()
 			return nil, errors.New("snapshot reads enabled without repository and refresher wiring")
 		}
-		teacherService = service.NewTeacherServiceWithDependencies(
+		teacherService = service.NewTeacherServiceWithDependenciesAndMutator(
 			snapshotProvider,
 			snapshotProvider,
 			classroomClient,
+			snapshotRepository,
 			scheduler,
 			cfg.ReportConcurrency,
 			true,
@@ -264,10 +265,14 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 			dbPool.Close()
 			return nil, errors.New("live teacher reads require an initialized Warwick classroom client")
 		}
-		teacherService = service.NewTeacherService(
+		teacherService = service.NewTeacherServiceWithDependenciesAndMutator(
 			classroomClient,
 			classroomClient,
+			classroomClient,
+			snapshotRepository,
+			service.NoopSnapshotRefresher{},
 			cfg.ReportConcurrency,
+			false,
 		)
 	}
 
