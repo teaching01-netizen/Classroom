@@ -5,7 +5,7 @@
   },
   "deploy": {
     "numReplicas": 1,
-    "sleepApplication": true,
+    "sleepApplication": false,
     "restartPolicyType": "ALWAYS",
     "healthcheckPath": "/api/",
     "healthcheckTimeout": 300
