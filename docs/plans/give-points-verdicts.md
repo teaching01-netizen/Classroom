@@ -98,3 +98,33 @@ passed**.
 | R-2 | `pointsAwarded` echoes the requested points even when Warwick clamps the total (`pointsAwarded: 10`, total `9`). | Cosmetic; the authoritative number is `participationPoints`. |
 | R-3 | T4 has no test for a payload with `can_give_point` absent; only the Zod default guarantees it. | Add one `checkin.schemas` case if the snapshot format ever changes. |
 | R-4 | One cold-start Playwright run (W2's first combined invocation) had 2 pre-existing `checkin-flow` tests miss the 5 s QR-dialog window; the orchestrator observed 7/7 twice afterwards. | Pre-existing timing sensitivity in the QR flow, not introduced here; watch in CI. |
+
+## Live smoke — real Warwick, read-only (2026-11-20)
+
+Binary built from `main` at `88a5ba3`; ran against a throwaway local Postgres database and the
+real Warwick credentials from `.env`, with `SCRAPER_ENABLED` unset (no background polling and no
+snapshot writes). **Every points POST was rejected before `AddParticipationPoint`, so no point was
+stored and no student notification could fire.**
+
+| # | Request | Observed |
+|---|---|---|
+| 1 | `GET /api/teacher/courses` | `200`, **53 courses** (live Warwick) |
+| 2 | `GET …/courses/2310` | `200`, 10 sessions |
+| 3 | `GET …/sessions/20095` | `200`, 8 students, **`can_give_point` present on all 8** (all `false`; `checked_in` all `false`) |
+| 4 | `POST …/points {"points":0}` | `400` — "points must be between 1 and 10, got 0" (no upstream call) |
+| 5 | `POST …/points {"points":11}` | `400` — same validation |
+| 6 | `POST …/students/does-not-exist/points` | `404` — "student does-not-exist not found in session 20095" (roster read only) |
+| 7 | `POST` for an ineligible student | `409` — "student W260012 is not eligible for participation points on this session" |
+| 8 | Totals re-read after all probes | **identical for all 8 students** — nothing was written |
+
+A bounded scan of 12 sessions across 4 courses found **eligible = 0 everywhere** (nobody is checked
+in), so the award success path and the stale-total `409` were *not* exercised against live data.
+They remain proven by the unit/mutant evidence above (P5, P6, P9). Exposing a real award would
+require writing a point into Warwick, which the owner declined for this pass.
+
+Cleanup: server stopped, `qr_smoke_gp` dropped, scratch binary and scripts deleted; the other
+databases on that local Postgres were not touched. **T1 stays PENDING.**
+
+Incidental finding: the `DATABASE_URL` in `.env` points at a Supabase project that no longer
+resolves (`ENOTFOUND … tenant/user postgres.… not found`), so a plain `go run ./cmd/server` cannot
+boot from that file.
