@@ -767,6 +767,37 @@ func (r *SnapshotRepository) SetDueNow(ctx context.Context, ref domain.TargetRef
 	return nil
 }
 
+// MarkParserDriftDue makes every target whose stored snapshot was produced by a
+// different parser generation due immediately. A parser bump changes the
+// canonical payload while the upstream body can stay byte-identical, so the
+// raw-hash fast path cannot notice the drift on its own; without this nudge the
+// new payload would only appear whenever the adaptive schedule next re-scrapes
+// the target (up to hours or, for finished sessions, days away).
+//
+// It only pulls targets forward, so running it on every boot is cheap and
+// idempotent: targets already due are left untouched, and once a target is
+// re-scraped its current_parser_version matches and it is never selected again.
+// Targets with a live lease are skipped so a running scrape is never disturbed.
+func (r *SnapshotRepository) MarkParserDriftDue(
+	ctx context.Context,
+	parserVersion string,
+	now time.Time,
+) (int64, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE scrape_targets
+		SET next_run_at = $2,
+			updated_at = $2
+		WHERE current_parser_version IS DISTINCT FROM $1
+		  AND next_run_at > $2
+		  AND lease_owner IS NULL`,
+		parserVersion, now,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("mark parser drift due: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (r *SnapshotRepository) Target(
 	ctx context.Context,
 	ref domain.TargetRef,

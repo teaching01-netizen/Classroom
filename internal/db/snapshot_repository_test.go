@@ -101,6 +101,53 @@ func catalogSeed(now time.Time) domain.TargetSeed {
 	}
 }
 
+func TestSnapshotRepositoryMarkParserDriftDue(t *testing.T) {
+	repo, ctx := newSnapshotRepositoryTest(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	future := now.Add(4 * time.Hour)
+	drifted := catalogSeed(future)
+	current := domain.TargetSeed{
+		Ref: domain.TargetRef{
+			Host:        testSnapshotHost,
+			Kind:        domain.SnapshotCourseDetail,
+			ResourceKey: "c1",
+		},
+		Attributes:      json.RawMessage(`{}`),
+		InitialInterval: time.Hour,
+		MinInterval:     15 * time.Minute,
+		MaxInterval:     24 * time.Hour,
+		MaxServeAge:     48 * time.Hour,
+		NextRunAt:       future,
+	}
+	require.NoError(t, repo.Seed(ctx, []domain.TargetSeed{drifted, current}))
+	_, err := repo.pool.Exec(ctx, `
+		UPDATE scrape_targets
+		SET current_parser_version = CASE
+			WHEN resource_key = 'catalog' THEN 'warwick-v1'
+			ELSE 'warwick-v2'
+		END`)
+	require.NoError(t, err)
+
+	dueAt := now.Add(time.Minute)
+	due, err := repo.MarkParserDriftDue(ctx, "warwick-v2", dueAt)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), due, "only the target on the old parser generation is re-queued")
+
+	stale, err := repo.Target(ctx, drifted.Ref)
+	require.NoError(t, err)
+	require.Equal(t, dueAt, stale.NextRunAt.UTC())
+
+	upToDate, err := repo.Target(ctx, current.Ref)
+	require.NoError(t, err)
+	require.Equal(t, future, upToDate.NextRunAt.UTC(), "current-generation targets keep their schedule")
+
+	// Idempotent: a second pass has nothing left to re-queue.
+	due, err = repo.MarkParserDriftDue(ctx, "warwick-v2", dueAt.Add(time.Minute))
+	require.NoError(t, err)
+	require.Zero(t, due)
+}
+
 func TestSnapshotRepositoryScraperStatusReturnsAggregates(t *testing.T) {
 	repo, ctx := newSnapshotRepositoryTest(t)
 	now := time.Now().UTC().Truncate(time.Second)

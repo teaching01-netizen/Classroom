@@ -164,3 +164,44 @@ snapshot now fails the fast path, is re-canonicalised, and publishes a new versi
 **Residual risk R-5.** Until each target is re-scraped it keeps serving the old payload.
 `POST /api/teacher/refresh` forces a full pass (catalog, profiles, every course, every session), so a
 deploy plus one refresh converges the whole dataset.
+
+## Post-release defect D-2 — a parser bump never re-queues drifted snapshots (2026-11-20)
+
+**Symptom.** Deploy `9ed01122` was live and provably running the new parser — sessions
+`2328:20311` and `2324:20228`, scraped at 11:35–11:36, reported
+`x-snapshot-parser-version: warwick-v2`. Session `2317:20518` still served its 11:27 payload with
+`warwick-v1`, so `can_give_point` stayed `false` for all 22 checked-in students and the GIVE POINTS
+column still rendered `—`.
+
+**Diagnosis.** D-1's fix makes a drift target re-canonicalise *when it is scraped*, but nothing makes
+it due. `current_parser_version` is written per target yet never consulted by the scheduler, so the
+only trigger was the adaptive interval — 15 min to 12 h for `not_started` sessions and up to 30 days
+for `done` ones. R-5's mitigation was wrong: `POST /api/teacher/refresh` refreshes the entire dataset
+synchronously and Railway's edge proxy returns **502 at 300 s** before the pass reaches the session
+phase, so the manual escape hatch cannot complete in production. Two 240 s/300 s attempts advanced
+the pass only partially.
+
+**Fix.** `SnapshotRepository.MarkParserDriftDue` re-queues every target whose
+`current_parser_version` differs from the running `ParserVersion` (`next_run_at = now`, skipping live
+leases and targets already due), and `Scheduler.ForceParserDriftDue` calls it once per boot from
+`app.Wire`. Drift therefore self-heals on deploy instead of waiting for the scrape schedule.
+
+**Proof.**
+- `TestSnapshotRepositoryMarkParserDriftDue` (real PostgreSQL, disposable schema) — a `warwick-v1`
+  target scheduled 4 h out is pulled forward; a `warwick-v2` target keeps its schedule; the second
+  pass reports zero rows (idempotent, no write churn); only the drifted row is selected while a
+  `lease_owner` is respected by the predicate.
+- `TestSchedulerForceParserDriftDueReschedulesStaleParserTargets` /
+  `…SurfacesRepositoryErrors` / `…SkipsWhenNothingDrifted` — forwards `ParserVersion` and the
+  scheduler clock, returns the affected count, propagates repository errors.
+- `go vet ./...` clean; `go test ./...` with `TEST_DATABASE_URL` set: 10/10 packages pass.
+- Production confirmation is the deploy's `parser_drift_rescheduled` log line followed by
+  `x-snapshot-parser-version: warwick-v2` on session `2317:20518`.
+
+**Residual risk R-6.** A boot with a parser bump re-queues the whole dataset at once. That is the
+intended behaviour (bounded by scheduler concurrency and host permits, and only once per target until
+it is re-scraped), but it is a burst on the Warwick host at deploy time.
+
+**Residual risk R-7.** `POST /api/teacher/refresh` remains unusable at production scale (502 at
+300 s). Either make it asynchronous or scope it; until then the boot-time drift sweep is the reliable
+convergence path.

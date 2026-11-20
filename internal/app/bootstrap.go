@@ -211,6 +211,15 @@ func Wire(ctx context.Context, cfg Config) (*ServerDeps, error) {
 				PruneBatchSize:      1000,
 			},
 		)
+		// A parser-generation bump changes canonical payloads without changing
+		// upstream bytes; re-queue drifted targets so the new shape reaches the
+		// API without waiting for the adaptive scrape schedule.
+		if due, driftErr := scheduler.ForceParserDriftDue(ctx); driftErr != nil {
+			slog.Warn("parser_drift_reschedule_failed", "error", driftErr)
+		} else if due > 0 {
+			slog.Info("parser_drift_rescheduled",
+				"parser_version", scraper.ParserVersion, "targets", due)
+		}
 		snapshotProvider = service.NewSnapshotProvider(
 			snapshotRepository,
 			scheduler,

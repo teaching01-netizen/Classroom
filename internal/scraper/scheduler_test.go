@@ -35,6 +35,10 @@ type schedulerRepository struct {
 	staleTargets    []db.StaleTarget
 	repairCalled    int64
 	repairErr       error
+	driftDue        int64
+	driftErr        error
+	driftCalls      int
+	driftVersion    string
 }
 
 func (r *schedulerRepository) ClaimDue(_ context.Context, request db.ClaimRequest) ([]domain.ScrapeTarget, error) {
@@ -93,6 +97,18 @@ func (r *schedulerRepository) RescheduleLease(_ context.Context, _ int64, _ int6
 
 func (r *schedulerRepository) SetDueNow(context.Context, domain.TargetRef, time.Time) error {
 	return nil
+}
+
+func (r *schedulerRepository) MarkParserDriftDue(
+	_ context.Context,
+	parserVersion string,
+	_ time.Time,
+) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.driftCalls++
+	r.driftVersion = parserVersion
+	return r.driftDue, r.driftErr
 }
 
 func (r *schedulerRepository) Seed(_ context.Context, seeds []domain.TargetSeed) error {
@@ -607,4 +623,39 @@ func TestSchedulerRetriesFailedMaintenanceOnSameUTCDay(t *testing.T) {
 	_, err = scheduler.RunDue(context.Background(), 1)
 	require.NoError(t, err)
 	require.Equal(t, 2, repository.prunes)
+}
+
+func TestSchedulerForceParserDriftDueReschedulesStaleParserTargets(t *testing.T) {
+	now := time.Date(2026, 11, 20, 4, 30, 0, 0, time.UTC)
+	repository := &schedulerRepository{driftDue: 7}
+	scheduler := newSchedulerTest(repository, &schedulerPermitController{}, &schedulerRunner{}, now)
+
+	due, err := scheduler.ForceParserDriftDue(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int64(7), due)
+	require.Equal(t, 1, repository.driftCalls)
+	require.Equal(t, ParserVersion, repository.driftVersion)
+}
+
+func TestSchedulerForceParserDriftDueSurfacesRepositoryErrors(t *testing.T) {
+	now := time.Date(2026, 11, 20, 4, 30, 0, 0, time.UTC)
+	boom := errors.New("database unavailable")
+	repository := &schedulerRepository{driftErr: boom}
+	scheduler := newSchedulerTest(repository, &schedulerPermitController{}, &schedulerRunner{}, now)
+
+	due, err := scheduler.ForceParserDriftDue(context.Background())
+	require.ErrorIs(t, err, boom)
+	require.Zero(t, due)
+}
+
+func TestSchedulerForceParserDriftDueSkipsWhenNothingDrifted(t *testing.T) {
+	now := time.Date(2026, 11, 20, 4, 30, 0, 0, time.UTC)
+	repository := &schedulerRepository{}
+	scheduler := newSchedulerTest(repository, &schedulerPermitController{}, &schedulerRunner{}, now)
+
+	due, err := scheduler.ForceParserDriftDue(context.Background())
+	require.NoError(t, err)
+	require.Zero(t, due)
+	require.Equal(t, 1, repository.driftCalls)
+	require.Equal(t, ParserVersion, repository.driftVersion)
 }

@@ -21,6 +21,7 @@ type SchedulerRepository interface {
 	RenewLease(context.Context, db.RenewLeaseRequest) error
 	RescheduleLease(context.Context, int64, int64, time.Time) error
 	SetDueNow(context.Context, domain.TargetRef, time.Time) error
+	MarkParserDriftDue(context.Context, string, time.Time) (int64, error)
 	Seed(context.Context, []domain.TargetSeed) error
 	Target(context.Context, domain.TargetRef) (domain.ScrapeTarget, error)
 	CountDue(context.Context, time.Time) (int, error)
@@ -411,6 +412,24 @@ func (s *Scheduler) leaseHeartbeat(ctx context.Context, target domain.ScrapeTarg
 
 func (s *Scheduler) SetDueNow(ctx context.Context, ref domain.TargetRef) error {
 	return s.repository.SetDueNow(ctx, ref, s.clock().UTC())
+}
+
+// ForceParserDriftDue re-queues every target whose snapshot predates the parser
+// generation this binary runs. It is called once per boot: a parser upgrade can
+// change the canonical payload without any upstream byte changing, and the
+// adaptive schedule alone may take hours or days to notice.
+func (s *Scheduler) ForceParserDriftDue(ctx context.Context) (int64, error) {
+	due, err := s.repository.MarkParserDriftDue(ctx, ParserVersion, s.clock().UTC())
+	if err != nil {
+		return 0, err
+	}
+	if due > 0 {
+		slog.Info("parser_drift_targets_due",
+			"parser_version", ParserVersion,
+			"targets", due,
+		)
+	}
+	return due, nil
 }
 
 func (s *Scheduler) RefreshNow(ctx context.Context, ref domain.TargetRef) error {
