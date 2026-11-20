@@ -51,6 +51,10 @@ type ClassroomClient struct {
 	// sf coalesces identical overlapping upstream requests.
 	// Keys include operation + request parameters; no result caching after completion.
 	sf inflightGroup
+
+	// givePointCache memoises the scraped attendance/course ids per session.
+	// The zero value is usable; the map initialises on first put.
+	givePointCache givePointTargetCache
 }
 
 // NewClassroomClient creates a ClassroomClient with the given auth instance.
