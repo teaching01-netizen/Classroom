@@ -504,3 +504,11 @@ Cleanup only after the report: `git worktree remove` each worker worktree once i
 3. **`web/test-results` is tracked.** Playwright dirties it. Every browser run must restore it before commit.
 4. **W4's serial dependency** makes it the critical path after Wave 1; do not start it from a stale base.
 5. **No DB in this session**, so the strongest safety property (advisory-lock mutual exclusion) is argued, not exercised.
+
+---
+
+## Deviation log (live)
+
+| # | Deviation | Reason | Recorded |
+|---|---|---|---|
+| D1 | T0's roster-mapping test lives in `internal/warwick/roster_mapping_test.go`, not `give_points_test.go` | The plan put it in `give_points_test.go`, which W1 owns exclusively; a shared file would break one-writer-per-path | Wave 0 |
