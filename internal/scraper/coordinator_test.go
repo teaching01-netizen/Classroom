@@ -774,6 +774,50 @@ func TestCoordinatorRawHashFastPathSkipsParseAndCommitsUnchanged(t *testing.T) {
 	require.Equal(t, rawHash, candidate.RawBodyHash)
 }
 
+// A parser upgrade must invalidate the raw-hash fast path. The upstream body can
+// be byte-identical while the canonical payload changes because the new parser
+// maps an additional field; if the fast path were taken, already-stored
+// snapshots would keep serving the old shape forever.
+func TestCoordinatorRecanonicalizesWhenParserVersionChanges(t *testing.T) {
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	rawHash := strings.Repeat("ab", 32)
+	value := []domain.CourseSummary{{CourseID: "a", Name: "Alpha"}}
+	payload, contentHash, _, err := Canonicalize(domain.SnapshotCourseCatalog, value, 1<<20)
+	require.NoError(t, err)
+
+	oldPayload := json.RawMessage(`[{"course_id":"a","name":"Alpha"}]`)
+	oldHash := sha256.Sum256(oldPayload)
+
+	source := &coordinatorSource{result: warwick.SnapshotFetchResult{
+		Value:     value,
+		Metadata:  warwick.ResponseMetadata{StatusCode: 200, RawBodyHash: rawHash},
+		BytesRead: 100,
+	}}
+	store := &coordinatorStore{current: domain.Snapshot{
+		Version:       1,
+		ParserVersion: "warwick-v1", // published by the previous parser generation
+		RawBodyHash:   rawHash,      // upstream body is byte-identical
+		Payload:       oldPayload,
+	}}
+	target := coordinatorTarget(domain.SnapshotCourseCatalog)
+	target.HasCurrentSnapshot = true
+	target.CurrentContentHash = oldHash
+	target.CurrentVersion = 1
+	target.ValidationSeq = 1
+	coordinator := newCoordinatorForTest(source, store, &coordinatorObserver{}, now)
+
+	result, err := coordinator.RunClaimed(context.Background(), target)
+	require.NoError(t, err)
+	require.NotEqual(t, "unchanged", result.Outcome)
+	require.True(t, result.Changed)
+	require.Len(t, store.inputs, 1)
+	input := store.inputs[0]
+	require.True(t, input.Changed)
+	require.Equal(t, payload, input.Payload)
+	require.Equal(t, contentHash, input.ContentHash)
+	require.Equal(t, ParserVersion, input.ParserVersion)
+}
+
 func TestCoordinatorRawHashFastPathSkipsMultiPageFetches(t *testing.T) {
 	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
 	rawHash := strings.Repeat("ab", 32)

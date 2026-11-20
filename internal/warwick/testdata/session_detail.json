@@ -10,7 +10,7 @@
       "StudentImg": "",
       "StudentCheckIn": true,
       "StudentPPoint": 2,
-      "StudentGivePoint": false
+      "StudentGivePoint": true
     },
     {
       "StudentID": "S20240002",
@@ -20,7 +20,7 @@
       "StudentImg": "",
       "StudentCheckIn": true,
       "StudentPPoint": 3,
-      "StudentGivePoint": false
+      "StudentGivePoint": true
     },
     {
       "StudentID": "S20240003",
@@ -40,7 +40,7 @@
       "StudentImg": "",
       "StudentCheckIn": true,
       "StudentPPoint": 1,
-      "StudentGivePoint": false
+      "StudentGivePoint": true
     },
     {
       "StudentID": "S20240005",

@@ -130,6 +130,13 @@ func fixtureCases() []fixtureCase {
 				require.Equal(t, 2, detail.Students[0].ParticipationPoints)
 				require.False(t, detail.Students[2].CheckedIn)
 				require.True(t, detail.Students[3].CheckedIn)
+				// StudentGivePoint is mapped onto CanGivePoint, and the fixture
+				// mirrors live Warwick: the flag is set exactly for checked-in rows.
+				require.True(t, detail.Students[0].CanGivePoint)
+				require.False(t, detail.Students[2].CanGivePoint)
+				for _, student := range detail.Students {
+					require.Equal(t, student.CheckedIn, student.CanGivePoint)
+				}
 				// The snapshot parse path does not populate check-in timestamps
 				// (CheckedInAt/QRExpiresAt stay nil); timestamp normalization is
 				// exercised by perturbing the parsed value below.
@@ -589,4 +596,19 @@ func TestFixtureCanonicalizationDeterministicAcrossRuns(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The canonical payload is what the snapshot read path later unmarshals, so the
+// eligibility flag must survive canonicalization in both of its states. If it
+// did not, a re-canonicalized snapshot would silently mark every row ineligible.
+func TestCanonicalSessionDetailCarriesGivePointFlag(t *testing.T) {
+	detail := &domain.SessionDetail{Students: []domain.StudentCheckin{
+		{StudentID: "s-eligible", Name: "Eligible", CheckedIn: true, CanGivePoint: true},
+		{StudentID: "s-ineligible", Name: "Ineligible", CheckedIn: false, CanGivePoint: false},
+	}}
+
+	payload, _, _, err := Canonicalize(domain.SnapshotSessionDetail, detail, 1<<20)
+	require.NoError(t, err)
+	require.Contains(t, string(payload), `"can_give_point":true`)
+	require.Contains(t, string(payload), `"can_give_point":false`)
 }

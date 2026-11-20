@@ -35,7 +35,14 @@ type ConfirmationSource interface {
 
 // Version identity recorded on every published snapshot and candidate.
 const (
-	ParserVersion        = "warwick-v1"
+	// ParserVersion identifies the mapping that produces the canonical
+	// payload. Bump it whenever a mapped field changes shape or is added: the
+	// raw-hash fast path below treats "same body + same parser generation" as
+	// proof the canonical payload cannot have changed, so without a bump a new
+	// field would never reach snapshots whose upstream body is unchanged.
+	//
+	// v2 added StudentGivePoint -> can_give_point to the session roster.
+	ParserVersion        = "warwick-v2"
 	SchemaVersion        = "schema-v1"
 	CanonicalizerVersion = "canonical-v1"
 )

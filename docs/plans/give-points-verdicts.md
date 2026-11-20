@@ -128,3 +128,39 @@ databases on that local Postgres were not touched. **T1 stays PENDING.**
 Incidental finding: the `DATABASE_URL` in `.env` points at a Supabase project that no longer
 resolves (`ENOTFOUND … tenant/user postgres.… not found`), so a plain `go run ./cmd/server` cannot
 boot from that file.
+
+## Post-release defect D-1 — the button never appeared on the deployed build (2026-11-20)
+
+**Symptom.** After deploying `90626bf`, the new `GIVE POINTS` column rendered but every row showed
+`—`, including checked-in students. Warwick's own page showed `+` on those same rows.
+
+**Diagnosis.** The mapping was correct. A live fetch of course `2317` / session `20518` returned
+`can_give_point` true exactly for the checked-in rows and false otherwise, and Warwick's own
+template gates on `data.StudentGivePoint` — the same field we map
+([checkin.html](../../externalclassroom/checkin.html), `if (data.StudentGivePoint == true)`).
+The deployed app was serving **snapshot payloads written by the previous parser generation**,
+which never serialised the new field; the frontend `can_give_point` default then hid every control.
+
+**Root cause.** `internal/scraper/coordinator.go` skips parsing when the upstream raw body hash
+*and* `ParserVersion` are unchanged, on the stated premise that "the canonical payload cannot have
+changed". `ParserVersion` had never been bumped for this feature, so any snapshot whose Warwick HTML
+was byte-identical was never re-canonicalised and could never acquire `can_give_point` — no amount
+of redeploying or refreshing would have fixed it.
+
+**Fix.** `ParserVersion` → `warwick-v2`, with the invariant documented at the constant. Every stored
+snapshot now fails the fast path, is re-canonicalised, and publishes a new version carrying the field.
+
+**Proof.**
+- `TestCoordinatorRecanonicalizesWhenParserVersionChanges` — byte-identical upstream body plus a
+  `warwick-v1` current snapshot ⇒ outcome `changed`, new payload and content hash committed.
+  Mutation check: reverting the constant to `warwick-v1` makes the test fail.
+- `TestCanonicalSessionDetailCarriesGivePointFlag` — the canonical payload contains
+  `"can_give_point":true` **and** `"can_give_point":false`, so the snapshot read path (plain JSON
+  unmarshal into `domain.SessionDetail`) preserves both states.
+- The `session_detail.json` fixture now mirrors live Warwick (`StudentGivePoint == StudentCheckIn`);
+  `TestFixtureParsesToExpectedShape` asserts the parse mapping.
+- `go vet ./...` clean; `go test ./...` 10/10 packages pass.
+
+**Residual risk R-5.** Until each target is re-scraped it keeps serving the old payload.
+`POST /api/teacher/refresh` forces a full pass (catalog, profiles, every course, every session), so a
+deploy plus one refresh converges the whole dataset.
