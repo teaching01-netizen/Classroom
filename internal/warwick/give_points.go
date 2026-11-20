@@ -2,6 +2,7 @@ package warwick
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -214,3 +216,66 @@ func (c *ClassroomClient) withInteractiveSession(
 	}
 	return lastErr
 }
+
+// AddParticipationPoint awards points to one student on one session.
+func (c *ClassroomClient) AddParticipationPoint(
+	ctx context.Context,
+	target domain.GivePointTarget,
+	studentGUID string,
+	points int,
+) error {
+	if studentGUID == "" {
+		return domain.NewInvalidPayloadError("give points requires a student id")
+	}
+	if target.AttendanceID == "" || target.WarwickCourseID == "" {
+		return domain.NewInvalidPayloadError("give points requires an attendance and course id")
+	}
+	if points < 1 || points > 10 {
+		return domain.NewInvalidPayloadError("points must be between 1 and 10")
+	}
+	return c.withInteractiveSession(ctx, func(sessionCtx context.Context, cookie string) error {
+		return c.doAddParticipationPoint(sessionCtx, cookie, target, studentGUID, points)
+	})
+}
+
+func (c *ClassroomClient) doAddParticipationPoint(
+	ctx context.Context,
+	cookie string,
+	target domain.GivePointTarget,
+	studentGUID string,
+	points int,
+) error {
+	form := url.Values{}
+	form.Set("studentID", studentGUID)
+	form.Set("point", strconv.Itoa(points))
+	form.Set("attendanceID", target.AttendanceID)
+	form.Set("courseID", target.WarwickCourseID)
+
+	resp, err := c.doRequest(ctx, http.MethodPost, "/admin/ClassAttendance/AddParticipationPoint", cookie, strings.NewReader(form.Encode()))
+	if err != nil {
+		return requestError(ctx, err)
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkAuth(resp); err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return domain.NewInvalidPayloadError(
+			fmt.Sprintf("add participation point failed (%d): %s", resp.StatusCode, string(body)),
+		)
+	}
+
+	var result GivePointResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<10)).Decode(&result); err != nil {
+		return domain.NewInvalidPayloadError(fmt.Sprintf("decode AddParticipationPoint: %v", err))
+	}
+	if !result.Item1 {
+		return &domain.GivePointRejectedError{Message: strings.TrimSpace(result.Item2)}
+	}
+	return nil
+}
+
+// Compile-time proof that the client satisfies the points contract (amendment F1).
+var _ domain.PointsWriter = (*ClassroomClient)(nil)

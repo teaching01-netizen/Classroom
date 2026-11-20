@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -81,4 +82,79 @@ func TestGivePointTargetCacheHonoursTTL(t *testing.T) {
 	cache.now = func() time.Time { return expired }
 	_, ok = cache.get("20518")
 	require.False(t, ok)
+}
+
+// TestAddParticipationPointPostsWarwickFields proves the wire format matches
+// what Warwick's own page sends.
+func TestAddParticipationPointPostsWarwickFields(t *testing.T) {
+	var seen url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/admin/ClassAttendance/AddParticipationPoint", r.URL.Path)
+		assert.Equal(t, "application/x-www-form-urlencoded; charset=UTF-8", r.Header.Get("Content-Type"))
+		require.NoError(t, r.ParseForm())
+		seen = r.PostForm
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"Item1":true,"Item2":""}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClassroomClient(nil)
+	client.SetBaseURL(server.URL)
+
+	err := client.doAddParticipationPoint(
+		context.Background(),
+		"session-cookie",
+		domain.GivePointTarget{AttendanceID: "67", WarwickCourseID: "2317"},
+		"1bdf29d1-cbaf-4a4a-83f5-aa6b4041ef88",
+		2,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "1bdf29d1-cbaf-4a4a-83f5-aa6b4041ef88", seen.Get("studentID"))
+	assert.Equal(t, "67", seen.Get("attendanceID"))
+	assert.Equal(t, "2317", seen.Get("courseID"))
+	assert.Equal(t, "2", seen.Get("point"))
+}
+
+// TestAddParticipationPointSurfacesWarwickRejection proves Item1=false becomes
+// an error carrying Warwick's own message, so the teacher sees the real reason.
+func TestAddParticipationPointSurfacesWarwickRejection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"Item1":false,"Item2":"Student did not check in"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClassroomClient(nil)
+	client.SetBaseURL(server.URL)
+
+	err := client.doAddParticipationPoint(
+		context.Background(), "session-cookie",
+		domain.GivePointTarget{AttendanceID: "67", WarwickCourseID: "2317"}, "guid-a", 1,
+	)
+
+	var rejected *domain.GivePointRejectedError
+	require.ErrorAs(t, err, &rejected)
+	assert.Equal(t, "Student did not check in", rejected.Message)
+}
+
+// TestAddParticipationPointRejectsAuthPage proves an expired session is not
+// reported as a successful award.
+func TestAddParticipationPointRejectsAuthPage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<html><form><input type="password" name="password"></form>Sign In</html>`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClassroomClient(nil)
+	client.SetBaseURL(server.URL)
+
+	err := client.doAddParticipationPoint(
+		context.Background(), "session-cookie",
+		domain.GivePointTarget{AttendanceID: "67", WarwickCourseID: "2317"}, "guid-a", 1,
+	)
+
+	require.Error(t, err)
 }
