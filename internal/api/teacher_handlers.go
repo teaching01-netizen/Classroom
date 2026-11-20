@@ -533,3 +533,79 @@ func getAbsenceDashboardHandler(ts *service.TeacherService) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, successResponse(report))
 	}
 }
+
+// newGivePointsHandler awards participation points for one student on one
+// session. It is a constructor over a function value so the route and the
+// handler can be wired (and tested) without a full TeacherService.
+func newGivePointsHandler(
+	give func(context.Context, service.GivePointsRequest) (*service.GivePointsResult, error),
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		courseID := chi.URLParam(r, "courseId")
+		sessionID := chi.URLParam(r, "sessionId")
+		studentID := chi.URLParam(r, "studentId")
+		if courseID == "" || sessionID == "" || studentID == "" {
+			writeJSON(w, http.StatusBadRequest, errorResponse("courseId, sessionId and studentId are required"))
+			return
+		}
+
+		var req domain.GivePointsRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))
+			return
+		}
+
+		result, err := give(r.Context(), service.GivePointsRequest{
+			CourseID:       courseID,
+			SessionID:      sessionID,
+			StudentID:      studentID,
+			Points:         req.Points,
+			ExpectedPoints: req.ExpectedPoints,
+		})
+		if err != nil {
+			var ineligible *service.ErrPointsNotEligible
+			var conflict *service.ErrPointsConflict
+			var mismatch *service.ErrPointsTargetMismatch
+			var invalid *service.ErrInvalidPoints
+			var rejected *domain.GivePointRejectedError
+			var notFound *service.ErrStudentNotFound
+			var upstream *service.ErrCheckinUpstream
+			switch {
+			case errors.As(err, &invalid):
+				writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
+			case errors.Is(err, domain.ErrGivePointTargetUnavailable):
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse(
+					"Humanix did not expose the attendance id for this session; nothing was written",
+				))
+			case errors.As(err, &ineligible):
+				writeJSON(w, http.StatusConflict, errorResponse(err.Error()))
+			case errors.As(err, &conflict):
+				writeJSON(w, http.StatusConflict, errorResponse(err.Error()))
+			case errors.As(err, &mismatch):
+				writeJSON(w, http.StatusConflict, errorResponse(err.Error()))
+			case errors.As(err, &notFound):
+				writeJSON(w, http.StatusNotFound, errorResponse(err.Error()))
+			case errors.As(err, &rejected):
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse(err.Error()))
+			case errors.As(err, &upstream):
+				writeJSON(w, http.StatusBadGateway, errorResponse("Humanix rejected the participation point"))
+			default:
+				writeJSON(w, http.StatusInternalServerError, errorResponse(err.Error()))
+			}
+			return
+		}
+
+		writeJSON(w, http.StatusOK, successResponse(domain.GivePointsResponse{
+			StudentID:              studentID,
+			PointsAwarded:          result.PointsAwarded,
+			ParticipationPoints:    result.ParticipationPoints,
+			SnapshotVersion:        result.SnapshotVersion,
+			SnapshotRefreshPending: result.RefreshPending,
+		}))
+	}
+}
+
+// givePointsHandler binds the production service to the handler.
+func givePointsHandler(ts *service.TeacherService) http.HandlerFunc {
+	return newGivePointsHandler(ts.GivePoints)
+}
