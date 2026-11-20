@@ -312,6 +312,7 @@ func (c *ClassroomClient) fetchSessionDetail(ctx context.Context, cookie, sessio
 			CheckedIn:           row.StudentCheckIn,
 			CheckedInAt:         nil,
 			ParticipationPoints: row.StudentPPoint,
+			CanGivePoint:        row.StudentGivePoint,
 		})
 	}
 
