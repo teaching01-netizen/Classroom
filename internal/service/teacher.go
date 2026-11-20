@@ -97,6 +97,49 @@ type ErrCheckinUpstream struct {
 func (e *ErrCheckinUpstream) Error() string { return fmt.Sprintf("Humanix check-in write: %v", e.Err) }
 func (e *ErrCheckinUpstream) Unwrap() error { return e.Err }
 
+// ErrPointsNotEligible reports that Warwick's own flag says this student cannot
+// receive points on this session.
+type ErrPointsNotEligible struct {
+	StudentID string
+}
+
+func (e *ErrPointsNotEligible) Error() string {
+	return fmt.Sprintf("student %s is not eligible for participation points on this session", e.StudentID)
+}
+
+// ErrPointsConflict reports that the roster total moved since the client read
+// it. Retrying with the fresh total is safe; retrying blindly is not.
+type ErrPointsConflict struct {
+	CurrentPoints int
+}
+
+func (e *ErrPointsConflict) Error() string {
+	return fmt.Sprintf("participation points changed to %d", e.CurrentPoints)
+}
+
+// ErrInvalidPoints reports an out-of-range award.
+type ErrInvalidPoints struct {
+	Points int
+}
+
+func (e *ErrInvalidPoints) Error() string {
+	return fmt.Sprintf("points must be between %d and %d, got %d", MinPointsAward, MaxPointsAward, e.Points)
+}
+
+// ErrPointsTargetMismatch reports that the scraped check-in page belongs to a
+// different Warwick course than the route claims. Nothing was written.
+type ErrPointsTargetMismatch struct {
+	RouteCourseID string
+	PageCourseID  string
+}
+
+func (e *ErrPointsTargetMismatch) Error() string {
+	return fmt.Sprintf(
+		"check-in page reports course %s but the route says %s",
+		e.PageCourseID, e.RouteCourseID,
+	)
+}
+
 // TeacherService owns the business logic for teacher-facing operations.
 // It sits between the HTTP handlers and the Warwick client, providing
 // a testable layer that can be mocked independently of HTTP concerns.
@@ -372,10 +415,153 @@ func (s *TeacherService) ToggleCheckin(
 	return response, nil
 }
 
+const (
+	// MinPointsAward and MaxPointsAward bound a single award so a typo cannot
+	// multiply a student's total.
+	MinPointsAward = 1
+	MaxPointsAward = 10
+)
+
+// GivePointsRequest describes one participation-point award.
+type GivePointsRequest struct {
+	CourseID       string
+	SessionID      string
+	StudentID      string
+	Points         int
+	ExpectedPoints *int
+}
+
+// GivePointsResult is the outcome of a successful award.
+type GivePointsResult struct {
+	PointsAwarded       int
+	ParticipationPoints int
+	SnapshotVersion     int64
+	RefreshPending      bool
+}
+
+// GivePoints awards points on the authoritative roster, then reconciles the
+// session snapshot. A successful Warwick write stays successful when the
+// reconciliation is delayed; RefreshPending tells clients to keep repairing.
+// The returned total is re-read from the roster rather than computed, so an
+// upstream clamp or business rule is reported as it actually landed.
+func (s *TeacherService) GivePoints(ctx context.Context, req GivePointsRequest) (*GivePointsResult, error) {
+	if req.Points < MinPointsAward || req.Points > MaxPointsAward {
+		return nil, &ErrInvalidPoints{Points: req.Points}
+	}
+	writer, ok := s.checkins.(domain.PointsWriter)
+	if !ok {
+		return nil, errors.New("points writer not configured")
+	}
+	if s.mutator == nil {
+		return nil, errors.New("checkin mutator not configured")
+	}
+
+	lock, err := s.mutator.AcquireCheckinLock(ctx, req.SessionID, req.StudentID)
+	if err != nil {
+		return nil, fmt.Errorf("give points lock: %w", err)
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := lock.Release(releaseCtx); err != nil {
+			slog.Warn("give points lock release failed", "error", err)
+		}
+	}()
+
+	current, err := s.currentCheckinState(ctx, CheckinRequest{
+		CourseID:  req.CourseID,
+		SessionID: req.SessionID,
+		StudentID: req.StudentID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !current.canGivePoint {
+		return nil, &ErrPointsNotEligible{StudentID: req.StudentID}
+	}
+	if req.ExpectedPoints != nil && *req.ExpectedPoints != current.participationPoints {
+		return nil, &ErrPointsConflict{CurrentPoints: current.participationPoints}
+	}
+
+	target, err := writer.FetchGivePointTarget(ctx, req.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("give points target: %w", err)
+	}
+	if target.WarwickCourseID != req.CourseID {
+		return nil, &ErrPointsTargetMismatch{
+			RouteCourseID: req.CourseID,
+			PageCourseID:  target.WarwickCourseID,
+		}
+	}
+
+	if err := writer.AddParticipationPoint(ctx, target, current.upstreamStudentID, req.Points); err != nil {
+		var rejected *domain.GivePointRejectedError
+		if errors.As(err, &rejected) {
+			return nil, rejected
+		}
+		return nil, &ErrCheckinUpstream{Err: err}
+	}
+
+	before := current.participationPoints
+	result := &GivePointsResult{
+		PointsAwarded:       req.Points,
+		ParticipationPoints: before + req.Points,
+		SnapshotVersion:     current.snapshotVersion,
+	}
+	if !s.snapshotMode {
+		// Live mode: the write already landed upstream, so one re-read reports
+		// the authoritative total. A read failure must not fail the award.
+		if verified, verifyErr := s.currentCheckinState(ctx, CheckinRequest{
+			CourseID:  req.CourseID,
+			SessionID: req.SessionID,
+			StudentID: req.StudentID,
+		}); verifyErr == nil {
+			result.ParticipationPoints = verified.participationPoints
+			result.SnapshotVersion = verified.snapshotVersion
+		}
+		return result, nil
+	}
+
+	snapshots, ok := s.reader.(snapshotAwareReader)
+	if !ok {
+		result.RefreshPending = true
+		return result, nil
+	}
+	ref := snapshots.SessionRef(req.CourseID, req.SessionID)
+	pending := s.refresher.SetDueNow(ctx, ref) != nil
+
+	refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	refreshErr := s.refresher.RefreshNow(refreshCtx, ref)
+	cancel()
+	if refreshErr != nil {
+		pending = true
+	} else {
+		verified, err := s.currentCheckinState(ctx, CheckinRequest{
+			CourseID:  req.CourseID,
+			SessionID: req.SessionID,
+			StudentID: req.StudentID,
+		})
+		if err != nil {
+			pending = true
+		} else {
+			result.ParticipationPoints = verified.participationPoints
+			result.SnapshotVersion = verified.snapshotVersion
+			pending = pending || verified.participationPoints != before+req.Points
+		}
+	}
+	if pending {
+		_ = s.refresher.SetDueNow(ctx, ref)
+	}
+	result.RefreshPending = pending
+	return result, nil
+}
+
 type currentCheckinState struct {
-	upstreamStudentID string
-	checkedIn         bool
-	snapshotVersion   int64
+	upstreamStudentID   string
+	checkedIn           bool
+	participationPoints int
+	canGivePoint        bool
+	snapshotVersion     int64
 }
 
 func (s *TeacherService) currentCheckinState(ctx context.Context, req CheckinRequest) (*currentCheckinState, error) {
@@ -424,9 +610,11 @@ func (s *TeacherService) currentCheckinState(ctx context.Context, req CheckinReq
 	for _, student := range detail.Students {
 		if student.StudentID == upstreamStudentID {
 			return &currentCheckinState{
-				upstreamStudentID: upstreamStudentID,
-				checkedIn:         student.CheckedIn,
-				snapshotVersion:   version,
+				upstreamStudentID:   upstreamStudentID,
+				checkedIn:           student.CheckedIn,
+				participationPoints: student.ParticipationPoints,
+				canGivePoint:        student.CanGivePoint,
+				snapshotVersion:     version,
 			}, nil
 		}
 	}

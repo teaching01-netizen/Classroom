@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -87,6 +88,65 @@ type StudentCheckin struct {
 	CheckedIn           bool    `json:"checked_in"`
 	CheckedInAt         *string `json:"checked_in_at"`
 	ParticipationPoints int     `json:"participation_points"`
+	// CanGivePoint mirrors Warwick's StudentGivePoint flag: the server-side
+	// eligibility switch for awarding participation points on this session.
+	CanGivePoint bool `json:"can_give_point"`
+}
+
+// GivePointTarget carries the Warwick identifiers required to award
+// participation points. They are scraped per session from Warwick's own
+// check-in page, because no API exposes them.
+type GivePointTarget struct {
+	AttendanceID    string
+	WarwickCourseID string
+}
+
+// ErrGivePointTargetUnavailable means Warwick's check-in page no longer exposes
+// the template that carries the attendance id. Awards are rejected before any
+// write; the page must be re-reconnoitred rather than guessed at.
+var ErrGivePointTargetUnavailable = &FetchError{
+	Kind:    ErrKindInvalidPayload,
+	Message: "give-point target unavailable",
+}
+
+// GivePointRejectedError reports a business rejection from Warwick's
+// AddParticipationPoint endpoint (Item1 == false). Message is Warwick's Item2.
+type GivePointRejectedError struct {
+	Message string
+}
+
+func (e *GivePointRejectedError) Error() string {
+	if e.Message == "" {
+		return "Humanix rejected the participation point"
+	}
+	return "Humanix rejected the participation point: " + e.Message
+}
+
+// GivePointsRequest is the HTTP body for
+// POST /api/teacher/courses/{courseId}/sessions/{sessionId}/students/{studentId}/points
+type GivePointsRequest struct {
+	Points int `json:"points"`
+	// ExpectedPoints is the total the client displayed. When present and stale,
+	// the award is rejected instead of applied twice.
+	ExpectedPoints *int `json:"expectedPoints,omitempty"`
+}
+
+// GivePointsResponse is the HTTP response body for the points endpoint.
+type GivePointsResponse struct {
+	StudentID              string `json:"studentId"`
+	PointsAwarded          int    `json:"pointsAwarded"`
+	ParticipationPoints    int    `json:"participationPoints"`
+	SnapshotVersion        int64  `json:"snapshotVersion"`
+	SnapshotRefreshPending bool   `json:"snapshotRefreshPending"`
+}
+
+// PointsWriter is the optional capability for awarding participation points.
+// It lives in the domain package so the Warwick client can assert it at compile
+// time and the service can assert it at runtime, which lets both packages be
+// built independently.
+type PointsWriter interface {
+	FetchGivePointTarget(ctx context.Context, sessionID string) (GivePointTarget, error)
+	AddParticipationPoint(ctx context.Context, target GivePointTarget, studentGUID string, points int) error
 }
 
 type TeacherCoursesResponse struct {

@@ -600,6 +600,7 @@ func (s *SnapshotSource) fetchSession(
 			AvatarURL:           row.StudentImg,
 			CheckedIn:           row.StudentCheckIn,
 			ParticipationPoints: row.StudentPPoint,
+			CanGivePoint:        row.StudentGivePoint,
 		})
 	}
 	result.Value = &domain.SessionDetail{
