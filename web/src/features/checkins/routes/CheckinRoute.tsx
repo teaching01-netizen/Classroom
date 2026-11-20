@@ -1,16 +1,17 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { courseIdSchema } from '@/features/courses'
 import { sessionIdSchema, useCourseSessionsQuery } from '@/features/sessions'
 import { useCheckinMutation, useCheckinsQuery, useSessionSnapshotQuery } from '../api/checkin.queries'
 import type { StudentCheckin, StudentId } from '../api/checkin.schemas'
+import { useGivePointsMutation } from '../api/points.queries'
 import { useSessionQr } from '../hooks/useSessionQr'
 import { checkinsToCsv, downloadCsv } from '../lib/csv'
+import { GivePointsDialog } from '../components/GivePointsDialog'
 import { QrDialog } from '../components/QrDialog'
+import { StudentCheckinTable } from '../components/StudentCheckinTable'
 import { AsyncPage } from '@/shared/ui/AsyncPage'
-import { Avatar } from '@/shared/ui/Avatar'
 import { BackLink } from '@/shared/ui/BackLink'
-import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
 import { Field } from '@/shared/ui/Field'
 import { FreshnessBadge } from '@/shared/ui/FreshnessBadge'
@@ -19,7 +20,6 @@ import { PageHeader } from '@/shared/ui/PageHeader'
 import { Pagination } from '@/shared/ui/Pagination'
 import { Select } from '@/shared/ui/Select'
 import { StatsGrid } from '@/shared/ui/StatsGrid'
-import { Table, TableContainer } from '@/shared/ui/Table'
 import { getErrorMessage } from '@/shared/lib/errors'
 import { useConnectionStore } from '@/shared/realtime/connection-store'
 import { useToast } from '@/shared/ui/Toast'
@@ -48,6 +48,10 @@ export function Component() {
   const courseQuery = useCourseSessionsQuery(courseId)
   const qr = useSessionQr(courseId, sessionId)
   const checkinMutation = useCheckinMutation(courseId, sessionId)
+  const givePoints = useGivePointsMutation(courseId, sessionId)
+  const [pointsTarget, setPointsTarget] = useState<StudentCheckin | null>(null)
+  // The dialog restores focus to the element that opened it, so we deliberately
+  // do not call .focus() ourselves.
   const connected = useConnectionStore((state) => state.status === 'connected')
   const { announce } = useToast()
 
@@ -107,6 +111,25 @@ export function Component() {
           checkedIn ? 'Check-in confirmed in Humanix.' : 'Check-in removed from Humanix.',
           'success',
         ),
+      },
+    )
+  }
+  const handleGivePoints = (points: number) => {
+    if (pointsTarget === null) {
+      return
+    }
+    givePoints.mutate(
+      {
+        studentId: pointsTarget.student_id,
+        points,
+        expectedPoints: pointsTarget.participation_points,
+      },
+      {
+        onSuccess: (result) => {
+          announce(`${result.pointsAwarded} point(s) awarded to ${pointsTarget.name}.`, 'success')
+          setPointsTarget(null)
+        },
+        onError: (error) => announce(getErrorMessage(error), 'error'),
       },
     )
   }
@@ -188,7 +211,9 @@ export function Component() {
             <StudentCheckinTable
               students={pagedStudents}
               pendingStudentId={checkinMutation.isPending ? checkinMutation.variables.studentId : undefined}
+              pendingPointsStudentId={givePoints.isPending ? givePoints.variables.studentId : undefined}
               onToggle={handleToggle}
+              onGivePoints={setPointsTarget}
             />
             <Pagination
               page={safePage}
@@ -216,64 +241,14 @@ export function Component() {
         upstreamVerifiedAt={qr.upstreamVerifiedAt}
         upstreamVerificationError={qr.upstreamVerificationError}
       />
+      <GivePointsDialog
+        open={pointsTarget !== null}
+        studentName={pointsTarget?.name ?? ''}
+        pending={givePoints.isPending}
+        errorMessage={givePoints.error === null ? undefined : getErrorMessage(givePoints.error)}
+        onClose={() => setPointsTarget(null)}
+        onSubmit={handleGivePoints}
+      />
     </section>
-  )
-}
-
-function StudentCheckinTable({
-  students,
-  pendingStudentId,
-  onToggle,
-}: {
-  readonly students: readonly StudentCheckin[]
-  readonly pendingStudentId?: StudentId | undefined
-  readonly onToggle: (studentId: StudentId, checked: boolean) => void
-}) {
-  return (
-    <TableContainer>
-      <Table>
-        <thead>
-          <tr>
-            <th scope="col">Student</th>
-            <th className="is-secondary" scope="col">School</th>
-            <th className="is-mobile-secondary" scope="col">Status</th>
-            <th className="is-secondary" scope="col">Points</th>
-            <th scope="col"><span className="sr-only">Action</span></th>
-          </tr>
-        </thead>
-        <tbody>
-          {students.map((student) => (
-            <tr key={student.student_id}>
-              <td>
-                <span className="student-cell">
-                  <Avatar name={student.name} src={student.avatar_url} />
-                  <span>
-                    <strong>{student.nickname || student.name}</strong>
-                    <span>{student.student_id}</span>
-                  </span>
-                </span>
-              </td>
-              <td className="is-secondary">{student.school || '—'}</td>
-              <td className="is-mobile-secondary">
-                <Badge tone={student.checked_in ? 'success' : 'neutral'}>
-                  {student.checked_in ? 'Checked in' : 'Not checked in'}
-                </Badge>
-              </td>
-              <td className="is-secondary">{student.participation_points}</td>
-              <td>
-                <Button
-                  loading={pendingStudentId === student.student_id}
-                  size="sm"
-                  variant={student.checked_in ? 'secondary' : 'primary'}
-                  onClick={() => onToggle(student.student_id, !student.checked_in)}
-                >
-                  {student.checked_in ? 'Undo check-in' : 'Check in'}
-                </Button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </Table>
-    </TableContainer>
   )
 }

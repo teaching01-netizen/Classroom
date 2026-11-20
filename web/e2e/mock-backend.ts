@@ -31,7 +31,7 @@ const session = {
   name: 'Architecture workshop',
   date: '2026-02-01',
   checked_in_count: 1,
-  total_students: 2,
+  total_students: 3,
   status: 'active',
 }
 
@@ -45,6 +45,7 @@ const students = [
     checked_in: true,
     checked_in_at: null,
     participation_points: 4,
+    can_give_point: true,
   },
   {
     student_id: 'u456',
@@ -55,6 +56,18 @@ const students = [
     checked_in: false,
     checked_in_at: null,
     participation_points: 1,
+    can_give_point: false,
+  },
+  {
+    student_id: 'u789',
+    name: 'Jordan Lee',
+    nickname: '',
+    school: 'Computer Science',
+    avatar_url: '',
+    checked_in: false,
+    checked_in_at: null,
+    participation_points: 0,
+    can_give_point: true,
   },
 ]
 
@@ -81,6 +94,15 @@ export type MockBackendOptions = {
   readonly exportMode?: AttendanceExportMode
   readonly exportDelayMs?: number
   readonly checkinMode?: 'success' | 'failure'
+  readonly pointsMode?: PointsMode
+}
+
+export type PointsMode = 'success' | 'failure' | 'conflict'
+
+export type PointsRequest = {
+  readonly studentId: string
+  readonly points: number
+  readonly expectedPoints?: number
 }
 
 export type CheckinRequest = {
@@ -92,6 +114,7 @@ export type CheckinRequest = {
 
 export type MockBackendController = {
   readonly checkinRequests: CheckinRequest[]
+  readonly pointsRequests: PointsRequest[]
   qrCheckin(studentId: string, checkedIn: boolean): void
 }
 
@@ -125,6 +148,7 @@ export async function mockBackend(
   const roster = students.map((student) => ({ ...student }))
   const state = { attendancePresent: false, catalogSynced: false }
   const checkinRequests: CheckinRequest[] = []
+  const pointsRequests: PointsRequest[] = []
   let browserSocket: WebSocketRoute | undefined
   await page.routeWebSocket('**/ws', (socket) => {
     browserSocket = socket
@@ -283,8 +307,48 @@ export async function mockBackend(
       })
       return
     }
-    if (path.endsWith('/toggle-checkin')) {
-      const body = request.postDataJSON()
+    const pointsMatch = path.match(
+      /^\/api\/teacher\/courses\/CS101\/sessions\/S1\/students\/([^/]+)\/points$/,
+    )
+    if (pointsMatch !== null && request.method() === 'POST') {
+      const studentId = decodeURIComponent(pointsMatch[1] ?? '')
+      const body = request.postDataJSON() as { points: number; expectedPoints?: number }
+      pointsRequests.push({ studentId, ...body })
+      if (options.pointsMode === 'failure') {
+        await route.fulfill({
+          status: 422,
+          json: {
+            success: false,
+            error: 'Humanix rejected the participation point: Student did not check in',
+          },
+        })
+        return
+      }
+      if (options.pointsMode === 'conflict') {
+        await route.fulfill({
+          status: 409,
+          json: { success: false, error: 'participation points changed to 9' },
+        })
+        return
+      }
+      const student = roster.find((item) => item.student_id === studentId)
+      if (student === undefined) {
+        await route.fulfill({ status: 404, json: { success: false, error: 'Student not found' } })
+        return
+      }
+      student.participation_points += body.points
+      await route.fulfill({
+        json: envelope({
+          studentId,
+          pointsAwarded: body.points,
+          participationPoints: student.participation_points,
+          snapshotVersion: 7,
+          snapshotRefreshPending: false,
+        }),
+      })
+      return
+    }
+    if (path.endsWith('/toggle-checkin')) {      const body = request.postDataJSON()
       await route.fulfill({
         json: envelope({
           student_id: body.student_id,
@@ -397,6 +461,7 @@ export async function mockBackend(
 
   return {
     checkinRequests,
+    pointsRequests,
     qrCheckin(studentId, checkedIn) {
       const student = roster.find((item) => item.student_id === studentId)
       if (student === undefined) {

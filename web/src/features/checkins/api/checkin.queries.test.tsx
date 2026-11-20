@@ -27,6 +27,7 @@ const uncheckedDetail: SessionDetail = {
     avatar_url: '',
     checked_in: false,
     participation_points: 0,
+    can_give_point: false,
   }],
 }
 

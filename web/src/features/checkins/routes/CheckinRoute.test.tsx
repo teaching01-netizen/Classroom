@@ -28,6 +28,15 @@ vi.mock('../api/checkin.queries', () => ({
   }),
 }))
 
+vi.mock('../api/points.queries', () => ({
+  useGivePointsMutation: () => ({
+    mutate: vi.fn(),
+    isPending: false,
+    error: null,
+    variables: undefined,
+  }),
+}))
+
 vi.mock('../hooks/useSessionQr', () => ({
   useSessionQr: (courseId: string, sessionId: string) => {
     useSessionQrMock(courseId, sessionId)

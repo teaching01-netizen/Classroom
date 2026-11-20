@@ -13,6 +13,9 @@ export const studentCheckinSchema = z.object({
   checked_in: z.boolean(),
   checked_in_at: z.string().nullable().optional(),
   participation_points: z.number().int().default(0),
+  // Old snapshot payloads predate this field and render no give-points
+  // control: eligibility defaults to false (fail closed).
+  can_give_point: z.boolean().default(false),
 })
 
 export const sessionDetailSchema = sessionSummarySchema.extend({
@@ -34,6 +37,14 @@ export const checkinMutationSchema = z.object({
   checkedIn: z.boolean(),
   snapshotVersion: z.number().int(),
   refreshPending: z.boolean(),
+})
+
+export const givePointsResultSchema = z.object({
+  studentId: z.string(),
+  pointsAwarded: z.number().int().nonnegative(),
+  participationPoints: z.number().int().nonnegative(),
+  snapshotVersion: z.number().int(),
+  snapshotRefreshPending: z.boolean().default(false),
 })
 
 export type StudentCheckin = z.infer<typeof studentCheckinSchema>
